@@ -1686,8 +1686,14 @@ def test_provenance_guard_leaves_before_images_and_rollback_alone():
 
 # GTX-125: the bug class is an omitted construction site, not a wrong renderer, so a behavioral
 # per-sink list cannot close it -- a sink added tomorrow is not in that list. This guard is the
-# static half: inside the modules GTX-125 owns, a path-typed expression may not be interpolated
-# into an f-string unless it goes through `format_path_for_display`. See AD-34.
+# static half: in every production module, a path-typed expression may not be interpolated into
+# an f-string unless it goes through `format_path_for_display`. See AD-34.
+#
+# GTX-212 widened the scan from the document-path modules to all of them and retired the last
+# whole-module exemptions with it, so what is left below is per-expression and machine-only.
+# The scan carries no module skip at all now: `_display_guard_scan` reports which modules it
+# read, and the production test asserts that set is every source module, so reintroducing a
+# skip fails the guard instead of silently disabling it for one file.
 #
 # Names treated as path-typed. Deliberately a name heuristic rather than inferred types: the
 # suite has no type resolver, and every sink in the owned modules spells its path with one of
@@ -1726,26 +1732,27 @@ _MODULE_PATH_BEARING_NAMES: dict[str, frozenset[str]] = {
         }
     ),
     "cli/commands/reconcile.py": frozenset({"orphan", "filename"}),
-}
-
-# Modules outside the guard's ownership, each with the reason it is not scanned. Keyed on the
-# module's path under `src/doc_lattice`, not its basename: two packages here already hold a
-# `reconcile.py`, and a basename key would exempt a future sink in the wrong one silently.
-#
-# GTX-209 retired the `reconcile_transaction.py` and `persistence.py` entries GTX-125 parked
-# here, and `path_utils.py` with them: the reconcile transaction layer embeds `safe_resolve`'s
-# containment ValueError verbatim, so that message is a human-facing sink like any other and is
-# display-spelled now rather than exempted. All three are scanned; what remains for them is
-# per-expression below.
-_DISPLAY_GUARD_EXEMPT_MODULES = {
-    # Not document paths: the config file the user pointed at, the tool's own cache location,
-    # and a `--docs-root` argument echoed back before any document is read. These carry no
-    # repo-controlled document filename, so GTX-125 leaves their spelling alone and GTX-209
-    # keeps them out. The cache store's own diagnostic interpolates a cache path separately
-    # from the durable-write note GTX-209 did move, and stays GTX-212's boundary.
-    "config.py",
-    "cache/store.py",
-    "cli/commands/init.py",
+    # GTX-212: the config sinks. `config_path` is the `--config` argument, `project_root` and
+    # `safe` are resolved locations, and `entry` is one recorded `docs_roots` string. None of
+    # them reads as a path outside this module -- `entry` in particular is a journal or cache
+    # record elsewhere -- which is why they are scoped here rather than added globally.
+    # `source` is deliberately absent: it is already global, and the validation header keeps it
+    # inside the guarded expression rather than behind the `where` alias it used to bind.
+    "config.py": frozenset({"config_path", "entry", "project_root", "safe"}),
+    # GTX-212: the `init` sinks. `root` is one `--docs-root` argument, and `target` plus
+    # `target_name` are the config file being scaffolded.
+    #
+    # `target.name` is `DEFAULT_CONFIG_NAME`, a compile-time constant that carries no
+    # user-controlled byte, so classifying it buys no safety today; it is classified anyway
+    # because the alternative is unenforceable. Display exemptions are keyed by (module,
+    # qualified function, expression), and `register_init.init` interpolated `target.name`
+    # three times -- once as a staged-file prefix and twice into human messages -- so a single
+    # exemption written for the prefix would have covered both human sinks with it. The prefix
+    # now spells `DEFAULT_CONFIG_NAME` directly instead, leaving `target` classified and every
+    # remaining use of it human-facing and wrapped. What this buys is the next edit: widening
+    # `target` from the basename to the full path, or letting the name come from a flag, is
+    # caught here rather than passing silently.
+    "cli/commands/init.py": frozenset({"root", "target", "target_name"}),
 }
 
 # Individual expressions inside scanned modules that are not paths despite the name. Every entry
@@ -2017,6 +2024,101 @@ def test_path_interpolation_detector_leaves_already_rendered_detail_alone():
     assert _path_interpolations(source, "validation_render.py") == []
 
 
+def _production_modules() -> set[str]:
+    """Every source module's path under ``src/doc_lattice``."""
+    return {file.relative_to(SRC_DIR).as_posix() for file in _source_files()}
+
+
+def _display_guard_scan(
+    exempt_modules: frozenset[str] = frozenset(),
+) -> tuple[list[tuple[str, str, str, int]], set[str]]:
+    """Report path-bearing names reaching human text, and which modules were read.
+
+    The scanned-module set is returned rather than assumed because the guard has no
+    whole-module exemption any more, and "the scan ran over every module" is the property that
+    has to be checked rather than trusted. GTX-212 retired the last three entries; before it,
+    re-adding a module name silently switched the scan off for that file and every production
+    assertion still passed.
+
+    Args:
+        exempt_modules: Modules to skip. Production callers pass nothing. It exists only so the
+            self-test below can reintroduce a whole-module exemption and prove the coverage
+            assertion catches it.
+
+    Returns:
+        Every reported sink as ``(module, function, label, line)``, and the set of modules the
+        scan actually read.
+    """
+    reported: list[tuple[str, str, str, int]] = []
+    scanned: set[str] = set()
+    for file in _source_files():
+        module = file.relative_to(SRC_DIR).as_posix()
+        if module in exempt_modules:
+            continue
+        scanned.add(module)
+        source = file.read_text(encoding="utf-8")
+        for function, label, line in _qualified_interpolations(source, module):
+            reported.append((module, function, label, line))
+    return reported, scanned
+
+
+@pytest.mark.parametrize(
+    ("module", "alias"),
+    [
+        ("config.py", "config_path"),
+        ("config.py", "entry"),
+        ("config.py", "project_root"),
+        ("config.py", "safe"),
+        ("cli/commands/init.py", "root"),
+        ("cli/commands/init.py", "target"),
+        ("cli/commands/init.py", "target_name"),
+    ],
+)
+def test_path_interpolation_detector_sees_each_alias_gtx_212_classified(module, alias):
+    """Every name GTX-212 added is really classified, and only in its own module.
+
+    Routing the eight sinks through the helper is worth nothing if the detector cannot see the
+    names they spell: an unwrapped reintroduction would pass silently, which is the state this
+    issue found. Each entry is driven positively, negatively against the global vocabulary, and
+    once more wrapped, so a typo in the set fails here rather than going quiet.
+    """
+    bare = f'msg = f"at {{{alias}}}"'
+    assert _path_interpolations(bare, module) == [(1, alias)]
+    assert _path_interpolations(bare) == [], "the name leaked into the global vocabulary"
+    wrapped = f'msg = f"at {{format_path_for_display({alias})}}"'
+    assert _path_interpolations(wrapped, module) == []
+
+
+def test_path_interpolation_detector_sees_the_scaffolded_config_basename():
+    # `init` names the file it wrote by its basename, which reads as `name` unless the whole
+    # attribute chain is tested. The prefix that used to share this spelling is built from
+    # DEFAULT_CONFIG_NAME now, so no exemption covers these two human sinks.
+    source = 'runtime.stderr.print(f"wrote {escape(target.name)}")'
+    assert _path_interpolations(source, "cli/commands/init.py") == [(1, "target.name")]
+    wrapped = 'runtime.stderr.print(f"wrote {escape(format_path_for_display(target.name))}")'
+    assert _path_interpolations(wrapped, "cli/commands/init.py") == []
+
+
+def test_path_interpolation_detector_is_blind_to_a_path_bound_through_an_alias():
+    """Why the validation header is built in two branches rather than one expression.
+
+    The detector reads names, so binding `where = str(source)` above the f-string removes the
+    path-bearing name before the scan reaches it -- the exact shape `config.py` used, and the
+    reason its header sat unguarded while `source` was already classified. An inline
+    conditional does not fix it either: the scan prunes only the subtree rooted at the helper,
+    so the `is not None` test outside it is still reported. Two branches keep the guarded
+    expression down to the helper call alone.
+    """
+    aliased = 'where = str(source)\nheader = f"invalid config {where}:"'
+    assert _path_interpolations(aliased, "config.py") == []
+
+    inline = 'header = f"invalid config {format_path_for_display(source) if source else NONE}:"'
+    assert _path_interpolations(inline, "config.py") == [(1, "source")]
+
+    branched = 'header = f"invalid config {format_path_for_display(source)}:"'
+    assert _path_interpolations(branched, "config.py") == []
+
+
 def test_display_guard_exemptions_are_all_reachable():
     """Every exemption still names a line the scan actually reports, or it is stale.
 
@@ -2024,37 +2126,45 @@ def test_display_guard_exemptions_are_all_reachable():
     which is the failure mode a line-keyed exemption set has. Checking reachability is what
     keeps the set honest as the modules under it change.
     """
-    reported: set[tuple[str, str, str]] = set()
-    for file in _source_files():
-        module = file.relative_to(SRC_DIR).as_posix()
-        if module in _DISPLAY_GUARD_EXEMPT_MODULES:
-            continue
-        source = file.read_text(encoding="utf-8")
-        for function, label, _line in _qualified_interpolations(source, module):
-            reported.add((module, function, label))
+    sinks, _scanned = _display_guard_scan()
+    reported = {(module, function, label) for module, function, label, _line in sinks}
     stale = sorted(_DISPLAY_GUARD_EXEMPT_EXPRESSIONS - reported)
     assert not stale, f"these display-guard exemptions no longer name a reported sink: {stale}"
 
 
 def test_no_human_facing_sink_interpolates_a_raw_path():
-    offenders: list[str] = []
-    for file in _source_files():
-        module = file.relative_to(SRC_DIR).as_posix()
-        if module in _DISPLAY_GUARD_EXEMPT_MODULES:
-            continue
-        source = file.read_text(encoding="utf-8")
-        for function, label, line in _qualified_interpolations(source, module):
-            if (module, function, label) in _DISPLAY_GUARD_EXEMPT_EXPRESSIONS:
-                continue
-            offenders.append(
-                f"{module}:{line} ({function}) interpolates {{{label}}} without the display "
-                "spelling"
-            )
+    sinks, scanned = _display_guard_scan()
+    missed = sorted(_production_modules() - scanned)
+    assert not missed, (
+        "GTX-212 (AD-34): the display guard scans every production module and holds no "
+        f"whole-module exemption; these were skipped: {missed}"
+    )
+    offenders = [
+        f"{module}:{line} ({function}) interpolates {{{label}}} without the display spelling"
+        for module, function, label, line in sinks
+        if (module, function, label) not in _DISPLAY_GUARD_EXEMPT_EXPRESSIONS
+    ]
     assert not offenders, (
         "GTX-125 (AD-34): route each of these through path_utils.format_path_for_display, or "
-        "add it to the exemptions above with the reason it is not a human-facing document "
-        "path:\n" + "\n".join(offenders)
+        "add the individual expression to the exemptions above with the reason it is not a "
+        "human-facing path. A whole module is not exemptable:\n" + "\n".join(offenders)
     )
+
+
+def test_display_guard_coverage_check_catches_a_reintroduced_module_exemption():
+    """Positive control: a whole-module skip fails the coverage assertion above.
+
+    GTX-212's substance is enforcement rather than routing, and the gap it closes is that the
+    scan used to `continue` past a named module. This drives the same skip the retired set
+    drove and proves the coverage set -- not the offender list -- is what reports it: a module
+    whose sinks are all wrapped contributes no offender either way, so a check written against
+    the offenders alone would pass on the exemption it is meant to catch.
+    """
+    exempt = "config.py"
+    assert exempt in _production_modules(), "the control names a module that no longer exists"
+    _sinks, scanned = _display_guard_scan(frozenset({exempt}))
+    assert exempt not in scanned
+    assert sorted(_production_modules() - scanned) == [exempt]
 
 
 # GTX-219 (AD-37): the display strategy for a YAML load failure's own message. AD-34's rule that

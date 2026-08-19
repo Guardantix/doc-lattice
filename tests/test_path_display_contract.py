@@ -16,6 +16,7 @@ filename) are deliberately excluded: they carry their own encoders, and substitu
 spelling into them breaks attachment semantics, journal validation, or the names on disk.
 """
 
+import errno
 import json
 import re
 import warnings
@@ -26,7 +27,17 @@ from pathlib import Path
 import pytest
 from rich.console import Console
 
-from doc_lattice import discovery, orchestrate, persistence, reconcile, reconcile_transaction
+from doc_lattice import (
+    __version__,
+    discovery,
+    orchestrate,
+    persistence,
+    reconcile,
+    reconcile_transaction,
+)
+from doc_lattice.cache import CacheFile
+from doc_lattice.cache import store as cache_store
+from doc_lattice.cli.commands.init import _init_persistence_error, _validate_init_flags
 from doc_lattice.cli.commands.reconcile import (
     _print_reconcile_lines,
     _recovery_json_payload,
@@ -35,13 +46,16 @@ from doc_lattice.cli.commands.reconcile import (
 )
 from doc_lattice.cli.output import github_annotation, warn_unattachable_annotations
 from doc_lattice.cli.runtime import CliRuntime
+from doc_lattice.config import DEFAULT_CONFIG_NAME, load_config
 from doc_lattice.constants import (
+    CACHE_VERSION,
     PERSISTENCE_TEMP_SUFFIX,
     RECONCILE_AFTER_IMAGE_INFIX,
     RECONCILE_BEFORE_IMAGE_INFIX,
     RECONCILE_JOURNAL_VERSION,
 )
 from doc_lattice.error_types import (
+    ConfigError,
     ProjectError,
     ReconcilePersistenceError,
     exception_details,
@@ -59,6 +73,7 @@ from doc_lattice.reconcile_transaction import (
 )
 from doc_lattice.report_render import render_impact
 from doc_lattice.text_utils import strip_control_chars
+from doc_lattice.yaml_error_render import format_yaml_error_for_display
 
 # One filename carrying the vector from the issue: a colour SGR, then a cursor-up that would
 # overwrite the diagnostic printed above it. Every sink below is driven with this same name so
@@ -128,6 +143,11 @@ def _node(path: Path, node_id: str = "down") -> Node:
         derives_from=(),
         tickets=(),
     )
+
+
+def _empty_cache_file() -> CacheFile:
+    """A cache with no entries: the write sink under test never reads its contents."""
+    return CacheFile(version=CACHE_VERSION, tool_version=__version__, roots=[], entries={})
 
 
 def _parsed(path: Path, node_id: str, refs: tuple[str, ...] = ()) -> ParsedDoc:
@@ -663,6 +683,178 @@ class TestRecoveryReportSinks:
         encoded = json.loads(payload)["scan_errors"]
         assert encoded == [failure.legacy_text]
         assert format_path_for_display(failure.filename) not in encoded[0]
+
+
+class TestConfigSinks:
+    """GTX-212: the config diagnostics reach the display spelling.
+
+    These sinks were exempt as a whole module until now, on the reasoning that they carry no
+    repo-controlled *document* filename. The path in each of them is user-supplied instead --
+    an explicit ``--config``, or a configured docs root -- and README promises escape-free
+    human-facing output rather than escape-free document paths, so the contract applies here
+    unchanged. Every case drives one construction site with a hostile path.
+    """
+
+    def test_missing_explicit_config(self, tmp_path: Path):
+        missing = tmp_path / HOSTILE
+        with pytest.raises(ConfigError) as exc:
+            load_config(missing, tmp_path)
+        _assert_displayed(str(exc.value), missing)
+
+    def test_unreadable_config(self, tmp_path: Path):
+        # A directory passed as --config exists() and then fails the read. The caught OSError
+        # carries the hostile filename itself, so this asserts more than the operand the
+        # message interpolates: the whole line, the interpolated `{exc}` included, is
+        # control-free. That rests on CPython rendering OSError.filename with repr(), which is
+        # observed rather than promised by the language -- a runtime assumption this case is
+        # here to keep tested, since AD-34 does not constrain the implementation.
+        unreadable = tmp_path / HOSTILE
+        unreadable.mkdir()
+        with pytest.raises(ConfigError) as exc:
+            load_config(unreadable, tmp_path)
+        message = str(exc.value)
+        assert "cannot read config" in message
+        _assert_displayed(message, unreadable)
+
+    def test_invalid_config_header_names_the_file(self, tmp_path: Path):
+        source = tmp_path / HOSTILE
+        source.write_text("docs_roots: 3\n", encoding="utf-8")
+        with pytest.raises(ConfigError) as exc:
+            load_config(source, tmp_path)
+        _assert_displayed(str(exc.value), source)
+
+    def test_unparseable_config_wraps_the_path_and_renders_the_detail_once(self, tmp_path: Path):
+        # The composition boundary with GTX-219 (AD-37). Both operands are hostile: the file's
+        # name, which this issue wraps, and the duplicate key the parser echoes, which
+        # `format_yaml_error_for_display` has already spelled. The detail must appear exactly
+        # once -- re-rendering the composed message would quote it a second time and change the
+        # readability cost AD-37 recorded.
+        source = tmp_path / HOSTILE
+        source.write_text('"a\\u001bb": 1\n"a\\u001bb": 2\n', encoding="utf-8")
+        with pytest.raises(ConfigError) as exc:
+            load_config(source, tmp_path)
+
+        message = str(exc.value)
+        cause = exc.value.__cause__
+        assert isinstance(cause, Exception)
+        detail = format_yaml_error_for_display(cause)
+        _assert_displayed(message, source)
+        assert detail in message
+        assert message.count(detail) == 1
+        # Re-rendering would quote the already-quoted detail a second time, which is the exact
+        # spelling asserted absent here rather than left to the count above to imply.
+        assert repr(detail) not in message
+
+    def test_docs_root_escaping_the_project_root(self, tmp_path: Path):
+        # Both operands are hostile: the recorded entry, and the project root it escapes. The
+        # entry is written through YAML's own `\\u` escape because the loader refuses a literal
+        # control byte in the source stream, which is the only way a config can carry one.
+        project = tmp_path / HOSTILE
+        project.mkdir()
+        entry = f"../{HOSTILE.replace('.md', '-outside.md')}"
+        (project / ".doc-lattice.yml").write_text(
+            f"docs_roots: [{json.dumps(entry)}]\n", encoding="utf-8"
+        )
+
+        with pytest.raises(ConfigError) as exc:
+            load_config(None, project)
+
+        message = str(exc.value)
+        assert "resolves outside the project root" in message
+        _assert_displayed(message, entry)
+        _assert_displayed(message, project.resolve())
+
+    def test_docs_root_that_is_neither_a_directory_nor_markdown(self, tmp_path: Path):
+        project = tmp_path / HOSTILE
+        project.mkdir()
+        entry = HOSTILE.replace(".md", ".txt")
+        (project / entry).write_text("x", encoding="utf-8")
+        (project / ".doc-lattice.yml").write_text(
+            f"docs_roots: [{json.dumps(entry)}]\n", encoding="utf-8"
+        )
+
+        with pytest.raises(ConfigError) as exc:
+            load_config(None, project)
+
+        message = str(exc.value)
+        assert "is neither a directory nor a regular '.md' file" in message
+        _assert_displayed(message, entry)
+        _assert_displayed(message, (project / entry).resolve())
+
+    def test_the_recorded_entry_keeps_its_spelling(self, tmp_path: Path):
+        # The entry is handed to the helper as text, never through Path(): a diagnostic that
+        # rejects a configured value has to show the value it rejected, and Path() would
+        # normalize away the trailing separator this one carries.
+        project = tmp_path / "project"
+        project.mkdir()
+        entry = "../outside/"
+        (project / ".doc-lattice.yml").write_text(
+            f"docs_roots: [{json.dumps(entry)}]\n", encoding="utf-8"
+        )
+
+        with pytest.raises(ConfigError) as exc:
+            load_config(None, project)
+
+        assert format_path_for_display(entry) in str(exc.value)
+
+
+class TestCacheStoreSinks:
+    """GTX-212: the cache write warning reaches the display spelling.
+
+    The cache location is derived from the user's cache home and an optional configured
+    ``cache_key``, and the diagnostic is a direct ``sys.stderr.write`` rather than a renderer,
+    so nothing downstream of it could have escaped anything.
+    """
+
+    def test_cache_write_failure_names_the_cache_path(self, tmp_path: Path, monkeypatch, capsys):
+        path = tmp_path / HOSTILE
+        # The OSError names the hostile file itself, so the assertion covers the exception text
+        # this message interpolates as well as its explicit path operand.
+        failure = OSError(errno.EACCES, "Permission denied", str(path))
+
+        def fail_write(*_args, **_kwargs) -> None:
+            raise failure
+
+        monkeypatch.setattr(cache_store, "atomic_replace_bytes", fail_write)
+        cache_store.save_if_changed(path, _empty_cache_file(), None)
+
+        _assert_displayed(capsys.readouterr().err, path)
+
+
+class TestInitSinks:
+    """GTX-212: ``init``'s own path messages reach the display spelling.
+
+    Neither is a live control-byte leak. ``_validate_init_flags`` refuses every control-bearing
+    flag value before the unsafe-root branch is reachable, and the scaffolded filename is a
+    compile-time constant. Both go through the helper so the spelling is centralized and
+    statically visible instead of correct by coincidence of ``!r``, which is what lets the guard
+    see them.
+    """
+
+    def test_unsafe_docs_root_uses_the_helper_spelling(self):
+        # Driven with an ordinary unsafe value on purpose: a control-bearing root exercises the
+        # earlier rejection loop instead, so a hostile case here would assert an unreachable
+        # branch. The spelling is what this pins.
+        entry = "../outside/"
+        with pytest.raises(ConfigError) as exc:
+            _validate_init_flags((entry,), None)
+
+        message = str(exc.value)
+        assert "must be a relative path inside the project" in message
+        assert format_path_for_display(entry) in message
+
+    def test_a_control_bearing_docs_root_is_refused_before_that_branch(self):
+        with pytest.raises(ConfigError) as exc:
+            _validate_init_flags((f"../{HOSTILE}",), None)
+
+        message = str(exc.value)
+        assert "is empty or contains a control character" in message
+        leaked = sorted(char for char in CONTROLS if char in message)
+        assert not leaked, f"the rejection leaked raw control bytes {leaked!r}: {message!r}"
+
+    def test_scaffold_write_failure_names_the_config_file(self):
+        error = _init_persistence_error(DEFAULT_CONFIG_NAME, OSError("publication failed"))
+        assert format_path_for_display(DEFAULT_CONFIG_NAME) in str(error)
 
 
 def test_machine_channels_are_deliberately_untouched(tmp_path: Path):

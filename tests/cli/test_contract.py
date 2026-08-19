@@ -18,6 +18,7 @@ from doc_lattice import __version__
 from doc_lattice.cli import app
 from doc_lattice.cli.runtime import default_runtime
 from doc_lattice.error_types import ConfigError
+from doc_lattice.path_utils import format_path_for_display
 
 from .helpers import _run, runner
 
@@ -704,7 +705,8 @@ def test_multi_line_config_diagnostic_survives_the_stderr_renderer(tmp_path: Pat
 
     assert result.exit_code == 2
     lines = result.stderr.splitlines()
-    assert lines[0] == f"error (CONFIG_ERROR): invalid config {tmp_path / '.doc-lattice.yml'}:"
+    displayed = format_path_for_display(tmp_path / ".doc-lattice.yml")
+    assert lines[0] == f"error (CONFIG_ERROR): invalid config {displayed}:"
     # One line per error, still indented, despite a terminal far narrower than any of them.
     assert len(lines) == 3
     assert all(line.startswith("  ") for line in lines[1:])
@@ -757,8 +759,8 @@ def test_single_line_diagnostic_carries_its_code_beside_the_severity(tmp_path: P
     assert result.exit_code == 2
     assert result.stderr == (
         "error (CONFIG_ERROR): docs_roots entry 'notes.txt' exists but is neither a directory "
-        f"nor a regular '.md' file ({tmp_path / 'notes.txt'}); an existing entry must be one "
-        "or the other\n"
+        f"nor a regular '.md' file ({format_path_for_display(tmp_path / 'notes.txt')}); an "
+        "existing entry must be one or the other\n"
     )
 
 
@@ -808,12 +810,34 @@ def test_check_exits_141_silently_when_its_reader_closes_the_pipe(tmp_path: Path
 _HOSTILE_DOC_NAME = "pwn\x1b[31m\x1b[Aevil.md"
 
 
-def _run_bytes(argv: list[str], cwd: Path) -> subprocess.CompletedProcess[bytes]:
+# GTX-212: the config file and the cache location are user-supplied the way a document filename
+# is repo-controlled, and their modules were exempt from the display guard as a whole until now.
+_HOSTILE_CONFIG_NAME = "cfg\x1b[31m\x1b[Aevil.yml"
+_HOSTILE_CACHE_DIR = "pwn\x1b[31m\x1b[Aevil-cache"
+
+# Every C0 code point plus DEL and the C1 range, which is the width README's escape-free promise
+# covers. A line feed is excluded: a diagnostic may legitimately span lines, and the promise is
+# about what a filename can smuggle into one.
+_FORBIDDEN_CONTROLS = frozenset(chr(code) for code in [*range(0x20), 0x7F, *range(0x80, 0xA0)]) - {
+    "\n"
+}
+
+
+def _assert_control_free(raw: bytes) -> None:
+    """Assert a captured stream carries no code point a terminal acts on."""
+    text = raw.decode("utf-8", errors="surrogateescape")
+    leaked = sorted({char for char in text if char in _FORBIDDEN_CONTROLS})
+    assert not leaked, f"output leaked raw control code points {leaked!r}: {text!r}"
+
+
+def _run_bytes(
+    argv: list[str], cwd: Path, extra_env: dict[str, str] | None = None
+) -> subprocess.CompletedProcess[bytes]:
     """Run one command end to end under NO_COLOR and capture undecoded stdout and stderr."""
     return subprocess.run(  # noqa: S603 - fixed argv and generated script, no untrusted input
         [sys.executable, "-c", "from doc_lattice.cli import main; main()", *argv],
         cwd=cwd,
-        env={**os.environ, "NO_COLOR": "1", "PYTHONPATH": str(_SRC)},
+        env={**os.environ, "NO_COLOR": "1", "PYTHONPATH": str(_SRC), **(extra_env or {})},
         capture_output=True,
         check=False,
     )
@@ -853,6 +877,54 @@ def test_reused_anchor_warning_under_no_color_emits_no_escape_byte(tmp_path: Pat
     assert b"reused anchor in " in completed.stderr  # AD-29: the prefix is load-bearing
     assert b"\x1b" not in completed.stderr
     assert rb"pwn\x1b[31m\x1b[Aevil.md" in completed.stderr
+
+
+@pytest.mark.skipif(os.name != "posix", reason="a filename holding ESC is POSIX-only")
+def test_missing_config_under_no_color_emits_no_escape_byte(tmp_path: Path):
+    # GTX-212's first reproduction. `--config` is user-supplied rather than repo-controlled, and
+    # `config.py` was exempt from the display guard as a whole module, so this printed the raw
+    # bytes: `ESC[A` here overwrites whatever the terminal drew on the line above.
+    completed = _run_bytes(["check", "--config", _HOSTILE_CONFIG_NAME], tmp_path)
+
+    assert completed.returncode == 2
+    assert b"config file not found" in completed.stderr
+    _assert_control_free(completed.stderr)
+    _assert_control_free(completed.stdout)
+    assert rb"cfg\x1b[31m\x1b[Aevil.yml" in completed.stderr
+
+
+@pytest.mark.skipif(os.name != "posix", reason="a filename holding ESC is POSIX-only")
+def test_unparseable_config_under_no_color_emits_no_escape_byte(tmp_path: Path):
+    # GTX-212's second reproduction, and the composition boundary with AD-37: the path is
+    # spelled by this issue's helper and the parser's own message by GTX-219's, in one line.
+    (tmp_path / _HOSTILE_CONFIG_NAME).write_text("docs_roots: [\n", encoding="utf-8")
+
+    completed = _run_bytes(["check", "--config", _HOSTILE_CONFIG_NAME], tmp_path)
+
+    assert completed.returncode == 2
+    assert b"cannot parse config" in completed.stderr
+    _assert_control_free(completed.stderr)
+    assert rb"cfg\x1b[31m\x1b[Aevil.yml" in completed.stderr
+
+
+@pytest.mark.skipif(os.name != "posix", reason="a filename holding ESC is POSIX-only")
+def test_cache_write_warning_under_no_color_emits_no_escape_byte(tmp_path: Path):
+    # The cache path is built from the user's cache home, so a hostile directory there reaches
+    # the one diagnostic `cache/store.py` writes straight to stderr with no renderer in front of
+    # it. The write is made to fail by putting a regular file where the cache home belongs,
+    # which turns the store's own `mkdir` into a NotADirectoryError.
+    docs = tmp_path / "docs"
+    docs.mkdir()
+    (docs / "a.md").write_text("---\nid: a\n---\n# A\n", encoding="utf-8")
+    (tmp_path / ".doc-lattice.yml").write_text("cache_key: slot\n", encoding="utf-8")
+    blocked = tmp_path / _HOSTILE_CACHE_DIR
+    blocked.write_text("a file, not a directory\n", encoding="utf-8")
+
+    completed = _run_bytes(["check"], tmp_path, extra_env={"XDG_CACHE_HOME": str(blocked)})
+
+    assert b"could not write load cache at" in completed.stderr
+    _assert_control_free(completed.stderr)
+    assert rb"pwn\x1b[31m\x1b[Aevil-cache" in completed.stderr
 
 
 @pytest.mark.skipif(os.name != "posix", reason="a filename holding ESC is POSIX-only")
