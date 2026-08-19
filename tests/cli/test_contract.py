@@ -896,6 +896,106 @@ def test_recovery_json_under_no_color_keeps_the_raw_machine_spelling(tmp_path: P
     assert payload["orphans"] == [f"docs/{orphan.name}"]
 
 
+def _run_bytes_under_lever(
+    argv: list[str], cwd: Path, lever_env: dict[str, str]
+) -> subprocess.CompletedProcess[bytes]:
+    """Run one command under exactly one no-color lever and capture undecoded output.
+
+    `_run_bytes` always sets `NO_COLOR`, which would mask the `--no-color` flag it is meant to be
+    compared against. This clears both levers first so the caller's choice is the only one in
+    effect.
+    """
+    env: dict[str, str] = {**os.environ, "PYTHONPATH": str(_SRC)}
+    env.pop("NO_COLOR", None)
+    env.pop("FORCE_COLOR", None)
+    env.update(lever_env)
+    return subprocess.run(  # noqa: S603 - fixed argv and generated script, no untrusted input
+        [sys.executable, "-c", "from doc_lattice.cli import main; main()", *argv],
+        cwd=cwd,
+        env=env,
+        capture_output=True,
+        check=False,
+    )
+
+
+@pytest.mark.skipif(os.name != "posix", reason="a filename holding ESC is POSIX-only")
+@pytest.mark.parametrize(
+    ("lever_argv", "lever_env"),
+    [
+        (["--no-color"], {}),
+        ([], {"NO_COLOR": "1"}),
+    ],
+    ids=["flag", "env"],
+)
+def test_github_annotation_file_is_excluded_from_the_escape_free_promise(
+    tmp_path: Path, lever_argv: list[str], lever_env: dict[str, str]
+):
+    # GTX-214 / AD-38. Every other case in this block asserts that no escape byte survives a
+    # no-color lever; this one asserts that in exactly one channel it must. GitHub resolves an
+    # annotation's `file=` against the document it attaches to, and the workflow-command grammar
+    # substitutes only `%`, `:`, `,`, CR, and LF, so there is no spelling of an ESC it decodes
+    # back to the original filename. Sanitizing here would silently detach the annotation
+    # instead, which is why README names this exclusion rather than making the promise hold.
+    docs = tmp_path / "docs"
+    docs.mkdir()
+    (docs / "up.md").write_text(
+        "---\nid: up\nlayer: design\n---\n# Up {#up-top}\n\n## Sec {#sec}\nbody v2\n",
+        encoding="utf-8",
+    )
+    (docs / _HOSTILE_DOC_NAME).write_text(
+        "---\nid: down\nlayer: design\nderives_from:\n"
+        "  - ref: up#sec\n    seen: staleseenhashstaleseenhashstale00\n---\n# Down\nbody\n",
+        encoding="utf-8",
+    )
+
+    completed = _run_bytes_under_lever(
+        [*lever_argv, "check", "--format", "github"], tmp_path, lever_env
+    )
+
+    assert completed.returncode == 1
+    expected = b"::error file=docs/" + _HOSTILE_DOC_NAME.encode() + b",title=doc-lattice STALE::"
+    assert completed.stdout.startswith(expected)
+    assert b"\x1b" in completed.stdout
+    # The exclusion is exactly this wide: the run's other stream still keeps the guarantee.
+    assert b"\x1b" not in completed.stderr
+
+
+@pytest.mark.skipif(os.name != "posix", reason="a filename holding ESC is POSIX-only")
+@pytest.mark.parametrize(
+    ("lever_argv", "lever_env"),
+    [
+        (["--no-color"], {}),
+        ([], {"NO_COLOR": "1"}),
+    ],
+    ids=["flag", "env"],
+)
+def test_human_check_of_the_same_lattice_stays_escape_free(
+    tmp_path: Path, lever_argv: list[str], lever_env: dict[str, str]
+):
+    # The other half of AD-38's narrowing, on the identical lattice: narrowing the promise for
+    # the annotation channel must not quietly narrow it for the default one. Without this, a
+    # regression that started leaking the filename into human output would still pass the case
+    # above and contradict nothing the suite checks.
+    docs = tmp_path / "docs"
+    docs.mkdir()
+    (docs / "up.md").write_text(
+        "---\nid: up\nlayer: design\n---\n# Up {#up-top}\n\n## Sec {#sec}\nbody v2\n",
+        encoding="utf-8",
+    )
+    (docs / _HOSTILE_DOC_NAME).write_text(
+        "---\nid: down\nlayer: design\nderives_from:\n"
+        "  - ref: up#sec\n    seen: staleseenhashstaleseenhashstale00\n---\n# Down\nbody\n",
+        encoding="utf-8",
+    )
+
+    completed = _run_bytes_under_lever([*lever_argv, "check"], tmp_path, lever_env)
+
+    assert completed.returncode == 1
+    assert b"STALE" in completed.stdout
+    assert b"\x1b" not in completed.stdout
+    assert b"\x1b" not in completed.stderr
+
+
 # GTX-219: a YAML load failure's message is built by `ruamel` rather than by this project, and it
 # echoes the document back at the reader, so these two inspect the raw bytes a terminal receives
 # rather than the decoded text. No POSIX guard is needed, unlike the filename-bearing cases above:

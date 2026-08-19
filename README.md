@@ -266,9 +266,21 @@ example `doc-lattice --no-color check`. Rich also honors the [`NO_COLOR`](https:
 environment variable; `--no-color` is the command-line equivalent. doc-lattice intentionally
 extends the `NO_COLOR` baseline: the standard itself only asks implementers to drop color and
 leaves bold, underline, and italic styling in place, but either lever here means no styling at
-all, so no terminal escape sequence reaches the output under either one, even when a
-terminal-forcing variable is set. This covers every command's output, not just help and
-usage-error text.
+all, so no terminal escape sequence reaches human-facing output under either one, even when a
+terminal-forcing variable is set. This covers every command's human-facing output, not just help
+and usage-error text: reports, warnings, and diagnostics alike.
+
+One machine channel is excluded from that guarantee, deliberately and by name: the `file=` value
+of a `--format github` annotation. GitHub resolves that value against the file the annotation
+attaches to, so the document's repo-relative filename is spelled by the workflow-command grammar
+rather than by the rule above. That grammar substitutes only `%`, `:`, `,`, carriage return, and
+line feed, so a filename carrying a carriage return or a line feed is encoded and reaches you as
+`%0D` or `%0A`. Every other control character passes through raw, `ESC`, tab, `DEL`, and the C1
+range included: none of them has a spelling GitHub decodes back to the original filename, and
+deleting one would map two differently named documents onto a single annotation. Attachment is
+worth more there than styling a channel no terminal renders, so the raw spelling stays. Nothing
+else is excluded: `--format json` keeps the guarantee, because JSON's own encoder escapes control
+characters, and the `check` and `lint` payloads carry no filename at all.
 
 `check` and `lint` also accept `--format human|json|github`. `human` is the default. `github`
 emits one escaped GitHub Actions `::error` workflow command per drift finding or ladder

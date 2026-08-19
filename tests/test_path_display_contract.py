@@ -675,6 +675,41 @@ def test_machine_channels_are_deliberately_untouched(tmp_path: Path):
     assert HOSTILE in line
 
 
+@pytest.mark.parametrize(
+    ("control", "encoded"),
+    [("\r", "%0D"), ("\n", "%0A")],
+    ids=["cr", "lf"],
+)
+def test_annotation_encodes_the_two_controls_the_grammar_defines(
+    tmp_path: Path, control: str, encoded: str
+):
+    # GTX-214 / AD-38. The workflow-command grammar substitutes CR and LF, so these two are the
+    # width of the exception README documents: they never reach the annotation raw. Pinning them
+    # is what keeps that public wording from drifting back to the whole control range, which is
+    # what it first said and what the ESC-only end-to-end case could not have caught.
+    path = tmp_path / f"cr{control}lf.md"
+    line = github_annotation(path, tmp_path, "title", "message")
+
+    assert f"file=cr{encoded}lf.md," in line
+    assert control not in line
+
+
+@pytest.mark.parametrize(
+    "control",
+    ["\x1b", "\t", "\x7f", "\x9b"],
+    ids=["esc", "tab", "del", "c1-csi"],
+)
+def test_annotation_passes_every_other_control_through_raw(tmp_path: Path, control: str):
+    # The other half of the same boundary, and the half that costs something: the grammar has no
+    # substitution for these, so no spelling round-trips and the raw byte is what preserves
+    # attachment. `\x9b` is the single-byte C1 CSI, which some terminals act on exactly as they
+    # do on the two-byte `ESC[`, so the exception is not merely theoretical.
+    path = tmp_path / f"pwn{control}evil.md"
+    line = github_annotation(path, tmp_path, "title", "message")
+
+    assert f"file=pwn{control}evil.md," in line
+
+
 def test_strip_control_chars_is_unchanged():
     """The pre-existing network/init helper keeps deleting controls, and keeps its consumers."""
     # The very ambiguity that disqualified it for path display: two distinct inputs, one output.

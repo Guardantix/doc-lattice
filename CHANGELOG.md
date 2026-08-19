@@ -6,6 +6,25 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Changed
+
+- The `--no-color` / `NO_COLOR` escape-free promise in README.md is narrowed to human-facing
+  output and now names its one exception. No behavior changes: this corrects a documented
+  guarantee that was always broader than the engine kept. A repository holding a document whose
+  *filename* carries a control character other than a carriage return or a line feed has always
+  been able to put that character on stdout through `check --format github` and
+  `lint --format github`, under either lever, because the annotation's `file=` value is what
+  GitHub resolves the attachment against. README promised it could not; AD-34 had excluded that
+  channel since 5.0, so the two documents disagreed from the moment AD-34 landed.
+
+  README's promise gave way rather than the encoder, because no sanitized spelling round-trips
+  back to the original filename and every candidate detaches the annotation instead. AD-38 in
+  ARCHITECTURE.md owns that reasoning and the rejected alternative of refusing such a filename
+  outright; README.md owns the narrowed promise and states the exception's exact width. Nothing
+  else is excluded, `--format json` included. Human output, help, usage errors, warnings, and
+  diagnostics keep the full guarantee. Tests now enforce the exclusion under both levers and pin
+  the carriage-return and line-feed boundary rather than leaving either written down.
+
 ## [5.0.0] - 2026-08-19
 
 ### Migration
