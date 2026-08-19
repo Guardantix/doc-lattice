@@ -364,6 +364,96 @@ selector details, dry-run and JSON output, the durability contract, and recovery
 | `derives_from[].seen` | each edge | The locked upstream hash, or omitted for a never-reconciled (UNRECONCILED) edge. |
 | `tickets` | optional | Issue ids associated with the doc (used by `impact` and `linear`). |
 
+`id`, `title`, each `tickets` entry, `derives_from[].ref`, and `derives_from[].seen` must be
+single-line text carrying no control character. A value that decodes to any C0 code point
+(`U+0000` to `U+001F`, tab, newline, and carriage return included), DEL (`U+007F`), or any C1
+code point (`U+0080` to `U+009F`) fails the load with a `FRONTMATTER_ERROR` naming the key and
+the code point. Every other character is accepted, accented text, CJK, emoji, and a no-break
+space among them. The rule is what carries the `--no-color` promise above into a document's own
+text, as the quoted spelling of a path carries it into a filename: a value reaches your terminal,
+so it cannot carry bytes your terminal acts on. An unknown key that decodes to one is spelled in
+the error rejecting it for the same reason. What the rule is scoped to is a block that loads: a
+block that fails to parse at all is reported through the YAML parser's own message, which quotes
+the source line it choked on, and that path does not yet hold the promise.
+
+Three spellings reach this rule, and two of them are ones you can write without meaning to.
+
+A **literal tab** is the one control byte YAML itself admits as a raw byte, inside a quoted or a
+block scalar, and nothing on screen distinguishes it from a run of spaces, so a value that looks
+fine can fail. An **escape in a double-quoted scalar** is how everything else in the refused set
+reaches a value, since YAML rejects those as raw bytes. `"\u001b"` is the spelling to picture, but
+it is far from the only one: `\0`, `\a`, `\b`, `\t`, `\n`, `\v`, `\f`, `\r`, `\e`, and `\N`
+each name a refused code point directly, and `\xNN` and `\U00000000` reach the same points as
+`\uNNNN` does. A **newline from a block scalar** is the third, and it arrives in two ways that
+need different fixes. A block written `|` or `>` keeps a *trailing* break, which `|-` or `>-`
+chomps away. A literal block (`|` in any chomping mode) also keeps the breaks *between* its
+lines, and no chomping indicator touches those, so a `|-` spanning two lines still fails; only
+the folded styles join their lines with a space. Write a multi-line value as `>-`, which is the
+spelling that survives this rule, and keep `|-` for a value on one line. Folding has two limits
+worth knowing, because a `>-` that hits either keeps an interior break anyway: a blank line
+between the lines is a paragraph break, and a line indented past the block keeps its own break.
+Keep a folded value's lines adjacent and equally indented.
+
+To find all three, do not pattern-match the YAML. Load it. Every spelling above is a property of
+the value a loader constructs, not of the line it is written on, and the ways to write one value
+are open-ended: a tab need not share a line with its key, a `derives_from` edge writes `- ref:`
+behind a sequence dash, a block-form `tickets` entry is a bare `- "GTX-1"` item with no key at
+all, a block scalar puts its value on later lines behind an optional anchor or tag, and an
+explicit `? key` pair puts the key on its own line. A scan that reads the fence the way the
+loader does and then asks the loader for the values is exact against all of them, and reports
+the same field name and code point the error would:
+
+```bash
+uv run python - <<'PY'
+import pathlib
+from ruamel.yaml import YAML
+
+yaml = YAML(typ="safe", pure=True)
+
+def refused(text):
+    return sorted({f"U+{ord(c):04X}" for c in text
+                   if ord(c) < 0x20 or ord(c) == 0x7F or 0x80 <= ord(c) <= 0x9F})
+
+def fields(meta):
+    yield from ((k, meta[k]) for k in ("id", "title") if isinstance(meta.get(k), str))
+    yield from ((f"tickets[{i}]", t) for i, t in enumerate(meta.get("tickets") or [])
+                if isinstance(t, str))
+    yield from ((f"derives_from[{i}].{k}", e[k])
+                for i, e in enumerate(meta.get("derives_from") or []) if isinstance(e, dict)
+                for k in ("ref", "seen") if isinstance(e.get(k), str))
+
+for path in sorted(pathlib.Path(".").rglob("*.md")):
+    lines = path.read_text(errors="replace").lstrip("\ufeff").split("\n")
+    if not lines or lines[0].strip() != "---":
+        continue
+    end = next((i for i, line in enumerate(lines[1:], 1) if line.strip() == "---"), 0)
+    try:
+        meta = yaml.load("\n".join(lines[1:end]) + "\n") if end else None
+    except Exception as exc:
+        print(f"{str(path)!r}: frontmatter did not parse: {str(exc).splitlines()[0]}")
+        continue
+    if isinstance(meta, dict):
+        for name, value in fields(meta):
+            if found := refused(value):
+                print(f"{str(path)!r}: {name}: {' '.join(found)}")
+PY
+```
+
+Run it where doc-lattice is installed, since it borrows that installation's `ruamel.yaml` and its
+pure parser, which is the one the loader itself uses. Everything it prints is a value that will
+not load. `doc-lattice check` is the authority after the upgrade, and reports the first document
+it finds, one run at a time.
+
+It prints each path quoted, through the same `repr(str(path))` spelling every command uses, for
+the reason the `--no-color` guarantee under [Commands](#commands) rests on: a filename is
+repo-controlled text too, and a scan that hunts terminal control characters is a poor place to
+print one.
+
+A code point it names is a value that will not load. A `block-scalar` line is a prompt to look
+rather than a verdict, since whether a break survives depends on the lines beneath it, which is
+also why a correct `>-` is listed. `doc-lattice check` is the authority either way: it names the
+key and the code point for the first document it finds, one run at a time.
+
 ### Files with no `id`
 
 Only a file declaring an `id` joins the lattice. How the rest are treated depends on what they
@@ -785,6 +875,21 @@ into the graph but never named itself, so it and every edge it declares would le
 together. Almost always a typo in the `id` key (`idd:`, `Id:`) or an edit that dropped it: add the
 `id` back, or remove the lattice keys if the file is not meant to be tracked. The same message
 lists `authority` and `tickets` when those are what the block declared.
+
+**`must not contain a control character; found U+000A at index ...` exits 2.** A frontmatter
+value decoded to a byte a terminal acts on, so the document is refused rather than loaded and
+printed. The fix depends on which code point the message names, and the three common ones do not
+share one. `U+000A` is a line break a block scalar kept, and chomping removes it only when it is
+*trailing*: change `|` to `|-`, or `>` to `>-`. A break *between* the lines of a value survives
+that edit, so if the error repeats, fold the value with `>-` and keep its lines adjacent, or put
+it on one line. `U+0009` is a tab, which no chomping indicator touches: it is a literal tab or a
+`\t` escape in the value, and it has to come out. `U+000D` reaches a value only as a `\r`
+escape, since YAML folds a literal carriage return to a space, so it too has to come out rather
+than be re-chomped. Anything in the `U+001B` neighborhood is an escape sequence written into the
+value on purpose and should come out as well. The message names the key and the offending code
+point rather than repeating the value, so reading it never puts the byte back on your terminal.
+See the [Frontmatter reference](#frontmatter-reference) for the exact accepted set and for a scan
+that finds every spelling that reaches this rule, including the ones nothing on screen shows you.
 
 **`skipping ... its frontmatter declares no 'id'` on stderr.** Not an error: a file with fenced
 frontmatter that declares no `id` and no lattice keys is left out of the lattice, and the exit

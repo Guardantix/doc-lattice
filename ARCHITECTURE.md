@@ -853,7 +853,9 @@ refusal that did not already exist.
 
 **Layer 1: semantic schema.** The validated shape a tracked document must load as is owned by
 `NodeMeta` and `RawEdge` in `model.py`, under `strict=True` and `extra="forbid"`. Public `seen` is
-`str | None`.
+`str | None`. AD-35 narrows both string positions further: a `ref` or a `seen` constructing a C0,
+DEL, or C1 code point is refused, which takes clip and keep chomping out of the strict column of
+the `Entry` `seen` and `ref` rows below without moving the reread column beside them.
 
 **Layer 2: supported spellings on the writable path, by position and by load phase.** One row per
 writable position and per dimension, and two columns: what a strict tracked-document load accepts,
@@ -870,9 +872,9 @@ columns are what keep defensive-only recovery shapes out of the publicly accepte
 | Entry | Key spelling | `ref` and an optional `seen` and nothing else. Either key may be written plainly, or as an explicit `? key` / `: value` pair. A key spelled through an alias needs one of two forms, the explicit `? *name` pair or `*name : value` with a space before its `:`, because the bare `*name:` form does not scan. Members may arrive through a merge in either spelling | Any extra key, which is tolerated and preserved |
 | Entry | Node properties | An anchor, a tag, or both opening the entry, including on the sequence line above and left of its first key | Nothing more |
 | Entry | Member layout | Layouts an appended `seen` has to land after that need no member beyond `ref` and `seen`: the next indented item of the enclosing sequence, a trailing comment, a flow entry written with or without a trailing comma, or a `ref` spanning lines as a block scalar in either style, a multi-line double-quoted scalar, or a multi-line plain scalar | The same landing after an extra member, which the strict load forbids: a trailing block scalar, a multi-line flow collection, or an implicit or explicit null |
-| Entry `ref` | Value | A string | Nothing more; a non-string `ref` is refused whenever planning is reached |
+| Entry `ref` | Value | A control-free string (AD-35), which takes the same line-break-bearing spellings out of this column as the `seen` row below, interior breaks and trailing ones alike | Nothing more; a non-string `ref` is refused whenever planning is reached, while a control-bearing one is rewritten like any other |
 | Entry `seen` | Carrier shape | A scalar or null, never a collection | Nothing more; a collection-valued `seen` at a targeted entry is refused |
-| Entry `seen` | Scalar spelling | Any scalar spelling whose constructed value is a string or null: plain, single or double quoted, a block scalar in either style with any chomping or explicit indentation indicator, an explicit `null` or `~`, an empty value, an absent key, an alias to such a value, or an explicit `? seen` left without its `:`, which constructs null. How the key itself may be written is the `Entry` `Key spelling` row above | Any scalar the safe constructor accepts, whatever it constructs to, an explicitly tagged one included |
+| Entry `seen` | Scalar spelling | Any scalar spelling whose constructed value is a control-free string or null (AD-35): plain, single or double quoted, a block scalar with an explicit indentation indicator whose constructed value carries no line break at all: folded in any chomping mode where the value keeps no trailing break, or literal on a single line under the same condition, since chomping governs only the break at the end and a literal style keeps the breaks between its own lines, an explicit `null` or `~`, an empty value, an absent key, an alias to such a value, or an explicit `? seen` left without its `:`, which constructs null. How the key itself may be written is the `Entry` `Key spelling` row above | Any scalar the safe constructor accepts, whatever it constructs to, an explicitly tagged one included, a control-bearing value among them |
 | Entry `seen` | Node properties | An anchor, a tag, or both, in either order, on the value's own line or on lines of their own, with the author's comments between a property and the value | Nothing more |
 
 Four behaviors of the loaded shape are recorded with the matrix rather than inside a cell.
@@ -1200,14 +1202,14 @@ decodes a double-quoted `\u001b` into a real ESC, so `id`, `title`, `tickets`, `
 can each carry a control character into human output through a validated frontmatter value. That
 vector turns on a decision this record does not make, between rejecting at validation and a typed
 value display encoding, because those values participate in identity and in structured output;
-it is GTX-208's. The reconcile transaction and recovery sinks interpolated destination, journal,
-and staged-artifact paths the same way this record governs, and stage names inherit
-`destination.name` so a hostile document filename propagates into them; GTX-209 routed those
-sinks through this helper rather than deciding a spelling of their own, and moved
-`path_utils.safe_resolve`'s own containment error with them, because the transaction layer
-embeds that message verbatim when a journal records an escaping path. GTX-125 and GTX-209
-together close the document-path vector; nothing here claims the repo-controlled vector is fully
-closed.
+it is GTX-208's, and AD-35 settles it by refusing such a value at validation rather than adding a
+sibling display spelling here. The reconcile transaction and recovery sinks interpolated
+destination, journal, and staged-artifact paths the same way this record governs, and stage names
+inherit `destination.name` so a hostile document filename propagates into them; GTX-209 routed
+those sinks through this helper rather than deciding a spelling of their own, and moved
+`path_utils.safe_resolve`'s own containment error with them, because the transaction layer embeds
+that message verbatim when a journal records an escaping path. GTX-125 and GTX-209 together close
+the document-path vector; nothing here claims the repo-controlled vector is fully closed.
 
 A static guard in `tests/test_conventions.py` enforces the boundary going forward: inside the
 modules this record covers, a path-bearing name reaching human-facing text must go through the
@@ -1229,3 +1231,156 @@ those modules is per-expression and machine-only: the journal serializer, the st
 filenames, and the recovery payload's own JSON spelling. Because a name can be a path in one
 module and something else in another, the path-bearing name set is the global one widened per
 module rather than grown globally.
+
+
+### AD-35: A frontmatter value carrying a control character is refused, not re-spelled
+
+**Date:** 2026-08-19
+**Status:** Accepted
+**Context:** AD-34 closed the document-path half of the repo-controlled output vector and left the
+other half open, because the two halves do not turn on the same question. A path is display-only,
+so a display spelling settles it. A frontmatter value is not: `id` and `ref` participate in
+identity, since edge resolution and duplicate detection compare them, and all five of `id`,
+`title`, `tickets`, `ref`, and `seen` participate in structured output through JSON, the GitHub
+annotation encoder, and the `linear` command.
+
+The premise that the frontmatter parser already filters control characters was half true, and the
+half that is true is narrower than it first reads. Executing `check` and `graph` under `NO_COLOR=1`
+against a block spelling `id: "node\u001b[31m"`, `title: "t\u001b[2J"`,
+`tickets: ["GTX-1\u001b[31m"]`, and `derives_from: [{ref: "up\u001b[A"}]` put the raw `0x1b` bytes
+on stdout in both. `NodeMeta` and `RawEdge` were otherwise unconstrained strings under
+`strict=True`, with the `#` check on `id` as the only value rule.
+
+Exactly which spellings reach a value is worth recording, because "YAML refuses control bytes" is
+the belief this vector hid behind, and it is wrong in one place. ESC, DEL, NUL, and the C1
+controls are refused as raw bytes by the scanner in every scalar style, so a double-quoted escape
+is the only way to write one of those into a value. A literal carriage return or NEL is read as a
+line break and folds to a space, so it never reaches a value either. A literal **tab** does: the
+scanner admits it inside a double-quoted, single-quoted, or block scalar, where it constructs
+`U+0009`. The refused set is therefore reachable by escape for most of its members and by a raw
+byte for exactly one, and a rule written only against escaped spellings would have missed the tab.
+`tests/test_frontmatter_parser.py` pins this table so it stays a measured fact rather than a
+belief, since it is the belief that hid the vector in the first place.
+
+The sinks are the same shape AD-34 records for paths and are more numerous: `report_render.py`
+prints `source_id`, `target_ref`, `node.id`, and `tickets`; `render.py` turns ids and titles into
+graph labels behind a quote-only grammar escaper per format; the reconcile adapter prints
+`target_ref`; and `reconcile.py`'s targeted broken-ref error interpolates `node_id` with no
+escaping at all. Every one of them applies `rich.markup.escape` at most, which does nothing to
+ANSI, or nothing.
+
+**Decision:** These values are refused at validation rather than re-spelled at display.
+`ControlFreeStr` in `model.py` is `str` plus an `AfterValidator`, and `id`, `title`, every
+`tickets` element, `ref`, and `seen` are typed with it, so a document spelling any C0 code point
+(`U+0000` to `U+001F`), DEL (`U+007F`), or any C1 code point (`U+0080` to `U+009F`) in one of
+them is a `FRONTMATTER_ERROR` and never becomes a node. The predicate is `text_utils`'
+`is_control_char`, which is the same range `strip_control_chars` has always removed, so the
+project has one definition of what a control character is rather than two. Tab, newline, and
+carriage return are C0 controls and are included deliberately; see the consequences below.
+
+Refusing is what a display encoding could not do here. It closes the vector at one boundary
+instead of at each of eight sinks and every sink added later, it keeps control characters out of
+identity rather than only out of the rendering of identity, and it needs no rule about how a
+display spelling composes with the DOT and Mermaid grammar escapers, which is a question AD-34
+does not have to answer because a path is never a graph label. The alternative was a string-typed
+sibling of `format_path_for_display` plus an analogue of AD-34's static construction-site guard;
+that guard exists because an omitted sink is the failure mode of a display strategy, and the
+strategy chosen here has no sinks to omit.
+
+The diagnostic names the code point and its index rather than echoing the value, because a
+message quoting the value would print the very byte the rule refuses. The `ControlFreeStr` rule
+runs ahead of the `id` `#` rule, which does quote the id it rejects, so an id carrying both is
+reported by the rule that names no value.
+
+That the refusal itself stays clean took one more site than it first read, and the extra one is
+recorded here rather than left as a footnote, because the reasoning that missed it is the same
+reasoning this record exists to replace. `validation_render` drops pydantic's echoed input, and
+the first version of this paragraph concluded from that alone that both halves held. They did not:
+safe YAML decodes a double-quoted `\u001b` in a mapping **key** exactly as it does in a value, and
+a key rejected by `extra="forbid"` is reported as the pydantic error *location*, which the
+renderer joined verbatim. A block spelling `"bad\u001b[31m": 1` therefore put a raw ESC on stderr
+through the message refusing the key, at both load boundaries, since `config.py` and
+`frontmatter_parser.py` share the renderer. Refusing the key was never the gap; naming it was.
+`_format_location_part` spells a location part with `repr` when, and only when, that part carries
+a control character, so a rejected key is neutralized while an ordinary location still reads
+`derives_from.0.ref` rather than gaining quotes around every segment. Rejecting control-bearing
+keys at load instead would have been circular, because the new refusal would still have had to
+name the key. The spelling is AD-34's, and injective for AD-34's reason; the difference is that a
+path is untrusted whole while a location is untrusted in exactly one part.
+
+Machine channels are excluded on the same reasoning AD-34 records, and the exclusion means
+something different under this decision: JSON output and the GitHub annotation encoder are
+unchanged for every document that still loads, and a refused document fails uniformly before
+format selection rather than reaching one channel and not another. Keeping control-bearing values
+reachable through the machine channels was never a requirement; had it been, it would have
+preselected display-time encoding.
+
+**Consequences:** This is a breaking change, and it is taken inside 5.0's deliberate window while
+adoption is internal (ROADMAP.md). A document accepted today whose `id`, `title`, `tickets`,
+`ref`, or `seen` constructs a control character becomes a load error, and because a load error is
+reported per document rather than per command, it fails `check`, `lint`, `impact`, `graph`, and
+`reconcile` alike.
+
+Including tab and newline is what makes the rule worth having and is also its whole compatibility
+cost. A newline is not a terminal escape sequence, so the `--no-color` promise alone would not
+have reached it; the output it corrupts is line-oriented, and a `title` or `id` carrying one can
+forge a whole report row rather than merely recolor a real one. AD-34's own spelling escapes
+`\t`, `\n`, and `\r` in a path for the same reason, and a rule that refused a newline in a
+filename while admitting one in an id would be incoherent across two halves of one vector.
+
+Those two are also where the compatibility cost actually falls, and they fall differently. The
+tab is the reachable-as-a-raw-byte case recorded above, so a document carrying one carries it
+invisibly: nothing on screen distinguishes a tabbed `title` from a spaced one, and CHANGELOG's
+migration note therefore gives a byte-level search rather than telling a reader to look. The
+newline is reached through a spelling instead, and that spelling is what the next paragraph
+covers.
+
+The cost lands on AD-31 layer 2, which this record narrows along two independent axes rather than
+the one it first appeared to. That table's strict tracked-document column accepts, for `ref` and
+for `seen`, "a block scalar in either style with any chomping or explicit indentation indicator".
+The first axis is chomping: clip and keep construct a trailing line break, so those two modes are
+no longer in the strict column for those two positions. The second is style, and it holds
+whatever the chomping is: a literal block scalar keeps the breaks *between* its own lines, so a
+multi-line `|-` constructs an interior newline and is refused as well. Only the folded styles join
+their lines with a space. What survives for a value written across lines is therefore `>-` alone,
+and `|-` survives only on a single line. Stating this as "strip chomping is unaffected" would have
+been wrong, and was: chomping governs the break at the end, never the ones in the middle. The
+reread column
+beside it does not move at all: `apply_reconcile` still rewrites such a document byte-correctly
+and still re-emits the value as an escape, which is what the two columns exist to distinguish.
+Only one of the affected spellings had no working use: a `seen` ending in a line break can never
+equal a content hash, so such a document was permanently drifting and is now refused with a
+diagnostic that says why.
+
+The rest did have one, and the reasoning that said otherwise is recorded because its premise was
+sitting inside its own conclusion. It ran: a `ref` ending in a line break can never resolve, since
+every id in the index comes from a frontmatter `id` or a heading slug. A heading slug carries no
+break, but a frontmatter `id` is a value of exactly the kind under discussion, and `id: |`
+constructs one. An upstream naming itself that way and a downstream pointing at it the same way
+construct the same string, so the id registered, the ref resolved against it, and the edge
+reconciled to OK. Verified by execution against the pre-change tree rather than reasoned about,
+which is what the earlier claim needed and did not get. A folded `title` is not the one plausible
+casualty, then, but the most likely of several: any of `id`, `title`, `tickets`, and `ref` could
+carry a break and work, and CHANGELOG's migration scan covers all five keys rather than the two
+that hold hashes and refs.
+
+The load cache needs no separate rule. `NodeMeta` is nested inside a cache entry and an invalid
+snapshot is discarded whole, so a slot written before this change cannot replay a control
+character into a warm run.
+
+This does not close the repo-controlled vector, and the part left open is a decision this record
+does not make. Both halves settled so far assume a control-bearing string is either refused at
+validation or spelled where a message is built. A YAML **load failure** satisfies neither: it
+aborts before validation runs, and its message is built by `ruamel` rather than by this codebase.
+`ruamel`'s duplicate-key error echoes the offending key and both of its values back at the reader,
+and four sites interpolate that message verbatim: `frontmatter_parser.py`'s and `config.py`'s
+parse failures and `reconcile.py`'s two. The value half is what makes it more than cosmetic, since
+a duplicate key defeats this record's own guarantee by failing the load before the value rule can
+run. Closing it means choosing how to spell an untrusted third-party message whose own line
+structure is part of the diagnostic, which `repr` cannot settle the way it settles a path, so it
+is GTX-219's rather than an extension of this one. README's frontmatter section is scoped to a
+block that loads until it lands.
+
+No static construction-site guard accompanies this record, and none is owed. AD-34 needs one
+because a display strategy is only as complete as its sink list; a validation rule has one site,
+and the parser matrix over the five value families is what pins it.

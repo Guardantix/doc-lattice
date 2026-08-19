@@ -108,6 +108,26 @@ def test_forbidden_key_inside_a_direct_nested_model_lists_that_models_keys():
     assert "(accepted keys: ref)" in message
 
 
+def test_forbidden_key_carrying_a_control_character_is_spelled_rather_than_echoed():
+    # GTX-208 (AD-35): safe YAML decodes a double-quoted escape in a mapping key exactly as it
+    # does in a value, and `extra="forbid"` reports that key as the error location. Dropping
+    # pydantic's echoed input does nothing about it, so the raw byte reached the terminal through
+    # the message refusing the key. Both the top-level and the nested location are covered,
+    # because the location is joined part by part.
+    for raw in ({"bad\x1b[31m": 1}, {"edges": [{"ref": "a", "bad\x1b[31m": 1}]}):
+        message = _render(raw)
+
+        assert "\x1b" not in message
+        assert "'bad\\x1b[31m'" in message
+
+
+def test_a_location_carrying_no_control_character_keeps_its_bare_spelling():
+    # The repr spelling is applied per part and only where it is needed, so the ordinary
+    # diagnostic does not gain quotes around every segment of a dotted path.
+    assert "  edges.0.bogus: " in _render({"edges": [{"ref": "a", "bogus": 1}]})
+    assert "  tags.1: " in _render({"tags": ["ok", 5]})
+
+
 def test_forbidden_key_under_an_unresolvable_path_offers_no_key_list():
     # Better to say nothing than to name the wrong model's fields. A dict-valued field has no
     # single model behind it, so the walk gives up rather than guessing.

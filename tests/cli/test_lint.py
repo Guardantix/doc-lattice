@@ -55,15 +55,18 @@ def test_lint_github_emits_each_violation_annotation(tmp_path: Path, monkeypatch
 def test_lint_github_escapes_complete_annotation(tmp_path: Path, monkeypatch):
     # Metacharacters live in a subdirectory under docs (part of the repo-relative path)
     # so escaping of the emitted file= property is exercised; the project root is stripped.
-    weird = tmp_path / "docs" / "sub%:,\nline"
+    # The carriage return and newline sit in the directory name alone: AD-35 refuses a control
+    # character in an id or a ref outright, so a document carrying one never reaches an
+    # annotation at all, while a filename still can and is what exercises %0D%0A end to end.
+    weird = tmp_path / "docs" / "sub%:,\r\nline"
     weird.mkdir(parents=True)
     (weird / "up.md").write_text(
-        '---\nid: "up%:,\\r\\nline"\nauthority: derived\n---\n# Up\nbody\n',
+        '---\nid: "up%:,line"\nauthority: derived\n---\n# Up\nbody\n',
         encoding="utf-8",
     )
     (weird / "down.md").write_text(
-        '---\nid: "down%:,\\r\\nline"\nauthority: binding\nderives_from:\n'
-        '  - ref: "up%:,\\r\\nline"\n---\n# Down\nbody\n',
+        '---\nid: "down%:,line"\nauthority: binding\nderives_from:\n'
+        '  - ref: "up%:,line"\n---\n# Down\nbody\n',
         encoding="utf-8",
     )
     monkeypatch.chdir(tmp_path)
@@ -71,11 +74,12 @@ def test_lint_github_escapes_complete_annotation(tmp_path: Path, monkeypatch):
     result = runner.invoke(app, ["lint", "--format", "github"])
 
     assert result.exit_code == 1
-    expected_path = escape_github_property("docs/sub%:,\nline/down.md")
+    expected_path = escape_github_property("docs/sub%:,\r\nline/down.md")
+    assert "%0D%0A" in expected_path
     assert result.stdout == (
         f"::error file={expected_path},"
         "title=doc-lattice ladder violation::"
-        "down%25:,%0D%0Aline (binding) -> up%25:,%0D%0Aline (derived)\n"
+        "down%25:,line (binding) -> up%25:,line (derived)\n"
     )
 
 

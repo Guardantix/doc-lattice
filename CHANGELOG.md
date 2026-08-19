@@ -8,7 +8,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Migration
 
-Four things to act on, plus two changes below that need no action in a default environment. The
+Five things to act on, plus two changes below that need no action in a default environment. The
 first is the printed workflow, and it applies to every ordinary and recipe install. The workflow
 `doc-lattice init` prints now triggers on a resolved default branch rather than a hard-wired
 `main`, so regenerate your user-owned `.github/workflows/doc-lattice.yml` from the target release
@@ -71,6 +71,51 @@ such as `--- !!map`, because a plain `---` closes the frontmatter block instead.
 without the accelerator, which is what every lock of this project produces, sees no change at all
 in what loads.
 
+The seventh is the frontmatter value rule, and it is the fifth thing to act on. `id`, `title`,
+every `tickets` entry, `derives_from[].ref`, and `derives_from[].seen` may no longer decode to a
+control character: any C0 code point (`U+0000` to `U+001F`), DEL (`U+007F`), or any C1 code point
+(`U+0080` to `U+009F`) now fails the load with a `FRONTMATTER_ERROR`. Three spellings reach this,
+and only the first is the one the vector was reported for:
+
+1. **An escape in a double-quoted scalar**, which is the only way to write ESC, DEL, NUL, or a
+   C1 control into a value at all, since YAML refuses each of those as a raw byte in the file.
+   `"\u001b"` is the spelling to picture but not the only one to search for: `\0`, `\a`, `\b`,
+   `\t`, `\n`, `\v`, `\f`, `\r`, `\e`, and `\N` each name a refused code point directly, and
+   `\xNN` and `\U00000000` reach the same points `\uNNNN` does.
+2. **A literal tab**, which is the one control character YAML does admit as a raw byte, inside a
+   double-quoted, single-quoted, or block scalar. Nothing about it is visible on screen, so it
+   has to be searched for rather than read for.
+3. **A newline a block scalar keeps**, whether at the end of the value or inside it. Tab,
+   newline, and carriage return are C0 controls, so both spellings are refused. `|` or `>`
+   without `-` keeps a *trailing* break, which `|-` and `>-` chomp away. An *interior* break is
+   the case to look for after that, because chomping does not touch it: a `|-` spanning two
+   lines is already chomped and still constructs a newline between them. The folded styles (`>`
+   and `>-`) join adjacent lines with a space, so `>-` is the block spelling that survives this
+   rule for a value written across lines, and `|-` survives it only on one line. Folding stops
+   at a blank line, which is a paragraph break and constructs a newline `>-` does not chomp, so
+   keep a folded value's lines adjacent. Search every one of the five keys, not just the two
+   that carry hashes and refs: `id`, `title`, `tickets`, `ref`, and `seen` are all constrained,
+   and `id` and `title` are where a multi-line value is most likely to have been written on
+   purpose.
+
+The frontmatter reference in README.md carries one scan covering all three. It reads the fence
+the way the loader does, so a file saved with a byte-order mark, CRLF endings, or a padded `---`
+is scanned rather than skipped, and then it loads the block and inspects the five values rather
+than pattern-matching the lines they were written on. That distinction is what makes it exact:
+every spelling above is a property of the constructed value, and the ways to write one value are
+open-ended, from a `- ref:` behind a sequence dash to a block scalar carrying an anchor to an
+explicit `? key` pair. Run it where doc-lattice is installed, since it borrows that
+installation's `ruamel.yaml`.
+
+All five had a working use, so treat this as a real scan rather than a formality. A folded
+`title` is the obvious one. Less obviously, an `id` written `|` constructs a trailing newline,
+and a `ref` written the same way constructs the same string, so the two matched and the edge
+resolved and reconciled to OK; verified by execution against the pre-change tree. Only a `seen`
+carrying a break was already broken, since it could never equal a content hash. A literal
+carriage return or NEL needs no search: YAML reads both as line breaks and folds them to a space
+before any value is constructed. See **Changed** below and the frontmatter reference in
+README.md.
+
 Everywhere, in both environments, the load cache is rebuilt once. `CACHE_VERSION` rises to 5 so a
 warm run can replay a new diagnostic, and entries written before it are discarded rather than read
 as documents that reused no anchor. No action is needed: the next run rebuilds the file.
@@ -128,6 +173,34 @@ as documents that reused no anchor. No action is needed: the next run rebuilds t
 
 ### Changed
 
+- **BREAKING:** a frontmatter value that decodes to a control character is now refused at load
+  instead of being carried into output. `id`, `title`, every `tickets` entry,
+  `derives_from[].ref`, and `derives_from[].seen` may hold no C0 code point (`U+0000` to
+  `U+001F`), no DEL (`U+007F`), and no C1 code point (`U+0080` to `U+009F`), and a document
+  spelling one fails with a `FRONTMATTER_ERROR` naming the key and the code point rather than
+  echoing the value. This closes the second half of the vector `--no-color` output already
+  promised was closed: YAML refuses a raw control byte in the file, but a double-quoted scalar
+  decodes `\u001b` into a real ESC, and `check` and `graph` printed it, so a crafted document
+  could recolor or overwrite the lines of a gate's report. Refusing at validation rather than
+  escaping at each sink is what keeps control characters out of identity and out of every
+  renderer at once, including the two graph grammars, and needs no rule for how a display
+  spelling would compose with them.
+
+  Tab, newline, and carriage return are C0 controls and are included: the output being protected
+  is line-oriented, so a newline in a value forges a whole report row rather than restyling one.
+  That is also the only compatibility cost worth planning for. It narrows the block-scalar
+  spellings AD-31 declares supported for `ref` and `seen` in two ways, not one. Clip and keep
+  chomping (`|`, `>`, and their `+` forms) construct a trailing line break, so those are refused
+  where `|-` and `>-` are not. Independently of chomping, a *literal* block scalar (`|` in any
+  chomping mode) keeps the breaks between its own lines, so a multi-line `|-` is refused too;
+  only the folded styles join their lines with a space, which leaves `>-` as the block spelling
+  that survives across lines and `|-` as one that survives on a single line. The reconcile
+  rewriter is unchanged and still round-trips such a document byte for byte;
+  only the strict tracked-document load moved. Machine channels are untouched for every document
+  that still loads, and a refused document fails before format selection rather than reaching one
+  channel and not another. See
+  [AD-35](ARCHITECTURE.md#ad-35-a-frontmatter-value-carrying-a-control-character-is-refused-not-re-spelled)
+  and the frontmatter reference in README.md.
 - Warnings a command emits while loading now render in the CLI's own stderr voice, as
   `warning: <message>`, instead of through Python's default formatter. A skip previously arrived
   behind an absolute path into this package and a `UserWarning` category, with the raising source
@@ -357,6 +430,20 @@ as documents that reused no anchor. No action is needed: the next run rebuilds t
   needs the new spelling. README.md, CLAUDE.md, and ARCHITECTURE.md now reference the new name;
   entries in earlier releases keep the spelling that was correct at the time. Its contents were
   also rewritten to track the three release projects rather than the shipped 4.x work.
+
+### Fixed
+
+- An unknown frontmatter or config key that decodes to a control character is now spelled in the
+  diagnostic that rejects it, instead of being echoed into your terminal raw. Safe YAML decodes a
+  double-quoted `\u001b` in a mapping *key* exactly as it does in a value, and an unknown key is
+  reported by naming the key, so a document spelling `"bad\u001b[31m": 1` put the ESC on stderr
+  through the very message refusing it. Only the spelling changed: such a key was already an
+  error, and a key carrying no control character still reads exactly as before, so an ordinary
+  diagnostic still names `derives_from.0.ref` rather than gaining quotes. This is the key half of
+  the value rule under **Changed** above; the two together do not close the whole of what a
+  document can print, because a block that fails to parse at all is reported through the YAML
+  parser's own message, which quotes the source it choked on. That path is still open and is
+  tracked separately.
 
 ### Removed
 

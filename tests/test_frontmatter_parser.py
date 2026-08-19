@@ -439,3 +439,312 @@ def test_parse_meta_tracks_a_reused_anchor_name_after_a_directive_reset():
     assert parsed.meta is not None
     assert [edge.ref for edge in parsed.meta.derives_from] == ["first", "second", "second"]
     assert parsed.reused_anchors is True
+
+
+# GTX-208 (AD-35): YAML refuses a literal control byte in the source stream but decodes a
+# double-quoted escape into a real one, so the escaped spelling is the only way one reaches a
+# value and is the spelling every row below is written in. The admitted neighbors sit one code
+# point outside a refused range, which is what keeps the rule from reading as "reject anything
+# unusual": they are the boundaries a widened predicate would swallow first.
+_REFUSED_CONTROLS = (
+    ("\\u001b", 0x1B, "esc"),
+    ("\\u0000", 0x00, "nul"),
+    ("\\t", 0x09, "tab"),
+    ("\\n", 0x0A, "newline"),
+    ("\\r", 0x0D, "carriage-return"),
+    ("\\u001f", 0x1F, "c0-top"),
+    ("\\u007f", 0x7F, "delete"),
+    ("\\u0080", 0x80, "c1-bottom"),
+    ("\\u0085", 0x85, "nel"),
+    ("\\u009b", 0x9B, "csi"),
+    ("\\u009f", 0x9F, "c1-top"),
+)
+_ADMITTED_NEIGHBORS = (
+    ("\\u0020", 0x20, "space"),
+    ("\\u007e", 0x7E, "tilde"),
+    ("\\u00a0", 0xA0, "nbsp"),
+    ("\\u2028", 0x2028, "line-separator"),
+    ("\\ufeff", 0xFEFF, "bom"),
+)
+# One document per value family, each spelling its own field with the escape under test. The
+# five are covered separately because they are validated in three different places: two root
+# scalars, a root list element, and two members of a nested model.
+_VALUE_FAMILIES = (
+    ("id", '---\nid: "node{escape}"\n---\nbody\n'),
+    ("title", '---\nid: node\ntitle: "t{escape}"\n---\nbody\n'),
+    ("tickets.0", '---\nid: node\ntickets: ["GTX-1{escape}"]\n---\nbody\n'),
+    (
+        "derives_from.0.ref",
+        '---\nid: node\nderives_from:\n  - ref: "up{escape}"\n---\nbody\n',
+    ),
+    (
+        "derives_from.0.seen",
+        '---\nid: node\nderives_from:\n  - ref: up\n    seen: "h{escape}"\n---\nbody\n',
+    ),
+)
+_FAMILY_READERS = {
+    "id": lambda meta: meta.id,
+    "title": lambda meta: meta.title,
+    "tickets.0": lambda meta: meta.tickets[0],
+    "derives_from.0.ref": lambda meta: meta.derives_from[0].ref,
+    "derives_from.0.seen": lambda meta: meta.derives_from[0].seen,
+}
+
+
+def _raw_meta(document: str) -> str:
+    """Return a document's frontmatter block, which every row below builds from a template."""
+    raw, _ = split_frontmatter(document, Path("a.md"))
+    assert raw is not None
+    return raw
+
+
+@pytest.mark.parametrize(
+    ("escape", "code"),
+    [(row[0], row[1]) for row in _REFUSED_CONTROLS],
+    ids=[row[2] for row in _REFUSED_CONTROLS],
+)
+@pytest.mark.parametrize(
+    ("field", "template"), _VALUE_FAMILIES, ids=[row[0] for row in _VALUE_FAMILIES]
+)
+def test_parse_meta_refuses_a_control_character_in_every_value_family(
+    field: str, template: str, escape: str, code: int
+):
+    with pytest.raises(FrontmatterError) as exc:
+        parse_meta(_raw_meta(template.format(escape=escape)), Path("a.md"))
+
+    message = str(exc.value)
+    assert "a.md" in message
+    # The field location is asserted, not just the exception type: a rule that fired on the
+    # wrong member, or a nested location rendered as a bare key, is a failure rather than a pass.
+    assert f"  {field}: " in message
+    assert f"U+{code:04X}" in message
+
+
+@pytest.mark.parametrize(
+    ("escape", "code"),
+    [(row[0], row[1]) for row in _ADMITTED_NEIGHBORS],
+    ids=[row[2] for row in _ADMITTED_NEIGHBORS],
+)
+@pytest.mark.parametrize(
+    ("field", "template"), _VALUE_FAMILIES, ids=[row[0] for row in _VALUE_FAMILIES]
+)
+def test_parse_meta_admits_the_neighbors_of_every_refused_range(
+    field: str, template: str, escape: str, code: int
+):
+    parsed = parse_meta(_raw_meta(template.format(escape=escape)), Path("a.md"))
+
+    assert parsed.disposition == "tracked"
+    assert parsed.meta is not None
+    assert _FAMILY_READERS[field](parsed.meta).endswith(chr(code))
+
+
+@pytest.mark.parametrize(
+    ("escape", "code"),
+    [(row[0], row[1]) for row in _REFUSED_CONTROLS],
+    ids=[row[2] for row in _REFUSED_CONTROLS],
+)
+def test_the_refusal_diagnostic_carries_no_control_character_of_its_own(escape: str, code: int):
+    # The point of refusing at validation is that no repo-controlled control byte reaches a
+    # person, and the refusal is output like anything else. `validation_render` drops pydantic's
+    # echoed input and the message names the code point instead of quoting the value, so both
+    # halves have to hold for this to pass. Three fields are spelled at once so the per-error
+    # lines are covered and not only the header.
+    document = '---\nid: "node{escape}"\ntitle: "t{escape}"\ntickets: ["GTX-1{escape}"]\n---\nb\n'
+
+    with pytest.raises(FrontmatterError) as exc:
+        parse_meta(_raw_meta(document.format(escape=escape)), Path("a.md"))
+
+    message = str(exc.value)
+    assert not any(
+        ord(char) < 0x20 or ord(char) == 0x7F or 0x80 <= ord(char) <= 0x9F
+        for char in message.replace("\n", "")
+    )
+    assert message.count(f"U+{code:04X}") == 3
+
+
+@pytest.mark.parametrize(
+    ("escape", "code"),
+    [(row[0], row[1]) for row in _REFUSED_CONTROLS],
+    ids=[row[2] for row in _REFUSED_CONTROLS],
+)
+def test_an_unknown_key_carrying_a_control_character_is_spelled_not_echoed(escape: str, code: int):
+    # GTX-208 (AD-35): the value families above are not the whole of what a document controls.
+    # A mapping *key* takes the same double-quoted escape, and `extra="forbid"` reports it as the
+    # pydantic error location, which is the one repo-controlled part of a location. Refusing the
+    # key was never the gap; naming it verbatim was. The nested spelling is covered too, since
+    # the location is built part by part and only the last part is the rejected key.
+    for template in (
+        '---\nid: node\n"bad{escape}key": 1\n---\nbody\n',
+        '---\nid: node\nderives_from:\n  - ref: up\n    "bad{escape}key": 1\n---\nbody\n',
+    ):
+        with pytest.raises(FrontmatterError) as exc:
+            parse_meta(_raw_meta(template.format(escape=escape)), Path("a.md"))
+
+        message = str(exc.value)
+        # The line count is asserted before the byte check, because a key carrying a line break
+        # forges a diagnostic line rather than a color, and stripping newlines to look for
+        # control bytes is exactly what would hide that. One header plus one error line is the
+        # whole message when the break is spelled instead of taken.
+        assert len(message.splitlines()) == 2
+        assert not any(
+            ord(char) < 0x20 or ord(char) == 0x7F or 0x80 <= ord(char) <= 0x9F
+            for char in message.replace("\n", "")
+        )
+        assert repr(f"bad{chr(code)}key") in message
+        assert "Extra inputs are not permitted" in message
+
+
+def test_a_control_character_is_refused_before_the_id_hash_rule_echoes_the_value():
+    # `_id_has_no_hash` quotes the id it rejects, which would print the very byte AD-35 exists
+    # to keep out of output. The annotated rule runs ahead of it for that reason, so an id
+    # carrying both is reported by the rule that names no value.
+    with pytest.raises(FrontmatterError) as exc:
+        parse_meta(_raw_meta('---\nid: "a#b\\u001b"\n---\nbody\n'), Path("a.md"))
+
+    message = str(exc.value)
+    assert "U+001B" in message
+    assert "'#'" not in message
+    assert "\x1b" not in message
+
+
+# GTX-208 (AD-35): which control characters reach a value as a *raw* byte, per scalar spelling.
+# "YAML refuses control bytes" is the belief the vector hid behind, and it is wrong for exactly
+# one character, so the belief is replaced here by a measured table. A rule written only against
+# escaped spellings would admit a literal tab, which is invisible on screen and therefore the
+# case an author reaches without meaning to. Each row records the outcome and which layer
+# produces it: AD-35's validator, the YAML scanner, or neither, when the byte is read as a line
+# break and folded away before a value exists.
+_REFUSED_BY_VALIDATOR = "frontmatter-error"
+_REFUSED_BY_YAML = "unreadable-doc"
+_FOLDED_TO_A_SPACE = "folded"
+
+_RAW_BYTE_SPELLINGS = {
+    "double-quoted": 'title: "a{char}b"\n',
+    "single-quoted": "title: 'a{char}b'\n",
+    "plain": "title: a{char}b\n",
+    "literal-block": "title: |-\n  a{char}b\n",
+}
+
+# One entry per (character, spelling). Written out rather than derived: the point is to record
+# what the pinned pure parser actually does, so a derivation from the same rule the product uses
+# would assert nothing.
+_RAW_BYTE_REACHABILITY = {
+    ("tab", "\t"): {
+        "double-quoted": _REFUSED_BY_VALIDATOR,
+        "single-quoted": _REFUSED_BY_VALIDATOR,
+        "plain": _REFUSED_BY_YAML,
+        "literal-block": _REFUSED_BY_VALIDATOR,
+    },
+    ("esc", "\x1b"): dict.fromkeys(_RAW_BYTE_SPELLINGS, _REFUSED_BY_YAML),
+    ("del", "\x7f"): dict.fromkeys(_RAW_BYTE_SPELLINGS, _REFUSED_BY_YAML),
+    ("nul", "\x00"): dict.fromkeys(_RAW_BYTE_SPELLINGS, _REFUSED_BY_YAML),
+    ("csi", "\x9b"): dict.fromkeys(_RAW_BYTE_SPELLINGS, _REFUSED_BY_YAML),
+    ("nel", "\x85"): {
+        "double-quoted": _FOLDED_TO_A_SPACE,
+        "single-quoted": _FOLDED_TO_A_SPACE,
+        "plain": _FOLDED_TO_A_SPACE,
+        "literal-block": _REFUSED_BY_YAML,
+    },
+    ("carriage-return", "\r"): {
+        "double-quoted": _FOLDED_TO_A_SPACE,
+        "single-quoted": _FOLDED_TO_A_SPACE,
+        "plain": _REFUSED_BY_YAML,
+        "literal-block": _REFUSED_BY_YAML,
+    },
+}
+
+_REACHABILITY_ROWS = [
+    pytest.param(char, spelling, outcome, id=f"{name}-{spelling}")
+    for (name, char), per_spelling in _RAW_BYTE_REACHABILITY.items()
+    for spelling, outcome in per_spelling.items()
+]
+
+
+@pytest.mark.parametrize(("char", "spelling", "outcome"), _REACHABILITY_ROWS)
+def test_a_raw_control_byte_reaches_a_value_only_as_a_tab(char: str, spelling: str, outcome: str):
+    block = "id: doc\n" + _RAW_BYTE_SPELLINGS[spelling].format(char=char)
+
+    if outcome == _REFUSED_BY_VALIDATOR:
+        with pytest.raises(FrontmatterError) as exc:
+            parse_meta(block, Path("a.md"))
+        assert f"U+{ord(char):04X}" in str(exc.value)
+        return
+    if outcome == _REFUSED_BY_YAML:
+        # Refused before validation is reached, so the byte never becomes a value at all. The
+        # error type is the distinction: this is an unreadable document, not an invalid one.
+        with pytest.raises(UnreadableDocError):
+            parse_meta(block, Path("a.md"))
+        return
+
+    # Read as a line break: the scalar spans two lines and folds, so no control character
+    # survives into the value and AD-35 has nothing to refuse.
+    parsed = parse_meta(block, Path("a.md"))
+    assert parsed.meta is not None
+    assert parsed.meta.title == "a b"
+
+
+def test_the_tab_is_the_only_raw_byte_the_validator_ever_sees():
+    # The claim README and CHANGELOG make to an upgrading adopter, stated once as a property of
+    # the table above rather than left implicit across its rows. If a parser change ever lets a
+    # second raw byte through to validation, the migration guidance is wrong and this fails.
+    reaching_validation = {
+        name
+        for (name, _char), per_spelling in _RAW_BYTE_REACHABILITY.items()
+        if _REFUSED_BY_VALIDATOR in per_spelling.values()
+    }
+
+    assert reaching_validation == {"tab"}
+
+
+# GTX-208 (AD-35): which block-scalar spellings survive the rule, per style and chomping mode.
+# The migration guidance rests on this table, and its first version was wrong in one cell: it
+# read the rule as being about chomping alone, so it told an adopter that `|-` was safe. Chomping
+# governs only the break at the *end* of a block; a literal style keeps the breaks *between* its
+# lines whatever the chomping is, so a multi-line `|-` constructs an interior newline and is
+# refused. Only the folded styles join their lines with a space. Recorded as a measured table for
+# the same reason the raw-byte one above is: the belief is what shipped the wrong advice.
+_BLOCK_SCALAR_SPELLINGS = {
+    "literal-clip-one-line": ("|", ["up"], None),
+    "literal-strip-one-line": ("|-", ["up"], "up"),
+    "literal-keep-one-line": ("|+", ["up"], None),
+    "literal-clip-two-lines": ("|", ["up", "down"], None),
+    "literal-strip-two-lines": ("|-", ["up", "down"], None),
+    "folded-clip-two-lines": (">", ["up", "down"], None),
+    "folded-strip-one-line": (">-", ["up"], "up"),
+    "folded-strip-two-lines": (">-", ["up", "down"], "up down"),
+    "folded-keep-two-lines": (">+", ["up", "down"], None),
+}
+
+
+@pytest.mark.parametrize(
+    ("header", "lines", "constructed"),
+    [pytest.param(*row, id=name) for name, row in _BLOCK_SCALAR_SPELLINGS.items()],
+)
+def test_only_a_single_line_literal_or_a_folded_block_survives_the_control_rule(
+    header: str, lines: list[str], constructed: str | None
+):
+    body = "".join(f"  {line}\n" for line in lines)
+    block = f"id: doc\ntitle: {header}\n{body}"
+
+    if constructed is None:
+        with pytest.raises(FrontmatterError) as exc:
+            parse_meta(block, Path("a.md"))
+        assert "U+000A" in str(exc.value)
+        return
+
+    parsed = parse_meta(block, Path("a.md"))
+    assert parsed.meta is not None
+    assert parsed.meta.title == constructed
+
+
+def test_the_folded_styles_are_the_only_ones_that_survive_across_lines():
+    # The sentence README and CHANGELOG both give an adopter, stated once as a property of the
+    # table above. If a dependency change ever makes a literal block join its lines, or stops a
+    # folded one from doing so, the migration advice is wrong and this fails.
+    surviving_multi_line = {
+        header
+        for header, lines, constructed in _BLOCK_SCALAR_SPELLINGS.values()
+        if len(lines) > 1 and constructed is not None
+    }
+
+    assert surviving_multi_line == {">-"}

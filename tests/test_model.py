@@ -166,3 +166,111 @@ def test_target_id_is_hashable_and_frozen():
 def test_nodemeta_rejects_hash_in_id():
     with pytest.raises(PydanticValidationError):
         NodeMeta.model_validate({"id": "a#b"})
+
+
+# GTX-208 (AD-35): every string a tracked document keeps is refused a control character here,
+# at the one boundary all five of them cross, rather than at each sink that prints them.
+@pytest.mark.parametrize(
+    "bad",
+    [
+        {"id": "no\x1bde"},
+        {"id": "x", "title": "ti\x9btle"},
+        {"id": "x", "tickets": ["GTX-1", "GTX-\t2"]},
+        {"id": "x", "derives_from": [{"ref": "up\x7f"}]},
+        {"id": "x", "derives_from": [{"ref": "up", "seen": "hash\n"}]},
+    ],
+    ids=["id", "title", "tickets", "ref", "seen"],
+)
+def test_nodemeta_rejects_a_control_character_in_every_string_it_keeps(bad):
+    with pytest.raises(PydanticValidationError):
+        NodeMeta.model_validate(bad)
+
+
+def test_the_control_character_message_names_the_code_point_and_not_the_value():
+    # A diagnostic that echoed the value would print the byte the rule exists to refuse, so the
+    # message is pinned to the position-and-code-point spelling rather than only to its type.
+    with pytest.raises(PydanticValidationError) as exc:
+        NodeMeta.model_validate({"id": "no\x1bde"})
+
+    (error,) = exc.value.errors(include_url=False, include_input=False)
+    assert error["loc"] == ("id",)
+    assert "U+001B" in error["msg"]
+    assert "index 2" in error["msg"]
+    assert "\x1b" not in error["msg"]
+
+
+def test_a_trailing_line_break_is_answered_with_the_chomping_fix():
+    # A block scalar written `|` or `>` keeps a trailing break, which is the way an author
+    # reaches this rule without meaning to, so that case gets the fix that actually applies
+    # rather than the general "remove it".
+    with pytest.raises(PydanticValidationError) as exc:
+        NodeMeta.model_validate({"id": "x", "title": "A folded title\n"})
+
+    (error,) = exc.value.errors(include_url=False, include_input=False)
+    assert "drop the trailing line break" in error["msg"]
+
+
+def test_an_interior_line_break_is_answered_with_the_joining_fix_not_the_chomping_one():
+    # An interior break survives every chomping mode: a `|-` spanning two lines is already
+    # chomped and still constructs one, and a double-quoted `"a\nb"` has no chomping indicator
+    # to change at all. Sending either author to `-` names a fix they have already applied or
+    # cannot apply, so position decides the advice.
+    with pytest.raises(PydanticValidationError) as exc:
+        NodeMeta.model_validate({"id": "x", "title": "first\nsecond"})
+
+    (error,) = exc.value.errors(include_url=False, include_input=False)
+    assert "join the lines" in error["msg"]
+    assert "chomp" not in error["msg"]
+
+
+def test_the_joining_fix_states_what_folding_needs_rather_than_naming_the_indicator():
+    # `>-` is necessary but not sufficient: a folded scalar keeps an interior break when a blank
+    # line separates its lines or one is indented past the block, so an author who already wrote
+    # `>-` and hit this rule reads a bare "use '>-'" as a step they have taken. Both conditions
+    # are named so the advice tells that author what to change.
+    with pytest.raises(PydanticValidationError) as exc:
+        NodeMeta.model_validate({"id": "x", "title": "first\nsecond"})
+
+    (error,) = exc.value.errors(include_url=False, include_input=False)
+    assert "equally indented" in error["msg"]
+    assert "blank line" in error["msg"]
+
+
+def test_a_carriage_return_is_answered_with_the_general_fix():
+    # No chomping mode and no folding produces a carriage return: YAML normalizes a literal one
+    # to a line feed, so a value carrying one was written as an escape and removing it is the
+    # only fix that applies.
+    with pytest.raises(PydanticValidationError) as exc:
+        NodeMeta.model_validate({"id": "x", "title": "a\rb"})
+
+    (error,) = exc.value.errors(include_url=False, include_input=False)
+    assert "reaches terminal output as written" in error["msg"]
+
+
+def test_a_non_break_control_is_answered_with_the_general_fix():
+    with pytest.raises(PydanticValidationError) as exc:
+        NodeMeta.model_validate({"id": "x", "title": "a\x1b[31mb"})
+
+    (error,) = exc.value.errors(include_url=False, include_input=False)
+    assert "reaches terminal output as written" in error["msg"]
+
+
+def test_nodemeta_keeps_printable_non_ascii_and_the_range_neighbors():
+    # The rule is the C0, DEL, and C1 ranges and nothing wider. NBSP sits one above the C1 top,
+    # and a line separator, a paragraph separator, a BOM, and ordinary accented text, CJK, and
+    # emoji are not controls at all. The neighbors are built from code points rather than
+    # written literally, since several of them are invisible in a source file.
+    neighbors = "".join(chr(code) for code in (0xA0, 0x2028, 0x2029, 0xFEFF))
+    title = f"Cafe {neighbors} nihongo \U0001f3ae"
+
+    meta = NodeMeta.model_validate({"id": "cafe-design", "title": title, "tickets": ["GTX-1"]})
+
+    assert meta.id == "cafe-design"
+    assert meta.title == title
+
+
+def test_rawedge_rejects_a_control_character_in_ref_and_seen():
+    with pytest.raises(PydanticValidationError):
+        RawEdge.model_validate({"ref": "a#b\x1b"})
+    with pytest.raises(PydanticValidationError):
+        RawEdge.model_validate({"ref": "a#b", "seen": "h\x1b"})

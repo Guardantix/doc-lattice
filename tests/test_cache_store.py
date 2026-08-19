@@ -121,6 +121,21 @@ def test_load_invalid_meta_is_empty(tmp_path: Path):
     assert load(path) == StoreSnapshot(cache=None, baseline=None)
 
 
+@pytest.mark.parametrize("field", ["id", "title"], ids=["id", "title"])
+def test_load_discards_a_cached_meta_carrying_a_control_character(tmp_path: Path, field: str):
+    # AD-35 refuses the value at the frontmatter boundary, and a cache slot is the one place a
+    # value could arrive already constructed: a file written by an earlier release, or edited by
+    # hand, would otherwise replay a control character into a warm run's output without any
+    # document being read. `CACHE_VERSION` already discards entries across a schema change, so
+    # this pins the property that does not depend on the version having moved.
+    path = tmp_path / CACHE_FILE_NAME
+    payload = _sample_cache_file().model_dump(mode="json")
+    payload["entries"]["docs/a.md"]["node"]["meta"][field] = "a\x1b[31m"
+    path.write_text(json.dumps(payload), encoding="utf-8")
+
+    assert load(path) == StoreSnapshot(cache=None, baseline=None)
+
+
 def test_save_unchanged_baseline_skips_write_and_directory_creation(tmp_path: Path):
     final = _sample_cache_file()
     path = tmp_path / "missing" / CACHE_FILE_NAME
