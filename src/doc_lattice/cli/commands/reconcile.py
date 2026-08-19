@@ -125,10 +125,13 @@ _RECOVERY_SUMMARIES: dict[RecoveryAction, str] = {
 }
 
 
-def _provenance_payload(
-    provenance: JournalProvenance | None,
-) -> dict[str, str | dict[str, str | None]] | None:
+def _provenance_payload(provenance: JournalProvenance | None) -> dict[str, object] | None:
     """Render journal provenance for the machine channel, or None when there is none.
+
+    The wire model is the spelling, so this is its own JSON dump rather than a hand-listed
+    copy of its fields: the journal a consumer reads and the payload describing it cannot
+    then disagree about a key, and the exact-payload tests make any future field on
+    ``JournalProvenance`` announce itself here instead of going silently unreported.
 
     Null covers both a recovered version 1 journal and a run that found no journal at all.
     ``action`` already separates those two, so a second key spelling the journal version
@@ -140,18 +143,7 @@ def _provenance_payload(
     Returns:
         The provenance object with its values in their recorded spelling, or None.
     """
-    if provenance is None:
-        return None
-    selector = provenance.selector
-    return {
-        "created_at": journal_timestamp_text(provenance.created_at),
-        "tool_version": provenance.tool_version,
-        "selector": {
-            "mode": selector.mode,
-            "downstream_id": selector.downstream_id,
-            "ref": selector.ref,
-        },
-    }
+    return None if provenance is None else provenance.model_dump(mode="json")
 
 
 def _recovery_json_payload(recovery: RecoveryResult) -> str:
