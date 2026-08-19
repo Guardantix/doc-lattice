@@ -1207,8 +1207,15 @@ and reuse this helper rather than deciding a spelling of their own. GTX-125 and 
 close the document-path vector; nothing here claims the repo-controlled vector is fully closed.
 
 A static guard in `tests/test_conventions.py` enforces the boundary going forward: inside the
-modules this record covers, a path-bearing name interpolated into an f-string must go through the
+modules this record covers, a path-bearing name reaching human-facing text must go through the
 helper. The failure mode being guarded is an omitted construction site, which a per-sink
-behavioral list cannot catch for a sink that does not exist yet. Its exemptions name
-`reconcile_transaction.py` as GTX-209's, and the config, cache, and `init` paths as strings that
-carry no repo-controlled document filename.
+behavioral list cannot catch for a sink that does not exist yet. Two things make it able to see
+the sinks it covers. It reads through wrapper calls and whole attribute chains rather than only
+the top-level expression, because the sink this change repaired was spelled `{escape(path.name)}`
+and a top-level test sees a call there and reports nothing. It also scans bare `escape(...)` calls
+and not only f-string interpolations, because the reconcile adapter formats its basename once
+above the loop that prints it, so the raw path never reaches an f-string and an interpolation-only
+scan calls that sink clean however it is spelled. Its exemptions name `reconcile_transaction.py`,
+`persistence.py`'s orphaned-stage note, and the adapter's two recovery-reporting sinks as
+GTX-209's, and the config, cache, and `init` paths as strings that carry no repo-controlled
+document filename.
