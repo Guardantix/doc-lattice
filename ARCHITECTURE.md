@@ -1566,8 +1566,9 @@ puts the raw `0x1b` bytes on stdout. The promise says that cannot happen; AD-34 
 Only one of the two can hold, and which one gives is decided by whether a control-free annotation
 is reachable at all. It is not. `escape_github_property` substitutes `%`, `:`, `,`, CR, and LF,
 and those five are the whole of the workflow-command grammar's property vocabulary: the runner
-reverses exactly that set to recover the value it resolves the annotation against. CR and LF
-therefore survive a round trip and `ESC` has no representation that does. A spelling such as
+reverses exactly that set to recover the value it resolves the annotation against. CR and LF are
+therefore encoded and round-trip, which is why they are the two control characters this record's
+exception does not cover, and `ESC` has no representation that does. A spelling such as
 `%1B`, `\x1b`, or AD-34's `repr` reaches GitHub as a literally different filename, which attaches
 the annotation to nothing, and deletion is `strip_control_chars` again, non-injective for the
 reason AD-34 already rejected it. The channel can carry the byte or lose the attachment; there is
@@ -1585,18 +1586,24 @@ a new breaking change after 5.0 shipped is the lesser objection and not the deci
 **Decision:** README's promise is narrowed to human-facing output and names its one exception
 outright. The `file=` value of a `--format github` annotation is excluded, with the reason stated
 where a reader meets the promise rather than only in this log: GitHub resolves that value against
-the file it attaches to, so the repo-relative filename is reproduced exactly. Nothing else is
-excluded. `--format json` keeps the guarantee on its own merits, because JSON's encoder escapes
-control characters and the `check` and `lint` payloads carry no filename, and the narrowing says
-so rather than sweeping both machine formats out together. The annotation encoder, AD-34, and
+the file it attaches to, so the repo-relative filename is spelled by the workflow-command grammar
+rather than by the escape-free rule. The exception is therefore narrower than "control characters
+reach the annotation" and README states it at that width: CR and LF are encoded to `%0D` and
+`%0A`, and every other control character passes through raw, `ESC`, tab, `DEL`, and C1 alike.
+Wording it as the whole control range would have been an overstatement in the one document that
+owns the public guarantee. Nothing else is excluded. `--format json` keeps the guarantee on its
+own merits, because JSON's encoder escapes control characters and the `check` and `lint` payloads
+carry no filename, and the narrowing says so rather than sweeping both machine formats out
+together. The annotation encoder, AD-34, and
 AD-35 are unchanged; this record moves a document, not a byte of output.
 
 **Consequences:** The cost is a genuinely weaker public promise, and it is worth stating plainly
 rather than as a technicality. Under `--no-color` or `NO_COLOR`, a repository containing a
-control-bearing document filename can still put that control character on stdout through
-`check --format github` and `lint --format github`. What bounds it is the channel: that output is
-addressed to the Actions log rather than to an interactive terminal, and a reader piping it to one
-inherits the same exposure they would from `cat` on the filename itself. Human output, help,
+document whose filename carries any control character other than CR or LF can still put that
+character on stdout through `check --format github` and `lint --format github`. What bounds it is
+the code-point range above and the channel: that output is addressed to the Actions log rather
+than to an interactive terminal, and a reader piping it to one inherits the same exposure they
+would from `cat` on the filename itself. Human output, help,
 usage errors, warnings, and diagnostics are unaffected and keep the full guarantee, which is where
 AD-34's vector actually ran.
 
@@ -1608,3 +1615,12 @@ byte survives, and this one asserts that here it must.
 `tests/test_path_display_contract.py`'s encoder-boundary case is kept and is not redundant with
 it, because that case proves what `github_annotation` builds while this one proves what the two
 no-color levers do to it, and only the second is a statement about the promise.
+
+That file also pins the exception's width, parametrized over both halves: CR and LF encode to
+`%0D` and `%0A`, and `ESC`, tab, `DEL`, and the single-byte C1 CSI pass through raw. The width is
+tested rather than only written because the first draft of this record and of README stated the
+exception as the whole control range, which is wrong by exactly two code points, and an
+end-to-end case built on an `ESC`-bearing filename cannot catch that error: every control it
+exercises is on the raw side of the boundary. A public guarantee narrowed too far is its own
+defect, so the two code points that keep their encoding are pinned as deliberately as the ones
+that do not.

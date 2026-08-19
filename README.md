@@ -271,14 +271,15 @@ terminal-forcing variable is set. This covers every command's human-facing outpu
 and usage-error text: reports, warnings, and diagnostics alike.
 
 One machine channel is excluded from that guarantee, deliberately and by name: the `file=` value
-of a `--format github` annotation. It reproduces the document's repo-relative filename exactly, so
-a document whose filename contains a control character puts that character into the annotation
-under either lever. GitHub resolves that value against the file the annotation attaches to, and
-the workflow-command grammar defines substitutions for only `%`, `:`, `,`, carriage return, and
-line feed; there is no spelling of an `ESC` that GitHub decodes back to the original filename, and
-deleting it would map two differently named documents onto one annotation. Attachment is worth
-more there than styling a channel no terminal renders, so the raw spelling stays. Nothing else is
-excluded: `--format json` keeps the guarantee, because JSON's own encoder escapes control
+of a `--format github` annotation. GitHub resolves that value against the file the annotation
+attaches to, so the document's repo-relative filename is spelled by the workflow-command grammar
+rather than by the rule above. That grammar substitutes only `%`, `:`, `,`, carriage return, and
+line feed, so a filename carrying a carriage return or a line feed is encoded and reaches you as
+`%0D` or `%0A`. Every other control character passes through raw, `ESC`, tab, `DEL`, and the C1
+range included: none of them has a spelling GitHub decodes back to the original filename, and
+deleting one would map two differently named documents onto a single annotation. Attachment is
+worth more there than styling a channel no terminal renders, so the raw spelling stays. Nothing
+else is excluded: `--format json` keeps the guarantee, because JSON's own encoder escapes control
 characters, and the `check` and `lint` payloads carry no filename at all.
 
 `check` and `lint` also accept `--format human|json|github`. `human` is the default. `github`

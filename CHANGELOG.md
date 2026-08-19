@@ -10,30 +10,20 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 - The `--no-color` / `NO_COLOR` escape-free promise in README.md is narrowed to human-facing
   output and now names its one exception. No behavior changes: this corrects a documented
-  guarantee that was broader than the engine ever kept. The `file=` value of a `--format github`
-  annotation reproduces the document's repo-relative filename exactly, so a repository holding a
-  document whose *filename* carries a control character has always been able to put that
-  character on stdout through `check --format github` and `lint --format github`, under either
-  lever. README promised it could not; AD-34 had excluded that channel from the display spelling
-  since 5.0. The two disagreed from the moment AD-34 landed, and the contradiction went unstated
-  only because no case exercised both at once.
+  guarantee that was always broader than the engine kept. A repository holding a document whose
+  *filename* carries a control character other than a carriage return or a line feed has always
+  been able to put that character on stdout through `check --format github` and
+  `lint --format github`, under either lever, because the annotation's `file=` value is what
+  GitHub resolves the attachment against. README promised it could not; AD-34 had excluded that
+  channel since 5.0, so the two documents disagreed from the moment AD-34 landed.
 
-  README's promise gave way rather than the encoder, because a control-free annotation is not
-  reachable. GitHub resolves `file=` against the document the annotation attaches to, and the
-  workflow-command grammar substitutes only `%`, `:`, `,`, carriage return, and line feed, so an
-  `ESC` has no spelling the runner decodes back to the original filename: `%1B`, `\x1b`, and the
-  quoted display spelling all name a different file, and deleting the byte maps two distinct
-  documents onto one annotation. Sanitizing would trade a visible control character for an
-  annotation that silently attaches to nothing.
-
-  Nothing else is excluded. `--format json` keeps the guarantee on its own merits, because JSON's
-  encoder escapes control characters and the `check` and `lint` payloads carry no filename. Human
-  output, help, usage errors, warnings, and diagnostics are unaffected. If you pipe
-  `--format github` output to an interactive terminal rather than to the Actions log it is
-  addressed to, you inherit the same exposure `cat` on the filename would give you. AD-38 in
-  ARCHITECTURE.md records the decision, the alternative of refusing such a filename outright, and
-  why that alternative was rejected; an end-to-end case under both levers now enforces the
-  exclusion instead of leaving it written down.
+  README's promise gave way rather than the encoder, because no sanitized spelling round-trips
+  back to the original filename and every candidate detaches the annotation instead. AD-38 in
+  ARCHITECTURE.md owns that reasoning and the rejected alternative of refusing such a filename
+  outright; README.md owns the narrowed promise and states the exception's exact width. Nothing
+  else is excluded, `--format json` included. Human output, help, usage errors, warnings, and
+  diagnostics keep the full guarantee. Tests now enforce the exclusion under both levers and pin
+  the carriage-return and line-feed boundary rather than leaving either written down.
 
 ## [5.0.0] - 2026-08-19
 
