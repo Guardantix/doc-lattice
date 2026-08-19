@@ -41,7 +41,7 @@ from .error_types import (
     copy_exception_notes,
     exception_details,
 )
-from .path_utils import safe_resolve
+from .path_utils import format_path_for_display, safe_resolve
 from .persistence import (
     atomic_create_bytes,
     atomic_replace_bytes,
@@ -251,6 +251,26 @@ class _JournalVersionProbe(BaseModel):
 
 
 @dataclass(frozen=True, slots=True)
+class ScanFailure:
+    """One directory the orphan scan could not enumerate, kept structured until encoding.
+
+    ``unresolved`` and ``orphans`` stay project-relative strings a human sink can convert back
+    to a path, but a scan failure fuses its path into prose at the producer. Formatting it
+    there would move the machine payload, and escaping the finished sentence at the sink would
+    apply the path spelling to a whole sentence, so the two components are retained separately
+    and joined by whichever encoder the run selected.
+    """
+
+    filename: str
+    detail: str
+
+    @property
+    def legacy_text(self) -> str:
+        """Render the pre-GTX-209 spelling, which the JSON payload still emits verbatim."""
+        return f"cannot scan {self.filename} for orphaned artifacts: {self.detail}"
+
+
+@dataclass(frozen=True, slots=True)
 class RecoveryResult:
     """The action taken for a project reconcile journal."""
 
@@ -260,7 +280,7 @@ class RecoveryResult:
     already_before: int = 0
     unresolved: tuple[str, ...] = ()
     orphans: tuple[str, ...] = ()
-    scan_errors: tuple[str, ...] = ()
+    scan_errors: tuple[ScanFailure, ...] = ()
 
     @property
     def is_incomplete(self) -> bool:
@@ -407,7 +427,8 @@ class _PendingRewrite:
 def _invalid_journal_error(journal: Path, cause: object) -> ReconcilePersistenceError:
     """Build the deliberate manual-remediation diagnostic for an invalid journal."""
     message = (
-        f"invalid reconcile journal {journal}: {cause}; inspect {journal}, its destinations, "
+        f"invalid reconcile journal {format_path_for_display(journal)}: {cause}; inspect "
+        f"{format_path_for_display(journal)}, its destinations, "
         "and staged files; move the invalid journal aside only after manual restoration or "
         "preservation; rerun 'doc-lattice reconcile --recover'"
     )
@@ -417,8 +438,8 @@ def _invalid_journal_error(journal: Path, cause: object) -> ReconcilePersistence
 def _journal_already_exists_message(journal_path: Path) -> str:
     """Render the identical diagnostic for a pre-existing or racing journal."""
     return (
-        f"reconcile journal {journal_path} already exists; preserve it and run "
-        "'doc-lattice reconcile --recover'"
+        f"reconcile journal {format_path_for_display(journal_path)} already exists; preserve "
+        "it and run 'doc-lattice reconcile --recover'"
     )
 
 
@@ -447,13 +468,16 @@ def _journal_is_present(journal: Path) -> bool:
 def _resolve_journal_path(project_root: Path, field: str, raw_path: str) -> Path:
     """Resolve one relative journal path while enforcing project containment."""
     path = Path(raw_path)
+    # The recorded string, not the parsed Path: this diagnostic rejects exactly what the
+    # journal spells, and Path() would normalize the spelling it is reporting on.
+    recorded = format_path_for_display(raw_path)
     if path.is_absolute():
-        message = f"{field} must be relative, got {raw_path}"
+        message = f"{field} must be relative, got {recorded}"
         raise ValueError(message)
     try:
         return safe_resolve(project_root / path, project_root)
     except (OSError, RuntimeError, ValueError) as cause:
-        message = f"unsafe {field} {raw_path}: {cause}"
+        message = f"unsafe {field} {recorded}: {cause}"
         raise ValueError(message) from cause
 
 
@@ -471,9 +495,15 @@ def _validate_artifact_path(
     # unresolved recorded path instead: resolving would follow a symlink planted at that
     # name and report the target's type, hiding exactly the substitution being rejected.
     candidate = project_root / Path(raw_path)
+    # Every message below names the same pair, so the display spelling is applied once here
+    # rather than at each of the six sinks. `recorded` is the journal's own string; `resolved`
+    # is what it resolved to.
+    recorded = format_path_for_display(raw_path)
+    resolved = format_path_for_display(artifact)
     if artifact.parent != destination.parent:
         message = (
-            f"{field} {raw_path} ({artifact}) must be in destination directory {destination.parent}"
+            f"{field} {recorded} ({resolved}) must be in destination directory "
+            f"{format_path_for_display(destination.parent)}"
         )
         raise ValueError(message)
     infix = RECONCILE_BEFORE_IMAGE_INFIX if role == "before" else RECONCILE_AFTER_IMAGE_INFIX
@@ -482,20 +512,24 @@ def _validate_artifact_path(
     name = Path(raw_path).name
     component = name[len(prefix) : -len(suffix)]
     if not name.startswith(prefix) or not name.endswith(suffix) or not component:
-        message = f"{field} {raw_path} ({artifact}) must match {prefix}<nonempty>{suffix} exactly"
+        # The expected pattern embeds destination.name, so it carries a document filename and
+        # is displayed whole. Displaying `prefix` and `suffix` separately would quote the
+        # pattern in three pieces and read as three unrelated values.
+        expected = format_path_for_display(prefix + "<nonempty>" + suffix)
+        message = f"{field} {recorded} ({resolved}) must match {expected} exactly"
         raise ValueError(message)
     if candidate.is_symlink():
-        message = f"{field} {raw_path} ({artifact}) is a symlink, not a recovery artifact"
+        message = f"{field} {recorded} ({resolved}) is a symlink, not a recovery artifact"
         raise ValueError(message)
     try:
         mode = candidate.lstat().st_mode
     except FileNotFoundError:
         return
     except OSError as cause:
-        message = f"cannot inspect {field} {raw_path} ({artifact}): {cause}"
+        message = f"cannot inspect {field} {recorded} ({resolved}): {cause}"
         raise ValueError(message) from cause
     if not stat.S_ISREG(mode):
-        message = f"{field} {raw_path} ({artifact}) is a nonregular recovery artifact"
+        message = f"{field} {recorded} ({resolved}) is a nonregular recovery artifact"
         raise ValueError(message)
 
 
@@ -505,11 +539,17 @@ def _validate_path_roles(entries: tuple[_ResolvedEntry, ...], journal_path: Path
     destinations: dict[Path, int] = {}
     for index, entry in enumerate(entries):
         if entry.destination == canonical_journal:
-            message = f"entry {index} destination aliases journal path {journal_path}"
+            message = (
+                f"entry {index} destination aliases journal path "
+                f"{format_path_for_display(journal_path)}"
+            )
             raise ValueError(message)
         if entry.destination in destinations:
             first = destinations[entry.destination]
-            message = f"destination alias across entries {first} and {index}: {entry.destination}"
+            message = (
+                f"destination alias across entries {first} and {index}: "
+                f"{format_path_for_display(entry.destination)}"
+            )
             raise ValueError(message)
         destinations[entry.destination] = index
 
@@ -520,16 +560,22 @@ def _validate_path_roles(entries: tuple[_ResolvedEntry, ...], journal_path: Path
             ("after_path", entry.after_path),
         ):
             if artifact == canonical_journal:
-                message = f"entry {index} {role_field} aliases journal path {journal_path}"
+                message = (
+                    f"entry {index} {role_field} aliases journal path "
+                    f"{format_path_for_display(journal_path)}"
+                )
                 raise ValueError(message)
             if artifact in destinations:
-                message = f"entry {index} {role_field} artifact {artifact} aliases destination path"
+                message = (
+                    f"entry {index} {role_field} artifact {format_path_for_display(artifact)} "
+                    "aliases destination path"
+                )
                 raise ValueError(message)
             if artifact in artifacts:
                 first_index, first_field = artifacts[artifact]
                 message = (
                     f"artifact alias between entry {first_index} {first_field} and "
-                    f"entry {index} {role_field}: {artifact}"
+                    f"entry {index} {role_field}: {format_path_for_display(artifact)}"
                 )
                 raise ValueError(message)
             artifacts[artifact] = (index, role_field)
@@ -590,7 +636,9 @@ def _load_journal(
 ) -> tuple[_LoadedJournal, tuple[_ResolvedEntry, ...], bytes]:
     """Read, validate, and contain every path in a reconcile journal."""
     if not _journal_is_present(journal_path):
-        cause = FileNotFoundError(f"canonical journal {journal_path} is absent")
+        cause = FileNotFoundError(
+            f"canonical journal {format_path_for_display(journal_path)} is absent"
+        )
         raise _invalid_journal_error(journal_path, cause) from cause
     try:
         encoded = journal_path.read_bytes()
@@ -648,8 +696,8 @@ def _recovery_operation_error(
     journal_status = _journal_retry_status(journal, journal_bytes)
     cause_details = exception_details(cause)
     message = (
-        f"reconcile recovery failed while {operation} {path}: {cause_details}; "
-        f"{journal_status}; correct the filesystem problem and rerun "
+        f"reconcile recovery failed while {operation} {format_path_for_display(path)}: "
+        f"{cause_details}; {journal_status}; correct the filesystem problem and rerun "
         "'doc-lattice reconcile --recover'"
     )
     return ReconcilePersistenceError(message)
@@ -657,28 +705,33 @@ def _recovery_operation_error(
 
 def _exact_journal_status(journal: Path, journal_bytes: bytes) -> tuple[_JournalStatus, str]:
     """Classify whether the canonical journal is a regular exact-byte copy."""
+    # Every branch returns text a person reads, and the returned detail is embedded again by
+    # `_journal_retry_status` and `_cleanup_journal`. The journal is displayed here, where it
+    # first enters text, so those outer sinks compose already-displayed text rather than
+    # wrapping a path a second time.
+    displayed = format_path_for_display(journal)
     try:
         mode = journal.lstat().st_mode
     except FileNotFoundError:
-        return "absent", f"journal {journal} is not present"
+        return "absent", f"journal {displayed} is not present"
     except OSError as cause:
-        return "invalid", f"cannot inspect journal {journal}: {cause}"
+        return "invalid", f"cannot inspect journal {displayed}: {cause}"
     if not stat.S_ISREG(mode):
-        return "invalid", f"journal collision at {journal} is not a regular file"
+        return "invalid", f"journal collision at {displayed} is not a regular file"
     try:
         current_bytes = journal.read_bytes()
     except OSError as cause:
-        return "invalid", f"cannot read journal {journal}: {cause}"
+        return "invalid", f"cannot read journal {displayed}: {cause}"
     if current_bytes != journal_bytes:
-        return "invalid", f"journal collision at {journal} contains different bytes"
-    return "exact", f"journal {journal} is an exact recovery copy"
+        return "invalid", f"journal collision at {displayed} contains different bytes"
+    return "exact", f"journal {displayed} is an exact recovery copy"
 
 
 def _journal_retry_status(journal: Path, journal_bytes: bytes) -> str:
     """Describe only journal bytes verified at the canonical path."""
     status, detail = _exact_journal_status(journal, journal_bytes)
     if status == "exact":
-        return f"journal {journal} remains for retry"
+        return f"journal {format_path_for_display(journal)} remains for retry"
     if status == "absent":
         return f"{detail}; preserve all available recovery artifacts"
     return f"exact recovery journal could not be restored: {detail}"
@@ -693,8 +746,9 @@ def _unsafe_before_error(
     """Build a diagnostic for an after-image that cannot be safely restored."""
     journal_status = _journal_retry_status(journal, journal_bytes)
     message = (
-        f"cannot safely recover destination {entry.destination}: it still matches the "
-        f"transaction after image, but before image {entry.before_path} is {state}; journal "
+        f"cannot safely recover destination {format_path_for_display(entry.destination)}: it "
+        "still matches the transaction after image, but before image "
+        f"{format_path_for_display(entry.before_path)} is {state}; journal "
         f"status: {journal_status}; restore the required before image or "
         "preserve the destination manually, then rerun 'doc-lattice reconcile --recover'"
     )
@@ -711,7 +765,8 @@ def _unsafe_artifact_error(
     """Build a manual-recovery diagnostic for an unauthenticated stage."""
     journal_status = _journal_retry_status(journal, journal_bytes)
     message = (
-        f"cannot safely clean staged artifact {staged} for destination {destination}: "
+        f"cannot safely clean staged artifact {format_path_for_display(staged)} for "
+        f"destination {format_path_for_display(destination)}: "
         f"{state}; {journal_status}; preserve the artifact and journal for manual inspection, "
         "correct the recovery evidence, then rerun 'doc-lattice reconcile --recover'"
     )
@@ -730,7 +785,10 @@ def _nearest_existing_directory(path: Path, project_root: Path) -> Path:
             current = current.parent
             continue
         if not stat.S_ISDIR(mode):
-            message = f"recovery synchronization ancestor is not a directory: {current}"
+            message = (
+                "recovery synchronization ancestor is not a directory: "
+                f"{format_path_for_display(current)}"
+            )
             raise NotADirectoryError(message)
         return current
 
@@ -747,16 +805,23 @@ def _resync_after_unlink(path: Path, project_root: Path, primary: OSError) -> bo
     try:
         _sync_artifact_parent(path, project_root)
     except OSError as retry_error:
-        primary.add_note(f"directory resync failed after unlink of {path}: {retry_error}")
+        primary.add_note(
+            f"directory resync failed after unlink of {format_path_for_display(path)}: "
+            f"{retry_error}"
+        )
         return False
     try:
         path.lstat()
     except FileNotFoundError:
         return True
     except OSError as retry_error:
-        primary.add_note(f"cannot verify absence after resync of {path}: {retry_error}")
+        primary.add_note(
+            f"cannot verify absence after resync of {format_path_for_display(path)}: {retry_error}"
+        )
         return False
-    primary.add_note(f"path reappeared during directory resync after unlink of {path}")
+    primary.add_note(
+        f"path reappeared during directory resync after unlink of {format_path_for_display(path)}"
+    )
     return False
 
 
@@ -876,7 +941,9 @@ def _restore_journal(journal: Path, journal_bytes: bytes, primary: OSError) -> b
             prefix=_JOURNAL_STAGE_PREFIX,
         )
     except OSError as restore_error:
-        primary.add_note(f"journal restoration failed for {journal}: {restore_error}")
+        primary.add_note(
+            f"journal restoration failed for {format_path_for_display(journal)}: {restore_error}"
+        )
     status, detail = _exact_journal_status(journal, journal_bytes)
     if status == "exact":
         return True
@@ -889,7 +956,8 @@ def _cleanup_journal(journal: Path, journal_bytes: bytes) -> None:
     status, detail = _exact_journal_status(journal, journal_bytes)
     if status != "exact":
         message = (
-            f"cannot safely clean reconcile journal {journal}: {detail}; refusing to remove "
+            f"cannot safely clean reconcile journal {format_path_for_display(journal)}: "
+            f"{detail}; refusing to remove "
             "an unverified journal path; preserve all available recovery evidence for manual "
             "inspection"
         )
@@ -1089,7 +1157,7 @@ def _project_relative(paths: tuple[Path, ...], canonical_root: Path) -> tuple[st
 def _scan_orphan_artifacts(
     canonical_root: Path,
     referenced: frozenset[Path],
-) -> tuple[tuple[str, ...], tuple[str, ...]]:
+) -> tuple[tuple[str, ...], tuple[ScanFailure, ...]]:
     """Find transaction artifacts that no retained journal accounts for.
 
     Args:
@@ -1099,13 +1167,18 @@ def _scan_orphan_artifacts(
         referenced: Artifacts a retained journal still owns, which are never orphans.
 
     Returns:
-        Sorted project-relative orphan paths and sorted enumeration-failure diagnostics.
+        Sorted project-relative orphan paths and enumeration failures, the latter ordered by
+        their legacy rendered text so the JSON payload's array order is unchanged. Sorting the
+        records by field would reorder the array whenever a filename and its rendered line
+        disagree about order, which the byte-identity contract does not allow.
     """
     orphans: list[Path] = []
-    scan_errors: list[str] = []
+    scan_errors: list[ScanFailure] = []
 
     def _record_scan_error(cause: OSError) -> None:
-        scan_errors.append(f"cannot scan {cause.filename} for orphaned artifacts: {cause}")
+        # str(), not an f-string: this captures structured data for an encoder to spell
+        # later, and building it as text here is what the display guard exists to catch.
+        scan_errors.append(ScanFailure(filename=str(cause.filename), detail=str(cause)))
 
     for directory, subdirectories, names in os.walk(canonical_root, onerror=_record_scan_error):
         parent = Path(directory)
@@ -1115,7 +1188,10 @@ def _scan_orphan_artifacts(
             candidate = parent / name
             if candidate not in referenced:
                 orphans.append(candidate)
-    return _project_relative(tuple(orphans), canonical_root), tuple(sorted(scan_errors))
+    return (
+        _project_relative(tuple(orphans), canonical_root),
+        tuple(sorted(scan_errors, key=lambda failure: failure.legacy_text)),
+    )
 
 
 def _journal_path(project_root: Path) -> Path:
@@ -1177,7 +1253,8 @@ def _cleanup_unpublished_stages(staged_paths: list[Path], primary: BaseException
             durable_unlink(staged)
         except OSError as cleanup_error:
             primary.add_note(
-                f"durable cleanup failed for unpublished stage {staged}: {cleanup_error}; "
+                "durable cleanup failed for unpublished stage "
+                f"{format_path_for_display(staged)}: {cleanup_error}; "
                 "it has no recovery journal, so inspect and remove it manually after "
                 "confirming it is not a destination"
             )
@@ -1220,13 +1297,16 @@ def _preflight_rewrite_destinations(
         destination = safe_resolve(write_paths[rewrite.path], canonical_root)
         destination_relative = destination.relative_to(canonical_root).as_posix()
         if destination == canonical_journal:
-            message = f"reconcile destination {destination} aliases journal path {journal_path}"
+            message = (
+                f"reconcile destination {format_path_for_display(destination)} aliases journal "
+                f"path {format_path_for_display(journal_path)}"
+            )
             raise ValueError(message)
         if destination in destination_indices:
             first_index = destination_indices[destination]
             message = (
-                f"duplicate reconcile destination {destination} for rewrites "
-                f"{first_index} and {index}"
+                f"duplicate reconcile destination {format_path_for_display(destination)} "
+                f"for rewrites {first_index} and {index}"
             )
             raise ValueError(message)
         destination_indices[destination] = index
@@ -1319,7 +1399,8 @@ def _prepare_transaction(
             message = _journal_already_exists_message(journal_path)
         else:
             message = (
-                f"reconcile preparation failed while {operation} {operation_path}: "
+                f"reconcile preparation failed while {operation} "
+                f"{format_path_for_display(operation_path)}: "
                 f"{exception_details(primary)}; no destination was changed"
             )
         error = ReconcilePersistenceError(message)
@@ -1342,7 +1423,8 @@ def _commit_operation_error(
 ) -> ReconcilePersistenceError:
     """Wrap one commit I/O failure with its operation and destination."""
     error = ReconcilePersistenceError(
-        f"reconcile commit failed while {operation} {path}: {exception_details(cause)}"
+        f"reconcile commit failed while {operation} {format_path_for_display(path)}: "
+        f"{exception_details(cause)}"
     )
     copy_exception_notes(error, cause)
     return error
@@ -1393,9 +1475,11 @@ def _abort_prepared(
         error.add_note(f"rollback failure: {exception_details(rollback_error)}")
         raise error from primary
     if outcome.unresolved:
-        destinations = ", ".join(str(destination) for destination in outcome.unresolved)
+        listed = ", ".join(
+            format_path_for_display(destination) for destination in outcome.unresolved
+        )
         error = ReconcilePersistenceError(
-            f"{primary}; rollback was incomplete: {destinations} matched neither the "
+            f"{primary}; rollback was incomplete: {listed} matched neither the "
             "transaction before image nor its after image; the journal and every remaining "
             "staged image were retained; run 'doc-lattice reconcile --recover'"
         )
@@ -1436,8 +1520,9 @@ def _reset_prepared_journal(
             return
         if current_bytes != committed_bytes:
             message = (
-                f"reconcile commit failed while resetting prepared journal {journal_path}: "
-                "the visible journal contains unexpected bytes"
+                "reconcile commit failed while resetting prepared journal "
+                f"{format_path_for_display(journal_path)}: the visible journal contains "
+                "unexpected bytes"
             )
             raise ReconcilePersistenceError(message)
         try:
@@ -1453,7 +1538,8 @@ def _reset_prepared_journal(
     status, detail = _exact_journal_status(journal_path, prepared.journal_bytes)
     if status != "exact":
         message = (
-            f"reconcile commit failed while resetting prepared journal {journal_path}: {detail}"
+            "reconcile commit failed while resetting prepared journal "
+            f"{format_path_for_display(journal_path)}: {detail}"
         )
         raise ReconcilePersistenceError(message)
 
@@ -1531,7 +1617,8 @@ def _commit_rewrites_locked(
             _abort_prepared(prepared, primary, candidates=frozenset(candidates))
         if current_sha256 != entry.before_sha256:
             primary = ReconcileConflictError(
-                f"reconcile destination {entry.destination} changed after validation"
+                f"reconcile destination {format_path_for_display(entry.destination)} changed "
+                "after validation"
             )
             _abort_prepared(prepared, primary, candidates=frozenset(candidates))
         try:
@@ -1551,8 +1638,10 @@ def _commit_rewrites_locked(
             )
         if not after_present:
             primary = ReconcilePersistenceError(
-                f"cannot apply reconcile destination {entry.destination}: staged after image "
-                f"{entry.after_path} is missing immediately before replacement"
+                "cannot apply reconcile destination "
+                f"{format_path_for_display(entry.destination)}: staged after image "
+                f"{format_path_for_display(entry.after_path)} is missing immediately before "
+                "replacement"
             )
             _abort_prepared(
                 prepared,
@@ -1727,7 +1816,7 @@ def ensure_dry_run_safe(project_root: Path) -> None:
     journal = _journal_path(project_root)
     if _journal_is_present(journal):
         message = (
-            f"reconcile journal {journal} requires recovery; "
+            f"reconcile journal {format_path_for_display(journal)} requires recovery; "
             "run 'doc-lattice reconcile --recover' first"
         )
         raise ReconcilePersistenceError(message)

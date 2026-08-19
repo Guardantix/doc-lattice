@@ -7,6 +7,7 @@ import tempfile
 from pathlib import Path
 
 from .constants import PERSISTENCE_TEMP_SUFFIX
+from .path_utils import format_path_for_display
 
 _IS_WINDOWS = os.name == "nt"
 
@@ -61,11 +62,18 @@ def _regular_file_mode(destination_stat: os.stat_result) -> int | None:
 
 
 def _unpublished_stage_cleanup_note(staged: str | Path, cleanup_error: OSError) -> str:
-    """Render the manual remediation note for an orphaned helper-owned stage."""
+    """Render the manual remediation note for an orphaned helper-owned stage.
+
+    The stage is named after the destination it was written beside, so a reconcile stage
+    inherits a document filename and this note carries it into text a person reads. AD-34
+    therefore applies here even though the same helper also stages ``init``'s config file and
+    the load cache, whose paths are not document paths: the spelling is settled once, at the
+    only sink, rather than per caller.
+    """
     return (
-        f"durable cleanup failed for helper-owned stage {staged}: {cleanup_error}; "
-        "it is not governed by a recovery journal, so inspect and remove it manually "
-        "when safe"
+        f"durable cleanup failed for helper-owned stage {format_path_for_display(staged)}: "
+        f"{cleanup_error}; it is not governed by a recovery journal, so inspect and remove it "
+        "manually when safe"
     )
 
 

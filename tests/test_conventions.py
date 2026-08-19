@@ -208,6 +208,9 @@ DESTINATION_FIELD = "destination"
 # is keyed to the destination rather than to a list of primitives, and every callee that reaches
 # one is classified here deliberately. `stage_bytes` writes a sibling temporary, never the
 # destination itself; the rest fingerprint, validate, or report it.
+# `format_path_for_display` is the purest reader of the set: it returns `repr(str(path))` and
+# touches no filesystem at all (AD-34). GTX-209 added it, because applying the display spelling
+# to the transaction's own diagnostics hands a destination to it from several functions.
 DESTINATION_READERS = frozenset(
     {
         "_authenticate_staged_artifact",
@@ -216,6 +219,7 @@ DESTINATION_READERS = frozenset(
         "_resolve_journal_path",
         "_validate_artifact_path",
         "file_sha256",
+        "format_path_for_display",
         "stage_bytes",
         PUBLISH_CALLEE,
     }
@@ -1695,40 +1699,83 @@ _PATH_BEARING_NAMES = frozenset(
     {"path", "source", "destination", "journal", "link", "cwd", "staged"}
 )
 
-# Modules outside GTX-125's ownership, each with the reason it is not scanned. Keyed on the
+# GTX-209: names that are path-typed only inside one module. Scoping them is what lets the
+# transaction and recovery sinks be enforced without the global set growing terms that are
+# paths there and something else elsewhere -- `current` is an ancestor directory in
+# `reconcile_transaction.py` and would read as a cursor or a counter anywhere else, and
+# `filename` is a scan failure's path component in the reconcile adapter and an ordinary
+# attribute name in general.
+#
+# `detail` is deliberately absent from every set, even though it names a real sink. In
+# `reconcile_transaction.py` it holds text `_exact_journal_status` has *already* displayed, so
+# classifying it as a raw path would demand wrapping it a second time, against this issue's own
+# rule that a path is displayed once, where it first enters text. Outside these modules it names
+# rendered validation and Linear output that carries no path at all.
+_MODULE_PATH_BEARING_NAMES: dict[str, frozenset[str]] = {
+    "reconcile_transaction.py": frozenset(
+        {
+            "journal_path",
+            "raw_path",
+            "artifact",
+            "before_path",
+            "after_path",
+            "operation_path",
+            "current",
+            "prefix",
+            "filename",
+        }
+    ),
+    "cli/commands/reconcile.py": frozenset({"orphan", "filename"}),
+}
+
+# Modules outside the guard's ownership, each with the reason it is not scanned. Keyed on the
 # module's path under `src/doc_lattice`, not its basename: two packages here already hold a
 # `reconcile.py`, and a basename key would exempt a future sink in the wrong one silently.
+#
+# GTX-209 retired the `reconcile_transaction.py` and `persistence.py` entries GTX-125 parked
+# here, and `path_utils.py` with them: the reconcile transaction layer embeds `safe_resolve`'s
+# containment ValueError verbatim, so that message is a human-facing sink like any other and is
+# display-spelled now rather than exempted. All three are scanned; what remains for them is
+# per-expression below.
 _DISPLAY_GUARD_EXEMPT_MODULES = {
-    # GTX-209 owns the reconcile transaction and recovery path sinks; it reuses this helper.
-    "reconcile_transaction.py",
-    # Also GTX-209's: the durable-write helper names a stage after its destination, so the
-    # orphaned-stage cleanup note carries a staged-artifact path in the same raw spelling the
-    # transaction sinks do. It is shared with `init`'s config write, whose path is not a
-    # document path at all, which is why the spelling is settled there rather than here.
-    "persistence.py",
-    # The helper's own containment error, which is what defines the boundary rather than
-    # crossing it, plus `safe_resolve`'s ValueError about a path it refused to resolve.
-    "path_utils.py",
     # Not document paths: the config file the user pointed at, the tool's own cache location,
     # and a `--docs-root` argument echoed back before any document is read. These carry no
-    # repo-controlled document filename, so GTX-125 leaves their spelling alone.
+    # repo-controlled document filename, so GTX-125 leaves their spelling alone and GTX-209
+    # keeps them out. The cache store's own diagnostic interpolates a cache path separately
+    # from the durable-write note GTX-209 did move, and stays GTX-212's boundary.
     "config.py",
     "cache/store.py",
     "cli/commands/init.py",
 }
 
-# Individual expressions inside scanned modules that are not paths despite the name, keyed the
-# same way the module exemptions are.
+# Individual expressions inside scanned modules that are not paths despite the name. Every entry
+# below is machine construction: a filename being built, or a path being written to a machine
+# channel. None of them reaches a person, and GTX-209 removed the two reconcile-adapter entries
+# that did.
+#
+# Keyed on (module, qualified function, expression) rather than on a line number. GTX-209 needed
+# five entries in one actively edited module, and a line key silently goes stale on the next
+# reformat -- exempting nothing while hiding the sink it was written for. A function key survives
+# every edit that does not move the expression to another function, and moving it there is
+# exactly the change that should be re-judged. Two unwrapped spellings of the same name in one
+# function share an entry; none of these functions has one, and splitting a function is the
+# natural fix if a future one does.
 _DISPLAY_GUARD_EXEMPT_EXPRESSIONS = {
     # `source` here is a slice of raw YAML text being re-emitted into a rewritten scalar, not a
     # file path, and it is bytes destined for a document rather than for a human.
-    ("reconcile.py", "source", 873),
-    # The adapter's recovery reporting, which is GTX-209's alongside the transaction sinks it
-    # reports on: the journal path it names and the unresolved destinations it lists come from
-    # the journal, not from the load. The rest of this module is GTX-125's, which is why the
-    # two sinks are named here rather than the module being exempted whole.
-    ("cli/commands/reconcile.py", "recovery.journal", 150),
-    ("cli/commands/reconcile.py", "destination", 161),
+    ("reconcile.py", "_anchored_seen_source", "source"),
+    # The JSON spelling of an orphan-scan failure. AD-34 excludes machine channels, and the
+    # recovery payload's byte identity rests on this line reproducing the pre-GTX-209 rendering
+    # exactly, path component included. The human encoder lives in the reconcile adapter.
+    ("reconcile_transaction.py", "ScanFailure.legacy_text", "self.filename"),
+    # Staged-artifact *filenames*, not text: the expected-name pattern a recorded artifact is
+    # matched against, and the two `stage_bytes` prefixes a new stage is created with. These are
+    # filesystem input, and quoting them would change the names written to disk.
+    ("reconcile_transaction.py", "_validate_artifact_path", "destination.name"),
+    ("reconcile_transaction.py", "_prepare_transaction", "destination.name"),
+    # The journal serializer: the exact bytes published to the journal file, which recovery
+    # reads back and validates. A machine channel in the strictest sense.
+    ("reconcile_transaction.py", "_serialize_journal", "journal.model_dump_json"),
 }
 
 
@@ -1736,6 +1783,9 @@ _DISPLAY_HELPER = "format_path_for_display"
 # Rich's markup escaper. Every human-facing sink in these modules passes its interpolated text
 # through it, which makes it the second reliable marker of text being built for a person.
 _MARKUP_ESCAPE = "escape"
+# The separator-join that turns several paths into one string. `_abort_prepared` lists every
+# unresolved destination this way, above the message that carries the result.
+_TEXT_JOIN = "join"
 
 
 def _dotted_label(node: ast.AST) -> str | None:
@@ -1748,7 +1798,7 @@ def _dotted_label(node: ast.AST) -> str | None:
     return None
 
 
-def _unwrapped_path_labels(node: ast.AST) -> set[str]:
+def _unwrapped_path_labels(node: ast.AST, names: frozenset[str]) -> set[str]:
     """Path-bearing names an expression still reaches without the display helper.
 
     Recursion rather than a bare-name test, because a sink almost never interpolates the
@@ -1756,37 +1806,72 @@ def _unwrapped_path_labels(node: ast.AST) -> set[str]:
     that only reads the top-level expression sees a call and reports nothing. Any subtree
     rooted at a ``format_path_for_display`` call is pruned, so a correctly wrapped path --
     including one wrapped and then handed to ``escape`` -- reaches no name.
+
+    Args:
+        node: The expression to scan.
+        names: The path-bearing names in force for the module being scanned, which is the
+            global set widened by that module's entry in ``_MODULE_PATH_BEARING_NAMES``.
     """
     if isinstance(node, ast.Call) and _dotted_label(node.func) == _DISPLAY_HELPER:
         return set()
     label = _dotted_label(node)
     if label is not None:
         parts = label.split(".")
-        return {label} if any(part in _PATH_BEARING_NAMES for part in parts) else set()
+        return {label} if any(part in names for part in parts) else set()
     found: set[str] = set()
-    for child in ast.iter_child_nodes(node):
-        found |= _unwrapped_path_labels(child)
+    if isinstance(node, ast.comprehension):
+        # A comprehension binds its loop variable; the binding is not a value that reaches
+        # text, and the element expression that does is scanned as a sibling of this node.
+        # Without this, the correct spelling of a join -- `join(display(destination) for
+        # destination in ...)` -- reports its own loop variable as an unwrapped path.
+        children: list[ast.AST] = [node.iter, *node.ifs]
+    else:
+        children = list(ast.iter_child_nodes(node))
+    for child in children:
+        found |= _unwrapped_path_labels(child, names)
     return found
 
 
-def _path_interpolations(source: str) -> list[tuple[int, str]]:
+def _builds_human_text(call: ast.Call) -> bool:
+    """Whether a call is one of the two non-f-string shapes that build text from paths."""
+    if _dotted_label(call.func) == _MARKUP_ESCAPE:
+        return True
+    return isinstance(call.func, ast.Attribute) and call.func.attr == _TEXT_JOIN
+
+
+def _path_interpolations(source: str, module: str = "") -> list[tuple[int, str]]:
     """Return (line, label) for every path-bearing name reaching human-facing text.
 
-    Two construction shapes carry a path into output, and scanning only the first leaves a
-    real sink unguarded. An f-string interpolation is the obvious one. The other is a bare
+    Three construction shapes carry a path into output, and scanning only the first leaves a
+    real sink unguarded. An f-string interpolation is the obvious one. The second is a bare
     ``escape(...)`` call: the reconcile adapter formats its basename once above the loop that
     prints it, so the f-string there interpolates an already-formatted local and the raw path
     never appears inside one. A JoinedStr-only scan reports that sink clean no matter how it
     is spelled, which is exactly the omission this guard exists to catch.
+
+    The third is a ``", ".join(...)`` over paths, which GTX-209 added. ``_abort_prepared``
+    lists every unresolved destination by joining them into one string above the message that
+    carries it, so -- like the ``escape`` shape -- no raw path is ever inside an f-string. The
+    join is where the paths first enter text, so it is where they are checked; the local it
+    binds to is already-rendered text and is deliberately not a path-bearing name.
+
+    Args:
+        source: The module source to scan.
+        module: The module's path under ``src/doc_lattice``, which selects its entry in
+            ``_MODULE_PATH_BEARING_NAMES``. The default scans with the global names only,
+            which is what the detector's own unit tests want.
     """
+    names = _PATH_BEARING_NAMES | _MODULE_PATH_BEARING_NAMES.get(module, frozenset())
     found: set[tuple[int, str]] = set()
     for node in ast.walk(ast.parse(source)):
         if isinstance(node, ast.JoinedStr):
             for value in node.values:
                 if isinstance(value, ast.FormattedValue):
-                    found.update((value.lineno, name) for name in _unwrapped_path_labels(value))
-        elif isinstance(node, ast.Call) and _dotted_label(node.func) == _MARKUP_ESCAPE:
-            found.update((node.lineno, name) for name in _unwrapped_path_labels(node))
+                    found.update(
+                        (value.lineno, name) for name in _unwrapped_path_labels(value, names)
+                    )
+        elif isinstance(node, ast.Call) and _builds_human_text(node):
+            found.update((node.lineno, name) for name in _unwrapped_path_labels(node, names))
     return sorted(found)
 
 
@@ -1828,17 +1913,141 @@ def test_path_interpolation_detector_sees_a_path_escaped_outside_an_f_string():
     assert _path_interpolations("name = escape(format_path_for_display(path))") == []
 
 
+def _qualified_names(source: str) -> list[tuple[int, int, str]]:
+    """Return (first line, last line, dotted name) for every function in a module.
+
+    Nested definitions come after their parents, so resolving a line against the *last*
+    matching span picks the innermost function containing it.
+    """
+    spans: list[tuple[int, int, str]] = []
+
+    def walk(node: ast.AST, prefix: str) -> None:
+        for child in ast.iter_child_nodes(node):
+            if isinstance(child, ast.ClassDef):
+                walk(child, f"{prefix}{child.name}.")
+            elif isinstance(child, ast.FunctionDef | ast.AsyncFunctionDef):
+                name = f"{prefix}{child.name}"
+                spans.append((child.lineno, child.end_lineno or child.lineno, name))
+                walk(child, f"{name}.")
+            else:
+                walk(child, prefix)
+
+    walk(ast.parse(source), "")
+    return spans
+
+
+def _qualified_interpolations(source: str, module: str) -> list[tuple[str, str, int]]:
+    """Return (function, label, line) for every path-bearing name reaching human text."""
+    spans = _qualified_names(source)
+    qualified: list[tuple[str, str, int]] = []
+    for line, label in _path_interpolations(source, module):
+        enclosing = [name for start, end, name in spans if start <= line <= end]
+        qualified.append((enclosing[-1] if enclosing else "<module>", label, line))
+    return qualified
+
+
+def test_qualified_interpolations_names_the_innermost_enclosing_function():
+    source = "class C:\n    def m(self):\n        def inner():\n            return f'{path}'\n"
+    assert _qualified_interpolations(source, "") == [("C.m.inner", "path", 4)]
+
+
+def test_qualified_interpolations_names_the_module_for_a_top_level_sink():
+    assert _qualified_interpolations("msg = f'{path}'", "") == [("<module>", "path", 1)]
+
+
+def test_path_interpolation_detector_scopes_a_name_to_the_module_that_owns_it():
+    # `raw_path` is a journal-recorded path in the transaction module and nothing in
+    # particular anywhere else, which is the whole reason the set is scoped rather than global.
+    unscoped = 'msg = f"unsafe {raw_path}"'
+    assert _path_interpolations(unscoped) == []
+    assert _path_interpolations(unscoped, "reconcile_transaction.py") == [(1, "raw_path")]
+    assert _path_interpolations(unscoped, "cli/commands/reconcile.py") == []
+
+
+def test_path_interpolation_detector_sees_the_transaction_entry_image_fields():
+    # Neither reads as `path` under component matching: they are single components, and the
+    # rollback and commit diagnostics that name them would otherwise go unchecked.
+    source = 'msg = f"{entry.before_path} then {entry.after_path}"'
+    assert _path_interpolations(source, "reconcile_transaction.py") == [
+        (1, "entry.after_path"),
+        (1, "entry.before_path"),
+    ]
+
+
+def test_path_interpolation_detector_sees_a_derived_stage_prefix():
+    # `prefix` carries `destination.name`, so it stays hostile after the recorded artifact
+    # path beside it is wrapped. Both the composition and a bare use of it are reported.
+    composition = 'prefix = f".{destination.name}{infix}"'
+    assert _path_interpolations(composition, "reconcile_transaction.py") == [
+        (1, "destination.name")
+    ]
+    use = 'msg = f"must match {prefix}<nonempty>{suffix}"'
+    assert _path_interpolations(use, "reconcile_transaction.py") == [(1, "prefix")]
+    wrapped = 'msg = f"must match {format_path_for_display(prefix + suffix)}"'
+    assert _path_interpolations(wrapped, "reconcile_transaction.py") == []
+
+
+def test_path_interpolation_detector_sees_a_join_over_paths():
+    # `_abort_prepared` lists unresolved destinations by joining them above the message that
+    # carries them, so no raw path is ever inside an f-string. A scan of f-strings and
+    # `escape()` alone calls that sink clean however it is spelled.
+    bare = 'listed = ", ".join(str(destination) for destination in outcome.unresolved)'
+    assert _path_interpolations(bare) == [(1, "destination")]
+    wrapped = (
+        'listed = ", ".join(format_path_for_display(destination) '
+        "for destination in outcome.unresolved)"
+    )
+    assert _path_interpolations(wrapped) == []
+
+
+def test_path_interpolation_detector_ignores_a_comprehension_binding():
+    # The loop variable is a binding, not a value reaching text. Reading it as one would
+    # report the correct spelling of the join above as its own violation.
+    assert _path_interpolations("[str(x) for path in paths]") == []
+
+
+def test_path_interpolation_detector_leaves_already_rendered_detail_alone():
+    # `detail` names a real sink in the transaction module, and is deliberately not a
+    # path-bearing name: `_exact_journal_status` has already displayed the journal inside it,
+    # so classifying it as a raw path would demand a second wrapping. It also names rendered
+    # validation and Linear text elsewhere, which carries no path at all.
+    source = 'msg = f"cannot clean journal: {detail}"'
+    assert _path_interpolations(source, "reconcile_transaction.py") == []
+    assert _path_interpolations(source, "validation_render.py") == []
+
+
+def test_display_guard_exemptions_are_all_reachable():
+    """Every exemption still names a line the scan actually reports, or it is stale.
+
+    An exemption whose line has moved silences nothing and hides the sink it was written for,
+    which is the failure mode a line-keyed exemption set has. Checking reachability is what
+    keeps the set honest as the modules under it change.
+    """
+    reported: set[tuple[str, str, str]] = set()
+    for file in _source_files():
+        module = file.relative_to(SRC_DIR).as_posix()
+        if module in _DISPLAY_GUARD_EXEMPT_MODULES:
+            continue
+        source = file.read_text(encoding="utf-8")
+        for function, label, _line in _qualified_interpolations(source, module):
+            reported.add((module, function, label))
+    stale = sorted(_DISPLAY_GUARD_EXEMPT_EXPRESSIONS - reported)
+    assert not stale, f"these display-guard exemptions no longer name a reported sink: {stale}"
+
+
 def test_no_human_facing_sink_interpolates_a_raw_path():
     offenders: list[str] = []
     for file in _source_files():
         module = file.relative_to(SRC_DIR).as_posix()
         if module in _DISPLAY_GUARD_EXEMPT_MODULES:
             continue
-        for line, name in _path_interpolations(file.read_text(encoding="utf-8")):
-            if (module, name, line) in _DISPLAY_GUARD_EXEMPT_EXPRESSIONS:
+        source = file.read_text(encoding="utf-8")
+        for function, label, line in _qualified_interpolations(source, module):
+            if (module, function, label) in _DISPLAY_GUARD_EXEMPT_EXPRESSIONS:
                 continue
             offenders.append(
-                f"{module}:{line} interpolates {{{name}}} without the display spelling"
+                f"{module}:{line} ({function}) interpolates {{{label}}} without the display "
+                "spelling"
             )
     assert not offenders, (
         "GTX-125 (AD-34): route each of these through path_utils.format_path_for_display, or "

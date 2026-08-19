@@ -17,14 +17,18 @@ import doc_lattice.cli.commands.reconcile as reconcile_command
 import doc_lattice.cli.runtime as runtime_module
 import doc_lattice.reconcile_transaction as transaction
 from doc_lattice.cli import app
+from doc_lattice.cli.commands.reconcile import _recovery_json_payload
 from doc_lattice.constants import RECONCILE_JOURNAL_NAME, RECONCILE_JOURNAL_VERSION
 from doc_lattice.error_types import ReconcilePersistenceError
+from doc_lattice.path_utils import format_path_for_display
 from doc_lattice.reconcile_transaction import (
     JournalEntry,
     JournalProvenance,
     JournalSelector,
     JournalState,
     JournalV2,
+    RecoveryResult,
+    ScanFailure,
     _serialize_journal,
     reconcile_lock,
 )
@@ -32,6 +36,10 @@ from doc_lattice.reconcile_transaction import (
 from .helpers import _clean_docs, _run, runner
 
 _SRC = Path(__file__).resolve().parents[2] / "src"
+# GTX-209: the same vector GTX-125 used, reused here because a stage inherits its
+# destination's name, so a hostile document filename propagates into the transaction's own
+# artifact paths and back out through recovery reporting.
+_HOSTILE_DOC_NAME = "pwn\x1b[31m\x1b[Aevil.md"
 
 
 def _tree_snapshot(root: Path) -> dict[str, tuple[str, bytes]]:
@@ -476,7 +484,7 @@ def test_reconcile_recover_reports_partial_rollback_and_exits_nonzero(tmp_path: 
     assert result.exit_code == 2
     assert "partially rolled back reconcile transaction" in result.stdout
     assert "could not restore 1 destination" in result.stderr
-    assert "unresolved destination: docs/down.md" in result.stderr
+    assert "unresolved destination: 'docs/down.md'" in result.stderr
     assert "every remaining staged image were retained" in result.stderr
     assert "rerun 'doc-lattice reconcile --recover'" in result.stderr
     # Rerunning cannot resolve bytes the journal has no record of, so the guidance has to
@@ -530,8 +538,8 @@ def test_reconcile_recover_reports_orphans_without_deleting_them(tmp_path: Path,
     assert "nothing to recover" not in result.stdout
     assert "no reconcile journal to recover" in result.stdout
     assert "orphaned reconcile artifacts remain; nothing was deleted" in result.stderr
-    assert "orphaned artifact: .doc-lattice-reconcile.json.leaked.tmp" in result.stderr
-    assert "orphaned artifact: docs/.down.md.doc-lattice-after.leaked.tmp" in result.stderr
+    assert "orphaned artifact: '.doc-lattice-reconcile.json.leaked.tmp'" in result.stderr
+    assert "orphaned artifact: 'docs/.down.md.doc-lattice-after.leaked.tmp'" in result.stderr
     assert _tree_snapshot(tmp_path) == before
 
 
@@ -550,7 +558,89 @@ def test_reconcile_recover_reports_an_unscannable_directory(tmp_path: Path, monk
     assert result.exit_code == 2
     assert "no reconcile journal to recover" in result.stdout
     assert "for orphaned artifacts" in result.stderr
-    assert str(unreadable) in result.stderr
+    # GTX-209: the human encoder applies the display spelling to the path component alone,
+    # leaving the operating system's own sentence as the prose it is.
+    assert format_path_for_display(unreadable) in result.stderr
+
+
+@pytest.mark.skipif(os.getuid() == 0, reason="root bypasses directory read permissions")
+@pytest.mark.skipif(os.name != "posix", reason="a directory name holding ESC is POSIX-only")
+def test_reconcile_recover_splits_a_scan_failure_between_its_two_encoders(
+    tmp_path: Path, monkeypatch
+):
+    """The human line displays the path; the JSON array keeps the pre-GTX-209 spelling.
+
+    A scan failure is the one recovery detail whose path was already fused into prose at the
+    producer, so it is the case that proves the structured record reaches both encoders rather
+    than one spelling being applied to the whole sentence.
+    """
+    unreadable = tmp_path / _HOSTILE_DOC_NAME
+    unreadable.mkdir()
+    unreadable.chmod(0o000)
+    monkeypatch.chdir(tmp_path)
+
+    try:
+        human = runner.invoke(app, ["reconcile", "--recover"])
+        machine = runner.invoke(app, ["reconcile", "--recover", "--format", "json"])
+    finally:
+        unreadable.chmod(0o755)
+
+    assert human.exit_code == 2
+    assert format_path_for_display(unreadable) in human.stderr
+    assert "\x1b" not in human.stderr
+    assert "for orphaned artifacts" in human.stderr
+
+    assert machine.exit_code == 2
+    scan_errors = json.loads(machine.stdout)["scan_errors"]
+    assert len(scan_errors) == 1
+    # The machine channel is untouched: the raw path, unquoted, exactly as before.
+    assert scan_errors[0].startswith(f"cannot scan {unreadable} for orphaned artifacts: ")
+    assert format_path_for_display(unreadable) not in scan_errors[0].split(": ", 1)[0]
+
+
+def test_recovery_json_payload_is_byte_identical_for_a_hostile_path():
+    """The JSON encoder reproduces the pre-GTX-209 payload byte for byte.
+
+    Compared as literal payload bytes rather than as parsed JSON, because the criterion this
+    covers promises byte identity and a parsed comparison would accept a reordered array or a
+    different escape for the same code point.
+    """
+    hostile = f"docs/{_HOSTILE_DOC_NAME}"
+    journal = Path("/project") / _HOSTILE_DOC_NAME
+    # Two failures, so the array's order is asserted as well as its wording. That the producer
+    # orders them by the legacy rendering rather than by field is pinned separately, in
+    # tests/test_reconcile_transaction.py, against a pair where the two orders differ.
+    first = ScanFailure(filename="/b", detail="aaa")
+    second = ScanFailure(filename="/a", detail="zzz")
+    recovery = RecoveryResult(
+        action="partially_rolled_back",
+        journal=journal,
+        restored=1,
+        already_before=2,
+        unresolved=(hostile,),
+        orphans=(f"{hostile}.doc-lattice-after.x.tmp",),
+        scan_errors=tuple(sorted((first, second), key=lambda f: f.legacy_text)),
+    )
+
+    payload = _recovery_json_payload(recovery)
+
+    expected = json.dumps(
+        {
+            "action": "partially_rolled_back",
+            "journal": str(journal),
+            "restored": 1,
+            "already_before": 2,
+            "unresolved": [hostile],
+            "orphans": [f"{hostile}.doc-lattice-after.x.tmp"],
+            "scan_errors": [
+                "cannot scan /a for orphaned artifacts: zzz",
+                "cannot scan /b for orphaned artifacts: aaa",
+            ],
+        }
+    )
+    assert payload.encode("utf-8") == expected.encode("utf-8")
+    # The spelling really is the raw one: no display quoting reached the machine channel.
+    assert format_path_for_display(hostile) not in payload
 
 
 def test_reconcile_partial_automatic_recovery_halts_before_loading_the_lattice(
@@ -572,7 +662,7 @@ def test_reconcile_partial_automatic_recovery_halts_before_loading_the_lattice(
     assert result.exit_code == 2
     assert result.stdout == ""
     assert "recovered reconcile transaction: partially_rolled_back" in result.stderr
-    assert "unresolved destination: docs/pc-design.md" in result.stderr
+    assert "unresolved destination: 'docs/pc-design.md'" in result.stderr
     assert destination.read_bytes() == b"unrelated editor bytes\n"
     assert journal.exists()
     assert before.exists()

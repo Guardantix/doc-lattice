@@ -487,10 +487,35 @@ as documents that reused no anchor. No action is needed: the next run rebuilds t
   they are machine channels with their own encoders. Warning message prefixes are unchanged, so
   `PYTHONWARNINGS` filters targeting them keep working.
 
-  This closes the document-path vector. Control characters written as escapes inside typed
-  frontmatter values reach human output by a separate route that is not closed here, and the
-  reconcile transaction and recovery sinks interpolate their paths the same way and are handled
-  separately.
+  This closes the document-path vector at the load boundary. Control characters written as
+  escapes inside typed frontmatter values reach human output by a separate route that is not
+  closed here. The reconcile transaction and recovery sinks interpolated their paths the same
+  way; the next entry closes those.
+
+- A document filename can no longer forge or corrupt reconcile's transaction, rollback, and
+  recovery output either. A reconcile stage is named after the destination it is written beside,
+  so a hostile filename propagates into the transaction's own artifact paths, and recovery then
+  prints those paths back to the user; that report is what someone reads while deciding how to
+  repair a half-applied transaction, which is why it matters more than the equivalent leak at the
+  load boundary. Every journal, destination, staged-artifact, and recorded journal-entry path in
+  `reconcile_transaction.py`, the shared durable-write helper's orphaned-stage remediation note,
+  and reconcile's `--recover` reporting now use the same quoted spelling the previous entry
+  introduced. `path_utils.safe_resolve`'s containment error moves with them, because the
+  transaction layer embeds it verbatim when a journal records an escaping path.
+
+  Visible output changes shape accordingly: the journal named by every `--recover` summary line,
+  each unresolved destination, each orphaned artifact, and the path component of each
+  orphan-scan failure are quoted. The shared cleanup note is quoted for every caller of the
+  durable-write helper, including `doc-lattice init` and the load cache, whose paths are not
+  document paths. The `--format json` recovery payload is byte-identical, wording and array
+  ordering included: it is a machine channel, so an orphan-scan failure is now retained as
+  structured data and spelled by whichever encoder the run selected rather than being fused into
+  prose when it is recorded. No second display spelling is introduced and AD-34 is unchanged.
+
+  The static guard that enforces this no longer exempts `reconcile_transaction.py`,
+  `persistence.py`, `path_utils.py`, or reconcile's recovery reporting. What remains exempt is
+  per-expression and machine-only: the journal serializer, the staged-artifact filenames, and the
+  recovery payload's own JSON spelling.
 
 - Every `git` invocation now resolves to an absolute path outside the directory being operated on.
   A `PATH` lookup returning a relative result is refused, which covers every relative entry from

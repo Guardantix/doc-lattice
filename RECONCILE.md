@@ -152,6 +152,15 @@ After an interrupted run, use this workflow:
    count rolled-back destinations; `unresolved`, `orphans`, and `scan_errors` are the sorted
    details behind a nonzero exit.
 
+Every path in the human lines above is quoted, because a document filename is repo-controlled
+text and a reconcile stage is named after the destination it is written beside, so an artifact
+path can carry one. The `JOURNAL` a summary line names, each unresolved destination, each
+orphaned artifact, and the path component of each scan failure are all spelled the way
+[ARCHITECTURE.md](ARCHITECTURE.md)'s AD-34 defines, which quotes the path and escapes any
+terminal control byte in it. The `--format json` payload is deliberately unchanged: it is a
+machine channel, so it keeps the raw spelling and its own encoder, and `scan_errors` keeps both
+its wording and its array order.
+
 ## Partial rollback
 
 Rolling back a `prepared` journal classifies each destination against the images the transaction
@@ -163,7 +172,7 @@ neither guesses nor overwrites.
 
 Any unresolved destination makes the whole run a partial rollback. It reports
 `partially rolled back reconcile transaction: JOURNAL` on stdout, names every unresolved
-destination on stderr as a project-relative path, and exits 2. A partial rollback deletes nothing:
+destination on stderr as a quoted project-relative path, and exits 2. A partial rollback deletes nothing:
 the journal and every remaining staged image are retained, because the journal is the only record
 of which destination, path, and digest belong together. The one image that unavoidably disappears
 is a before image consumed by restoring its own destination.
@@ -189,12 +198,16 @@ found, so a publication interrupted between linking the journal and removing its
 reports both the recovered journal and the leaked helper in one invocation. It covers staged images
 in nested document directories as well as journal publication temporaries.
 
-Orphans are reported on stderr as project-relative paths and exit 2. Nothing is ever deleted:
+Orphans are reported on stderr as quoted project-relative paths and exit 2. Nothing is ever
+deleted:
 inspect each artifact and remove it yourself after confirming it is not a destination. When no
 journal is present and orphans are found, the summary line reads `no reconcile journal to recover`
 rather than `nothing to recover`, so that a completeness claim is never made about an unclean tree.
 If the scan cannot enumerate part of the project, the failure is reported the same way rather than
-silently narrowing the search.
+silently narrowing the search. A scan failure carries the operating system's own message as well
+as the path it could not read, so the two are kept apart until output is encoded: the human line
+quotes the path and leaves the message as the prose it is, and the JSON array reproduces the
+single combined string, and its ordering, exactly as earlier releases wrote it.
 
 A malformed or unsafe journal exits 2 and is not deleted. Inspect the named journal, destinations,
 and staged files; restore each destination or deliberately preserve its current contents; then move
