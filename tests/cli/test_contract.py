@@ -694,7 +694,7 @@ def test_multi_line_config_diagnostic_survives_the_stderr_renderer(tmp_path: Pat
     # The config diagnostic is now multi-line, and three things in print_project_error carry it
     # to the terminal intact: soft_wrap keeps a narrow terminal from rewrapping the per-error
     # lines and destroying the two-space indent, escape() keeps the cache_key message's literal
-    # rich markup from being eaten, and the code suffix still lands. None of that is visible to
+    # rich markup from being eaten, and the code lands on the header. None of that is visible to
     # a unit test of the formatter, so it is pinned here.
     (tmp_path / ".doc-lattice.yml").write_text("cache_key: 'a/b'\nbogus: 1\n", encoding="utf-8")
     monkeypatch.chdir(tmp_path)
@@ -704,7 +704,7 @@ def test_multi_line_config_diagnostic_survives_the_stderr_renderer(tmp_path: Pat
 
     assert result.exit_code == 2
     lines = result.stderr.splitlines()
-    assert lines[0] == f"error: invalid config {tmp_path / '.doc-lattice.yml'}:"
+    assert lines[0] == f"error (CONFIG_ERROR): invalid config {tmp_path / '.doc-lattice.yml'}:"
     # One line per error, still indented, despite a terminal far narrower than any of them.
     assert len(lines) == 3
     assert all(line.startswith("  ") for line in lines[1:])
@@ -712,7 +712,54 @@ def test_multi_line_config_diagnostic_survives_the_stderr_renderer(tmp_path: Pat
         "  cache_key: cache_key 'a/b' must be one safe path segment matching "
         r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$ (no separators or traversal)"
     )
-    assert lines[2].endswith("(CONFIG_ERROR)")
+    # The code no longer trails the last detail line, where it read as part of that field's
+    # parenthetical rather than as a property of the error.
+    assert lines[2] == (
+        "  bogus: Extra inputs are not permitted (accepted keys: cache_key, cache_trust_stat, "
+        "docs_roots, ignore_globs, linear_team)"
+    )
+
+
+def test_multi_line_frontmatter_diagnostic_carries_its_code_on_the_header(
+    tmp_path: Path, monkeypatch
+):
+    # The second independently formatted multi-line error type. Config and frontmatter reach
+    # format_validation_error through different callers and different models, so pinning both
+    # proves the placement is the shared renderer's policy rather than one caller's shape.
+    (tmp_path / ".doc-lattice.yml").write_text("docs_roots: [docs]\n", encoding="utf-8")
+    doc = tmp_path / "docs" / "a.md"
+    doc.parent.mkdir()
+    doc.write_text("---\nid: doc-a\nbogus: 1\n---\n# A\n", encoding="utf-8")
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("COLUMNS", "60")
+
+    result = runner.invoke(app, ["check"])
+
+    assert result.exit_code == 2
+    lines = result.stderr.splitlines()
+    assert lines == [
+        f"error (FRONTMATTER_ERROR): invalid lattice frontmatter in '{doc}':",
+        "  bogus: Extra inputs are not permitted (accepted keys: authority, "
+        "derives_from, id, layer, tickets, title)",
+    ]
+
+
+def test_single_line_diagnostic_carries_its_code_beside_the_severity(tmp_path: Path, monkeypatch):
+    # A single-line diagnostic keeps one grammar with the multi-line ones rather than retaining
+    # the old trailing suffix, so a stderr scraper matches one prefix for every project error.
+    (tmp_path / "notes.txt").write_text("x", encoding="utf-8")
+    (tmp_path / ".doc-lattice.yml").write_text("docs_roots: [notes.txt]\n", encoding="utf-8")
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("COLUMNS", "1000")
+
+    result = runner.invoke(app, ["check"])
+
+    assert result.exit_code == 2
+    assert result.stderr == (
+        "error (CONFIG_ERROR): docs_roots entry 'notes.txt' exists but is neither a directory "
+        f"nor a regular '.md' file ({tmp_path / 'notes.txt'}); an existing entry must be one "
+        "or the other\n"
+    )
 
 
 def _many_broken_docs(tmp_path: Path) -> None:

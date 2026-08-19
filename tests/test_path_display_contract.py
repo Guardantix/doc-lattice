@@ -277,7 +277,7 @@ class TestTransactionSinks:
 
     Several sinks build a ``ValueError`` that ``_load_journal`` re-wraps, so they are driven
     directly and asserted on their own message. Others attach notes rather than raising, so
-    they are asserted through ``exception_details``, which is what the CLI renderer flattens.
+    they are asserted through ``exception_details``, which is what the CLI renderer prints.
     """
 
     def test_invalid_journal_error_names_the_journal(self, tmp_path: Path):
