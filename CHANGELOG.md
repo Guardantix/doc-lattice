@@ -103,7 +103,8 @@ the way the loader does, so a file saved with a byte-order mark, CRLF endings, o
 is scanned rather than skipped, and it reads the whole block rather than a list of key spellings,
 because neither a tab nor an escape has to share a line with its key: a `derives_from` edge
 writes `- ref:` behind a sequence dash, a block-form `tickets` entry is a bare `- "GTX-1"` item
-with no key on the line at all, and a block scalar puts its value on later lines entirely.
+with no key on the line at all, and a block scalar puts its value on later lines entirely, behind
+an anchor or a tag if the author wrote one.
 
 All five had a working use, so treat this as a real scan rather than a formality. A folded
 `title` is the obvious one. Less obviously, an `id` written `|` constructs a trailing newline,

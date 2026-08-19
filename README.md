@@ -397,15 +397,19 @@ Keep a folded value's lines adjacent and equally indented.
 To find all three, scan the frontmatter block itself rather than a list of key spellings. Neither
 a tab nor an escape has to share a line with its key: a `derives_from` edge writes `- ref:`
 behind a sequence dash, a block-form `tickets` entry is a bare `- "GTX-1"` item with no key on
-the line at all, and a block scalar puts its value on later lines entirely. This reads the fence
-the way the loader does, so a file saved with a byte-order mark, CRLF endings, or a padded `---`
-is scanned rather than skipped, and a tab in body prose or an indented code block is not a hit:
+the line at all, and a block scalar puts its value on later lines entirely, behind an anchor or a
+tag if the author wrote one. This reads the fence the way the loader does, so a file saved with a
+byte-order mark, CRLF endings, or a padded `---` is scanned rather than skipped, and a tab in
+body prose or an indented code block is not a hit:
 
 ```bash
 python3 - <<'PY'
 import pathlib, re
 ESC = re.compile(r"\\\\|\\([0abtnvfreN]|x[0-9A-Fa-f]{2}|u[0-9A-Fa-f]{4}|U[0-9A-Fa-f]{8})")
-BLOCK = re.compile(r"(^|[\s-])(id|title|tickets|ref|seen):\s*[|>]|^\s*-\s*[|>][-+]?\s*$")
+PROP = r"(?:[&!]\S+\s+)*"
+BLOCK = re.compile(
+    rf"(^|[\s-])(id|title|tickets|ref|seen):\s*{PROP}[|>]|^\s*-\s*{PROP}[|>][-+]?\s*$"
+)
 NAMED = {"0": 0, "a": 7, "b": 8, "t": 9, "n": 10, "v": 11, "f": 12, "r": 13, "e": 27, "N": 0x85}
 
 for path in sorted(pathlib.Path(".").rglob("*.md")):
