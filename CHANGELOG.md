@@ -407,6 +407,17 @@ as documents that reused no anchor. No action is needed: the next run rebuilds t
   entries in earlier releases keep the spelling that was correct at the time. Its contents were
   also rewritten to track the three release projects rather than the shipped 4.x work.
 
+### Fixed
+
+- An unknown frontmatter or config key that decodes to a control character is now spelled in the
+  diagnostic that rejects it, instead of being echoed into your terminal raw. Safe YAML decodes a
+  double-quoted `\u001b` in a mapping *key* exactly as it does in a value, and an unknown key is
+  reported by naming the key, so a document spelling `"bad\u001b[31m": 1` put the ESC on stderr
+  through the very message refusing it. Only the spelling changed: such a key was already an
+  error, and a key carrying no control character still reads exactly as before, so an ordinary
+  diagnostic still names `derives_from.0.ref` rather than gaining quotes. This is the key half of
+  the value rule under **Changed** above.
+
 ### Removed
 
 - **BREAKING:** the managed GitHub and Linear CI product is gone. `ci audit` and `ci refresh` no

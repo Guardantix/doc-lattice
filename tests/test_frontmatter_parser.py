@@ -562,6 +562,38 @@ def test_the_refusal_diagnostic_carries_no_control_character_of_its_own(escape: 
     assert message.count(f"U+{code:04X}") == 3
 
 
+@pytest.mark.parametrize(
+    ("escape", "code"),
+    [(row[0], row[1]) for row in _REFUSED_CONTROLS],
+    ids=[row[2] for row in _REFUSED_CONTROLS],
+)
+def test_an_unknown_key_carrying_a_control_character_is_spelled_not_echoed(escape: str, code: int):
+    # GTX-208 (AD-35): the value families above are not the whole of what a document controls.
+    # A mapping *key* takes the same double-quoted escape, and `extra="forbid"` reports it as the
+    # pydantic error location, which is the one repo-controlled part of a location. Refusing the
+    # key was never the gap; naming it verbatim was. The nested spelling is covered too, since
+    # the location is built part by part and only the last part is the rejected key.
+    for template in (
+        '---\nid: node\n"bad{escape}key": 1\n---\nbody\n',
+        '---\nid: node\nderives_from:\n  - ref: up\n    "bad{escape}key": 1\n---\nbody\n',
+    ):
+        with pytest.raises(FrontmatterError) as exc:
+            parse_meta(_raw_meta(template.format(escape=escape)), Path("a.md"))
+
+        message = str(exc.value)
+        # The line count is asserted before the byte check, because a key carrying a line break
+        # forges a diagnostic line rather than a color, and stripping newlines to look for
+        # control bytes is exactly what would hide that. One header plus one error line is the
+        # whole message when the break is spelled instead of taken.
+        assert len(message.splitlines()) == 2
+        assert not any(
+            ord(char) < 0x20 or ord(char) == 0x7F or 0x80 <= ord(char) <= 0x9F
+            for char in message.replace("\n", "")
+        )
+        assert repr(f"bad{chr(code)}key") in message
+        assert "Extra inputs are not permitted" in message
+
+
 def test_a_control_character_is_refused_before_the_id_hash_rule_echoes_the_value():
     # `_id_has_no_hash` quotes the id it rejects, which would print the very byte AD-35 exists
     # to keep out of output. The annotated rule runs ahead of it for that reason, so an id

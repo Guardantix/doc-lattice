@@ -5,12 +5,19 @@ file in ``config.py`` and a document's frontmatter in ``frontmatter_parser.py``.
 ``str(ValidationError)`` to the user, because that renderer emits a ``pydantic.dev`` URL, echoes
 the offending input back, and prefixes domain-authored sentences with its own boilerplate. This
 module owns the replacement so the two boundaries cannot drift apart.
+
+Dropping the echoed input is not on its own enough to keep repo-controlled bytes out of the
+message, because one part of a pydantic error location is repo-controlled too: a key rejected by
+``extra="forbid"`` is reported as the location itself. ``_format_location`` therefore spells a
+location part the way AD-34 spells a path.
 """
 
 from collections.abc import Callable
 from typing import get_args
 
 from pydantic import BaseModel, ValidationError
+
+from .text_utils import first_control_index
 
 # pydantic prefixes a validator's message with one of these literals when the validator signals
 # failure by raising: ``ValueError`` becomes ``value_error``, a bare ``assert`` becomes
@@ -82,7 +89,31 @@ def _format_location(location: tuple[int | str, ...], root_label: str) -> str:
     Returns:
         A dotted field path, list indices included, or ``root_label`` for a whole-input error.
     """
-    return ".".join(str(part) for part in location) if location else root_label
+    return ".".join(_format_location_part(part) for part in location) if location else root_label
+
+
+def _format_location_part(part: int | str) -> str:
+    """Spell one location part, neutralizing a repo-controlled key that carries a control byte.
+
+    Most parts are safe by construction: a declared field name is written in this codebase and a
+    sequence index is an integer. A key rejected by ``extra="forbid"`` is neither. It is the
+    author's text, and safe YAML decodes a double-quoted ``\\u001b`` in a mapping key exactly as
+    it does in a value, so an unspelled part puts a raw ESC on the terminal through the very
+    message refusing the key. AD-35 closes that route for a value by refusing it at validation;
+    a rejected key is already refused, so what is left is how the refusal names it.
+
+    The spelling is ``repr`` on the offending part alone, which is AD-34's spelling for a path
+    and injective for the same reason. It is applied only where it is needed, so an ordinary
+    location still reads ``derives_from.0.ref`` rather than gaining quotes around every segment.
+
+    Args:
+        part: One element of a pydantic ``loc`` tuple.
+
+    Returns:
+        The part as written, or its ``repr`` when it carries a control character.
+    """
+    text = str(part)
+    return text if first_control_index(text) is None else repr(text)
 
 
 def _accepted_key_help(

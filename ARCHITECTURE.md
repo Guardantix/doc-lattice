@@ -1288,10 +1288,25 @@ that guard exists because an omitted sink is the failure mode of a display strat
 strategy chosen here has no sinks to omit.
 
 The diagnostic names the code point and its index rather than echoing the value, because a
-message quoting the value would print the very byte the rule refuses. `validation_render` already
-drops pydantic's echoed input, so both halves hold. The `ControlFreeStr` rule runs ahead of the
-`id` `#` rule, which does quote the id it rejects, so an id carrying both is reported by the rule
-that names no value.
+message quoting the value would print the very byte the rule refuses. The `ControlFreeStr` rule
+runs ahead of the `id` `#` rule, which does quote the id it rejects, so an id carrying both is
+reported by the rule that names no value.
+
+That the refusal itself stays clean took one more site than it first read, and the extra one is
+recorded here rather than left as a footnote, because the reasoning that missed it is the same
+reasoning this record exists to replace. `validation_render` drops pydantic's echoed input, and
+the first version of this paragraph concluded from that alone that both halves held. They did not:
+safe YAML decodes a double-quoted `\u001b` in a mapping **key** exactly as it does in a value, and
+a key rejected by `extra="forbid"` is reported as the pydantic error *location*, which the
+renderer joined verbatim. A block spelling `"bad\u001b[31m": 1` therefore put a raw ESC on stderr
+through the message refusing the key, at both load boundaries, since `config.py` and
+`frontmatter_parser.py` share the renderer. Refusing the key was never the gap; naming it was.
+`_format_location_part` spells a location part with `repr` when, and only when, that part carries
+a control character, so a rejected key is neutralized while an ordinary location still reads
+`derives_from.0.ref` rather than gaining quotes around every segment. Rejecting control-bearing
+keys at load instead would have been circular, because the new refusal would still have had to
+name the key. The spelling is AD-34's, and injective for AD-34's reason; the difference is that a
+path is untrusted whole while a location is untrusted in exactly one part.
 
 Machine channels are excluded on the same reasoning AD-34 records, and the exclusion means
 something different under this decision: JSON output and the GitHub annotation encoder are
