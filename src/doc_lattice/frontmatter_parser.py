@@ -19,6 +19,7 @@ from .model import NodeMeta, ParsedMeta
 from .path_utils import format_path_for_display
 from .validation_render import format_validation_error
 from .yaml_boundary import YAML_LOAD_ERRORS, SafeYamlLoader
+from .yaml_error_render import format_yaml_error_for_display
 
 _FENCE = "---"
 _BOM = chr(0xFEFF)  # UTF-8 byte-order mark; strip a leading one so the opening fence is detected
@@ -154,7 +155,8 @@ def parse_meta(raw_meta: str | None, source: Path) -> ParsedMeta:
     try:
         data, reused_anchors = _load_recording_reused_anchors(raw_meta)
     except YAML_LOAD_ERRORS as exc:
-        msg = f"cannot parse frontmatter in {format_path_for_display(source)}: {exc}"
+        detail = format_yaml_error_for_display(exc)
+        msg = f"cannot parse frontmatter in {format_path_for_display(source)}: {detail}"
         raise UnreadableDocError(msg) from exc
     # A fenced block holding no mapping (empty, a scalar, a list) declares no keys at all, so it
     # is the same untracked prose as a file with no fence. Warning on it would fire on any

@@ -10,6 +10,7 @@ from .error_types import ConfigError
 from .path_utils import safe_resolve
 from .validation_render import format_validation_error
 from .yaml_boundary import YAML_LOAD_ERRORS, SafeYamlLoader
+from .yaml_error_render import format_yaml_error_for_display
 
 DEFAULT_CONFIG_NAME = ".doc-lattice.yml"
 # Deliberately not pinned to the pure parser, unlike the frontmatter boundary. Config has no
@@ -180,7 +181,8 @@ def _read_yaml(path: Path) -> object:
         # hand rather than `_LOADER.parser`: the request reads "platform-default" in both
         # environments, so printing it would tell the two apart no better than printing nothing.
         parser = "pure" if _LOADER.running_pure else "ruamel.yaml.clib"
-        msg = f"cannot parse config {path} (YAML parser: {parser}): {exc}"
+        detail = format_yaml_error_for_display(exc)
+        msg = f"cannot parse config {path} (YAML parser: {parser}): {detail}"
         raise ConfigError(msg) from exc
     return data if data is not None else {}
 

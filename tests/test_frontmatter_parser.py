@@ -17,6 +17,8 @@ from doc_lattice.frontmatter_parser import (
     split_frontmatter_parts,
 )
 from doc_lattice.model import NodeMeta, RawEdge
+from doc_lattice.yaml_boundary import YAML_LOAD_ERRORS, SafeYamlLoader
+from doc_lattice.yaml_error_render import format_yaml_error_for_display
 
 DOC = "---\nid: pc\ntitle: PC\n---\n# Body\ntext\n"
 
@@ -748,3 +750,65 @@ def test_the_folded_styles_are_the_only_ones_that_survive_across_lines():
     }
 
     assert surviving_multi_line == {">-"}
+
+
+# GTX-219 (AD-37): a duplicate key aborts the load before any value rule runs, and `ruamel`'s
+# constructor error echoes the offending key and both of its values back at the reader. The two
+# templates are the two halves that echo: the key is reported once, the values twice.
+_DUPLICATE_KEY_ECHOES = (
+    ("key", 'id: doc\n"k{escape}": 1\n"k{escape}": 2\n'),
+    ("value", 'id: doc\nk: "v{escape}A"\nk: "v{escape}B"\n'),
+)
+
+
+@pytest.mark.parametrize(
+    "escape",
+    [row[0] for row in _REFUSED_CONTROLS],
+    ids=[row[2] for row in _REFUSED_CONTROLS],
+)
+@pytest.mark.parametrize(
+    "template",
+    [row[1] for row in _DUPLICATE_KEY_ECHOES],
+    ids=[row[0] for row in _DUPLICATE_KEY_ECHOES],
+)
+def test_a_load_failure_echoing_a_control_character_is_spelled_not_printed_raw(
+    template: str, escape: str
+):
+    # The vector AD-35 could not reach: the value half defeats its guarantee outright, because
+    # the value never becomes a node and the refusal never runs. Both halves are asserted over
+    # the whole refused range rather than the ESC the vector was reported for, since the message
+    # is third-party text and nothing about it privileges one code point.
+    with pytest.raises(UnreadableDocError) as exc:
+        parse_meta(template.format(escape=escape), Path("a.md"))
+
+    message = str(exc.value)
+    assert "cannot parse frontmatter in 'a.md'" in message
+    # The whole message is scanned, line breaks included: a spelling that kept the message's own
+    # breaks would let an echoed value forge a diagnostic line, and stripping them before looking
+    # for control bytes is what would hide exactly that.
+    assert not any(
+        ord(char) < 0x20 or ord(char) == 0x7F or 0x80 <= ord(char) <= 0x9F for char in message
+    )
+    assert len(message.splitlines()) == 1
+
+
+def test_the_load_failure_detail_is_the_display_spelling_of_the_caught_exception():
+    # The readability cost, pinned as a relation rather than as a literal: `ruamel`'s wording
+    # differs across the releases and accelerator cells CI runs, so a fixed expected string
+    # would pass in one and fail in another. What is fixed is that the detail is exactly the
+    # spelling of whatever was caught, and that an ordinary syntax error therefore arrives as
+    # one quoted line whose caret art no longer points at anything while its `line: N, column: M`
+    # coordinates survive.
+    block = "id: [unclosed\n"
+    with pytest.raises(YAML_LOAD_ERRORS) as caught:
+        SafeYamlLoader(parser="pure").load(block)
+
+    with pytest.raises(UnreadableDocError) as exc:
+        parse_meta(block, Path("a.md"))
+
+    message = str(exc.value)
+    detail = format_yaml_error_for_display(caught.value)
+    assert message == f"cannot parse frontmatter in 'a.md': {detail}"
+    assert message.endswith(repr(str(caught.value)))
+    assert "\\n" in message
+    assert "line: 1" in message

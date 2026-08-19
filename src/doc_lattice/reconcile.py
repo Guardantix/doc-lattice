@@ -41,6 +41,7 @@ from .model import Lattice, TargetId, parse_ref
 from .path_utils import format_path_for_display
 from .resolve import cached_target_hash
 from .yaml_boundary import YAML_LOAD_ERRORS
+from .yaml_error_render import format_yaml_error_for_display
 
 # Characters that end or reinterpret a plain scalar in block or flow context, and the
 # indicators that only do so in first position. A replacement carrying any of them is
@@ -1142,9 +1143,10 @@ def _verify_reconciled_meta(new_meta: str, expected: object, source: Path) -> No
     try:
         reloaded = _yaml().load(new_meta)
     except YAML_LOAD_ERRORS as exc:
+        detail = format_yaml_error_for_display(exc)
         msg = (
             f"reconcile would leave {format_path_for_display(source)} unparseable, "
-            f"so nothing was rewritten: {exc}"
+            f"so nothing was rewritten: {detail}"
         )
         raise UnreadableDocError(msg) from exc
     try:
@@ -1214,7 +1216,10 @@ def _load_frontmatter_data(raw_meta: str, source: Path) -> object:
     try:
         return _yaml().load(raw_meta)
     except YAML_LOAD_ERRORS as exc:
-        msg = f"cannot parse frontmatter of {format_path_for_display(source)} to reconcile: {exc}"
+        detail = format_yaml_error_for_display(exc)
+        msg = (
+            f"cannot parse frontmatter of {format_path_for_display(source)} to reconcile: {detail}"
+        )
         raise UnreadableDocError(msg) from exc
 
 

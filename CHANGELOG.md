@@ -8,7 +8,7 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Migration
 
-Six things to act on, plus two changes below that need no action in a default environment. The
+Seven things to act on, plus two changes below that need no action in a default environment. The
 first is the printed workflow, and it applies to every ordinary and recipe install. The workflow
 `doc-lattice init` prints now triggers on a resolved default branch rather than a hard-wired
 `main`, so regenerate your user-owned `.github/workflows/doc-lattice.yml` from the target release
@@ -132,6 +132,20 @@ prints `error: <message>`. That is every usage error, and also the `reconcile --
 report, which its own command adapter prints and which exits 2 like a project error does. So the
 parenthetical now marks exactly the diagnostics that carry a code to match on, and not every
 stderr line that ends the run at exit 2.
+
+The ninth is how a YAML parse failure prints, and it is the seventh thing to act on. Like the
+eighth it applies only to a caller that scrapes stderr; the exit code and the error codes are
+unchanged. A frontmatter block or config file that fails to load at all is still reported with
+this project's own header naming the file, and the parser's message that follows it is now quoted
+as one line, with its line breaks written as `\n`, instead of printed raw across several. Match
+the header rather than the parser's wording, which was never this project's to promise and differs
+across `ruamel` releases in any case. The reason is that the parser echoes your document back at
+you: a duplicate key is reported by quoting the key and both of its values, so a block spelling a
+control character twice put those bytes on your terminal through the diagnostic refusing it. See
+**Security** below. What you lose is the parser's caret, which underlined a column in a source
+snippet and points at nothing once the message is one line; the `line: N, column: M` coordinates
+beside it survive, and nothing is dropped, so the original message is still readable through the
+escapes.
 
 Everywhere, in both environments, the load cache is rebuilt once. `CACHE_VERSION` rises to 5 so a
 warm run can replay a new diagnostic, and entries written before it are discarded rather than read
@@ -479,10 +493,10 @@ as documents that reused no anchor. No action is needed: the next run rebuilds t
   through the very message refusing it. Only the spelling changed: such a key was already an
   error, and a key carrying no control character still reads exactly as before, so an ordinary
   diagnostic still names `derives_from.0.ref` rather than gaining quotes. This is the key half of
-  the value rule under **Changed** above; the two together do not close the whole of what a
+  the value rule under **Changed** above; the two together did not close the whole of what a
   document can print, because a block that fails to parse at all is reported through the YAML
-  parser's own message, which quotes the source it choked on. That path is still open and is
-  tracked separately.
+  parser's own message, which echoes the source it choked on. That path is closed by the last
+  entry under **Security** below.
 
 ### Removed
 
@@ -642,6 +656,30 @@ as documents that reused no anchor. No action is needed: the next run rebuilds t
   `persistence.py`, `path_utils.py`, or reconcile's recovery reporting. What remains exempt is
   per-expression and machine-only: the journal serializer, the staged-artifact filenames, and the
   recovery payload's own JSON spelling.
+
+- A document or config file that fails to parse can no longer put terminal control bytes on your
+  screen through the YAML parser's own message. That message is built by `ruamel` rather than by
+  this project, and it echoes what it choked on: a duplicate key is reported by quoting the key
+  and both of its values, so a block spelling `k: "v\u001b[31mA"` and `k: "v\u001b[31mB"` put raw
+  ESC bytes on stderr. It is the vector nothing else in this release reaches: the frontmatter value
+  rule under **Changed** never runs, because the load aborts before any value is validated, and the
+  quoted path spelling in the two entries above governs filenames rather than a message this
+  project did not build. All four sites that interpolate it are covered: the frontmatter and config
+  parse failures and reconcile's post-edit reparse gate and load site.
+
+  The message is now spelled with the same `repr` every path and rejected key already uses, applied
+  to the whole message because its third-party origin leaves no part of it trustworthy: once
+  `ruamel` has joined its pieces into one string, a line break it wrote and one decoded out of your
+  document are the same character, and preserving them would let a document forge a diagnostic
+  line. So an ordinary syntax error now reads as one quoted line. Each command keeps its own
+  header, so what failed and which file it was still reads as before, and the parser's `line: N,
+  column: M` coordinates survive; the caret under the offending column does not, because it points
+  at nothing once the message is flattened. `--format json` and the GitHub annotation encoder are
+  unaffected: a document that fails to load fails before either is selected.
+  [AD-37](ARCHITECTURE.md#ad-37-a-yaml-load-failures-message-is-spelled-whole-at-the-sink-that-reports-it)
+  records the decision, the two rejected alternatives, and the static guard that keeps every future
+  handler of the family on the same spelling. With this, every repo-controlled string that can
+  corrupt what doc-lattice prints is closed.
 
 - Every `git` invocation now resolves to an absolute path outside the directory being operated on.
   A `PATH` lookup returning a relative result is refused, which covers every relative entry from

@@ -372,9 +372,11 @@ the code point. Every other character is accepted, accented text, CJK, emoji, an
 space among them. The rule is what carries the `--no-color` promise above into a document's own
 text, as the quoted spelling of a path carries it into a filename: a value reaches your terminal,
 so it cannot carry bytes your terminal acts on. An unknown key that decodes to one is spelled in
-the error rejecting it for the same reason. What the rule is scoped to is a block that loads: a
-block that fails to parse at all is reported through the YAML parser's own message, which quotes
-the source line it choked on, and that path does not yet hold the promise.
+the error rejecting it for the same reason. A block that fails to parse at all never reaches this
+rule, and holds the promise a different way: the YAML parser's own message echoes what it choked
+on, so it is printed in the same quoted spelling a filename gets, as one line whose line breaks
+read as `\n`. That trades the parser's caret, which no longer points at anything once the message
+is one line, for coordinates you can still read and a diagnostic that cannot act on your terminal.
 
 Three spellings reach this rule, and two of them are ones you can write without meaning to.
 

@@ -896,6 +896,45 @@ def test_recovery_json_under_no_color_keeps_the_raw_machine_spelling(tmp_path: P
     assert payload["orphans"] == [f"docs/{orphan.name}"]
 
 
+# GTX-219: a YAML load failure's message is built by `ruamel` rather than by this project, and it
+# echoes the document back at the reader, so these two inspect the raw bytes a terminal receives
+# rather than the decoded text. No POSIX guard is needed, unlike the filename-bearing cases above:
+# the control bytes live inside the file's own content, which every platform can hold. The block
+# defeats the value rule of GTX-208 outright, because a duplicate key fails the load before any
+# value is validated.
+_ECHOED_DUPLICATE_KEY = 'k: "v\\u001b[31mA"\nk: "v\\u001b[31mB"\n'
+
+
+def test_frontmatter_load_failure_under_no_color_emits_no_escape_byte(tmp_path: Path):
+    docs = tmp_path / "docs"
+    docs.mkdir()
+    (docs / "down.md").write_text(
+        f"---\nid: down\n{_ECHOED_DUPLICATE_KEY}---\n# H\n", encoding="utf-8"
+    )
+
+    completed = _run_bytes(["check"], tmp_path)
+
+    assert completed.returncode == 2
+    assert b"UNREADABLE_DOC" in completed.stderr
+    assert b"\x1b" not in completed.stderr
+    assert b"\x1b" not in completed.stdout
+    # The echoed value is still identifiable, in the escaped spelling rather than as raw bytes.
+    assert rb"\x1b" in completed.stderr
+
+
+def test_config_load_failure_under_no_color_emits_no_escape_byte(tmp_path: Path):
+    # The config boundary shares the shape and is reached before any document is read.
+    (tmp_path / ".doc-lattice.yml").write_text(_ECHOED_DUPLICATE_KEY, encoding="utf-8")
+
+    completed = _run_bytes(["check"], tmp_path)
+
+    assert completed.returncode == 2
+    assert b"CONFIG_ERROR" in completed.stderr
+    assert b"\x1b" not in completed.stderr
+    assert b"\x1b" not in completed.stdout
+    assert rb"\x1b" in completed.stderr
+
+
 # GTX-196. A hand-edited journal, spelled here as the literal bytes one would carry, because the
 # engine cannot write these values itself: `tool_version` comes from the package constant, and a
 # selector is only recorded once its id or ref has matched a control-free frontmatter value. No

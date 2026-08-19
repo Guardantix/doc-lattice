@@ -1368,18 +1368,19 @@ The load cache needs no separate rule. `NodeMeta` is nested inside a cache entry
 snapshot is discarded whole, so a slot written before this change cannot replay a control
 character into a warm run.
 
-This does not close the repo-controlled vector, and the part left open is a decision this record
-does not make. Both halves settled so far assume a control-bearing string is either refused at
-validation or spelled where a message is built. A YAML **load failure** satisfies neither: it
-aborts before validation runs, and its message is built by `ruamel` rather than by this codebase.
-`ruamel`'s duplicate-key error echoes the offending key and both of its values back at the reader,
-and four sites interpolate that message verbatim: `frontmatter_parser.py`'s and `config.py`'s
-parse failures and `reconcile.py`'s two. The value half is what makes it more than cosmetic, since
-a duplicate key defeats this record's own guarantee by failing the load before the value rule can
-run. Closing it means choosing how to spell an untrusted third-party message whose own line
-structure is part of the diagnostic, which `repr` cannot settle the way it settles a path, so it
-is GTX-219's rather than an extension of this one. README's frontmatter section is scoped to a
-block that loads until it lands.
+This record did not close the repo-controlled vector on its own, and the part it left open turned
+on a decision it does not make. Both halves settled here assume a control-bearing string is either
+refused at validation or spelled where a message is built. A YAML **load failure** satisfies
+neither: it aborts before validation runs, and its message is built by `ruamel` rather than by this
+codebase. `ruamel`'s duplicate-key error echoes the offending key and both of its values back at
+the reader, and four sites interpolated that message verbatim: `frontmatter_parser.py`'s and
+`config.py`'s parse failures and `reconcile.py`'s two. The value half is what made it more than
+cosmetic, since a duplicate key defeats this record's own guarantee by failing the load before the
+value rule can run. Closing it meant choosing how to spell an untrusted third-party message whose
+own line structure is part of the diagnostic, which is why it was GTX-219's rather than an
+extension of this one. AD-37 settles it by spelling the whole message with this record's own
+`repr`, accepting a flattened syntax error as the price, so that vector is closed and README's
+frontmatter section is no longer scoped to a block that loads.
 
 No static construction-site guard accompanies this record, and none is owed. AD-34 needs one
 because a display strategy is only as complete as its sink list; a validation rule has one site,
@@ -1456,3 +1457,94 @@ own load diagnostic, which is a separate sink: `_invalid_journal_error` interpol
 still reaches stderr unspelled. That is the shape AD-35 closed for frontmatter with
 `_format_location_part`, unclosed at this boundary, and it is GTX-227's rather than an extension of
 this one.
+
+
+### AD-37: A YAML load failure's message is spelled whole, at the sink that reports it
+
+**Date:** 2026-08-19
+**Status:** Accepted
+**Context:** AD-34 closed the document-path half of the repo-controlled output vector and AD-35
+closed the typed-value half. Both rest on the same premise: a control-bearing string is either
+refused at validation or spelled where a message is built. A YAML **load failure** satisfies
+neither. It aborts before validation runs, so AD-35's rule never fires, and its message is built
+by `ruamel` rather than by this codebase, so there was no construction site of ours to apply
+AD-34's spelling at.
+
+The message echoes document content back at the reader. `ruamel`'s duplicate-key constructor error
+quotes the offending key and both of its values, and four sites interpolated it verbatim:
+`frontmatter_parser.py`'s and `config.py`'s parse failures and `reconcile.py`'s post-edit reparse
+gate and load site. Verified by execution: a block spelling `"k\u001b[31m": 1` twice put raw
+`0x1b` bytes on stderr through the key, and a block spelling `k: "v\u001b[31mA"` and
+`k: "v\u001b[31mB"` put them there through the value. The value half is the one that matters,
+because it defeats AD-35's guarantee outright: the rule promises such a value never becomes a node
+and never reaches output, and a duplicate key gets it printed by failing the load before the rule
+can run. Everything else probed at the same boundaries was already clean, the raw-byte scanner
+error included, which names a code point (`unacceptable character #x001b`) rather than echoing the
+stream.
+
+Which of the two existing answers applies is settled by the axis AD-36 states, and this record is
+its third application. What decides between refusing a string and spelling it is not how untrusted
+the string is but what else it does. A load failure's message is display-only: it participates in
+no identity, and in no structured output either, because a document that fails to load fails
+uniformly before format selection, so no admitted document's JSON or GitHub annotation moves.
+Refusing is not available in any case, since the thing that would be refused is the diagnostic
+itself.
+
+Two alternatives to spelling the whole message were weighed and rejected. Escaping control
+characters while preserving the message's own line breaks keeps an ordinary syntax error readable,
+but once `ruamel` has joined its context, marks, problem, and note into one string, a newline it
+wrote and a newline decoded out of an echoed value are the same character. AD-35 refuses a newline
+in a frontmatter value precisely because it can forge a report row rather than merely recolor one,
+and preserving every break here would weaken that invariant at a different boundary. Rebuilding
+the message from `MarkedYAMLError`'s structured parts keeps both properties and was rejected on
+coupling: each string mark embeds its own source snippet, so a safe reconstruction owns mark and
+snippet rendering rather than quoting `problem`, and `YAML_LOAD_ERRORS` includes non-marked
+builtins that would need a fallback. That surface is exercised across ruamel 0.18.0 and 0.19.x and
+both parser configurations, which is a large compatibility cost for a readability optimization.
+
+**Decision:** `yaml_error_render.format_yaml_error_for_display` returns exactly `repr(str(exc))`,
+and all four handlers call it while building their own message. Each caller keeps its
+domain-specific header, so what a file is and why it was being read stays this project's prose and
+only the third-party detail is spelled. The spelling is AD-34's, pinned to a single expression for
+AD-34's reason: `str.__repr__` is already injective, and injectivity is what makes "no two
+messages render alike" checkable rather than arguable. It needs no codec of its own, because that
+`repr` escapes every C0 code point, DEL, and the C1 range.
+
+The renderer is a module of its own rather than a function on the load boundary. `yaml_boundary.py`
+owns the load mechanics and deliberately not the caller's error policy, and how a failure is
+reported is policy; `validation_render.py` is the existing precedent for a display module beside
+the boundaries that share it. Machine channels are excluded on the reasoning AD-34 and AD-35 both
+record, and the exclusion costs nothing here, since a load failure never reaches format selection.
+
+**Consequences:** An ordinary YAML syntax error now reads as one quoted line with its line breaks
+written as `\n`, and that cost is paid by the common case to close a rare one. The loss is
+positional rather than aesthetic, and worth stating precisely: a marked `ruamel` error renders a
+source snippet with a caret under the offending column, and flattening the message leaves that
+caret pointing at nothing, so that part of the diagnostic becomes noise. What survives is the
+textual `line: N, column: M` coordinates, which still locate the failure, and the message stays
+lossless: nothing is dropped, so the original wording is recoverable by reading the escapes.
+
+A static construction-site guard in `tests/test_conventions.py` accompanies this record, and unlike
+AD-35's it is owed rather than optional. A display strategy is only as complete as its sink list,
+which is AD-34's own rule, and this strategy has sinks. The guard is keyed on every `except` clause
+in production code that names the load-failure family, the shared `YAML_LOAD_ERRORS` alias and the
+`YAMLError` base type alike and in either the bare or the attribute spelling, requiring either a
+call to the renderer inside the handler or membership in a named exemption list. It also requires
+that the bound name reach nothing but that call and the chained `raise ... from`, so a handler with
+two exits cannot spell one and interpolate the exception raw down the other. Keying it on the
+clause rather than on whether the clause binds a name is deliberate: `reconcile.py`'s round-trip
+probe binds none and would have been exempted structurally, and so would every future handler that
+swallows the family. That probe is the list's single entry, and its own comment records why a
+failed probe answers with the quoted form instead of reporting anything. The detector is
+self-tested the way AD-34's is.
+
+The suite pins the readability cost as a relation to the caught exception rather than as a literal
+string. `ruamel`'s wording differs across the releases and accelerator cells CI runs, so a fixed
+expected message would pass in one dependency cell and fail in another, which is why
+`tests/test_reconcile_fuzz.py` already pins only this project's own prose. What is asserted is
+that the rendered detail is the chosen spelling of whatever was caught, and that no C0, DEL, or C1
+code point survives.
+
+This closes the third and last of the repo-controlled strings 5.0's diagnostics group names.
+README's frontmatter section is no longer scoped to a block that loads, and AD-35's remainder note
+is answered by this record.
