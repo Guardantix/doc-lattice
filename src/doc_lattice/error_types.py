@@ -92,3 +92,10 @@ class ReconcilePersistenceError(ProjectError):
 
     def __init__(self, message: str) -> None:
         super().__init__(message, code="RECONCILE_PERSISTENCE")
+
+
+class InitPersistenceError(ProjectError):
+    """The ``init`` scaffold cannot be written to the working directory."""
+
+    def __init__(self, message: str) -> None:
+        super().__init__(message, code="INIT_PERSISTENCE")

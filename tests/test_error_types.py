@@ -8,6 +8,7 @@ from doc_lattice.error_types import (
     ConfigError,
     DuplicateIdError,
     FrontmatterError,
+    InitPersistenceError,
     LinearError,
     ProjectError,
     UnreadableDocError,
@@ -51,6 +52,15 @@ def test_frontmatter_error_inherits_and_has_its_own_code():
     assert isinstance(err, ProjectError)
     assert not isinstance(err, ConfigError)
     assert err.code == "FRONTMATTER_ERROR"
+
+
+def test_init_persistence_error_inherits_and_has_its_own_code():
+    # init's scaffold write is a filesystem boundary, not a config one: sharing CONFIG_ERROR
+    # sent users to the config file for a read-only or permission-denied working directory.
+    err = InitPersistenceError("cannot write .doc-lattice.yml: Read-only file system")
+    assert isinstance(err, ProjectError)
+    assert not isinstance(err, ConfigError)
+    assert err.code == "INIT_PERSISTENCE"
 
 
 def test_linear_error_inherits_and_has_code():

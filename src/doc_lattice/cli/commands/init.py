@@ -10,7 +10,7 @@ from rich.markup import escape
 
 from ... import __version__
 from ...config import DEFAULT_CONFIG_NAME
-from ...error_types import ConfigError, copy_exception_notes
+from ...error_types import ConfigError, InitPersistenceError, copy_exception_notes
 from ...linear_query import is_valid_team_key
 from ...persistence import atomic_create_bytes
 from ...scaffold import build_scaffold
@@ -166,18 +166,21 @@ def register_init(app: typer.Typer) -> None:
             # A bare FileExistsError means the destination already existed and the staged file
             # was cleaned up normally, which is the benign already-exists case. Notes are
             # attached only when that cleanup also failed and left stray staged evidence, so
-            # treat a noted error as a real failure.
+            # treat a noted error as a real failure. Both abnormal branches carry
+            # INIT_PERSISTENCE rather than CONFIG_ERROR: the defect is in the directory being
+            # scaffolded, and init never reads .doc-lattice.yml, so naming config sent the user
+            # to a file that had nothing to do with the failure.
             except FileExistsError as exc:
                 if not getattr(exc, "__notes__", ()):
                     runtime.stderr.print(
                         f"{escape(target.name)} already exists, leaving it untouched"
                     )
                 else:
-                    error = ConfigError(f"cannot write {target.name}: {exc}")
+                    error = InitPersistenceError(f"cannot write {target.name}: {exc}")
                     copy_exception_notes(error, exc)
                     raise error from exc
             except OSError as exc:
-                error = ConfigError(f"cannot write {target.name}: {exc}")
+                error = InitPersistenceError(f"cannot write {target.name}: {exc}")
                 copy_exception_notes(error, exc)
                 raise error from exc
             else:
