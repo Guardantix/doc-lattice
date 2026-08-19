@@ -527,11 +527,22 @@ file. Pass
 The generated gates remain fully offline: they run only `check` and `lint` and do not require or
 receive `LINEAR_API_KEY`.
 
-The printed workflow triggers on one branch, and `init` resolves which one by a fixed precedence:
-an explicit `--default-branch` wins; otherwise the local `origin/HEAD` remote-tracking ref is read;
-otherwise it falls back to `main`. The run always names the branch it used and where that came
-from on stderr, for example `workflow triggers on branch trunk (origin/HEAD)`, so a repository on
-`master`, `trunk`, or `develop` does not silently install a workflow that never runs.
+Branch resolution reaches `init` in 5.0, the same release boundary
+[MANAGED_CI.md](https://github.com/Guardantix/doc-lattice/blob/main/MANAGED_CI.md) records for
+`--default-branch` and its own recipe. Before that release the printed workflow hard-wires its
+trigger: both the `push` and the `pull_request` filter render as `branches: [main]`, `init` never
+inspects `origin/HEAD`, the run names no branch on stderr, and passing `--default-branch` exits 2
+with `No such option: --default-branch`. On any such release, compare both filters against the
+branch you actually gate on before saving the file and edit both when it is not `main`. That hand
+edit is the only correction available there, and a repository on `master`, `trunk`, or `develop`
+that skips it installs a workflow that never runs.
+
+Starting in 5.0, and through the two paragraphs after this one, the printed workflow triggers on
+one branch that `init` resolves by a fixed precedence: an explicit `--default-branch` wins;
+otherwise the local `origin/HEAD` remote-tracking ref is read; otherwise it falls back to `main`.
+The run always names the branch it used and where that came from on stderr, for example
+`workflow triggers on branch trunk (origin/HEAD)`, so a repository on `master`, `trunk`, or
+`develop` does not silently install a workflow that never runs.
 
 Treat the probe as a hint rather than an authority. `origin/HEAD` is cached local state: it is
 often absent in fresh or shallow clones, and after an upstream default-branch rename it can still
