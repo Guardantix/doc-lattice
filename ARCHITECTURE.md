@@ -1548,3 +1548,63 @@ code point survives.
 This closes the third and last of the repo-controlled strings 5.0's diagnostics group names.
 README's frontmatter section is no longer scoped to a block that loads, and AD-35's remainder note
 is answered by this record.
+
+### AD-38: The escape-free promise is narrowed, because the annotation channel cannot be spelled
+
+**Date:** 2026-08-19
+**Status:** Accepted
+**Context:** AD-34, AD-35, and AD-37 closed three repo-controlled strings, and each one left
+README's `--no-color` promise stronger than it found it. That promise was written unqualified:
+no terminal escape sequence reaches the output under either lever, covering every command's
+output. AD-34 had already excluded the GitHub annotation `file=` value from the display spelling,
+so the two documents disagreed about the same channel from the moment AD-34 landed, and only the
+absence of a case exercising both at once kept the contradiction unstated. Execution during the
+GTX-125 return supplied it: a document named `pwn<ESC>[31m<ESC>[Aevil.md`, checked under
+`NO_COLOR=1` with `--format github`, emits `::error file=docs/pwn<ESC>[31m<ESC>[Aevil.md,...` and
+puts the raw `0x1b` bytes on stdout. The promise says that cannot happen; AD-34 says it must.
+
+Only one of the two can hold, and which one gives is decided by whether a control-free annotation
+is reachable at all. It is not. `escape_github_property` substitutes `%`, `:`, `,`, CR, and LF,
+and those five are the whole of the workflow-command grammar's property vocabulary: the runner
+reverses exactly that set to recover the value it resolves the annotation against. CR and LF
+therefore survive a round trip and `ESC` has no representation that does. A spelling such as
+`%1B`, `\x1b`, or AD-34's `repr` reaches GitHub as a literally different filename, which attaches
+the annotation to nothing, and deletion is `strip_control_chars` again, non-injective for the
+reason AD-34 already rejected it. The channel can carry the byte or lose the attachment; there is
+no third spelling, so sanitizing is not a cost to weigh but an option that does not exist.
+
+AD-35's move was weighed and is the one genuine alternative: refuse a document whose *filename*
+carries a control character, closing the vector at the load boundary rather than narrowing the
+promise. It is rejected on two counts. A filename is not authored content the way a frontmatter
+value is, so refusing it withholds the report from a repository for a property of its filesystem
+rather than of its lattice, and the repository most needing to be told it contains such a file is
+exactly the one that would get no report. AD-34 also settled the axis already, on the ground AD-36
+states: a path is display-only, and this record does not reopen it. That the refusal would now be
+a new breaking change after 5.0 shipped is the lesser objection and not the deciding one.
+
+**Decision:** README's promise is narrowed to human-facing output and names its one exception
+outright. The `file=` value of a `--format github` annotation is excluded, with the reason stated
+where a reader meets the promise rather than only in this log: GitHub resolves that value against
+the file it attaches to, so the repo-relative filename is reproduced exactly. Nothing else is
+excluded. `--format json` keeps the guarantee on its own merits, because JSON's encoder escapes
+control characters and the `check` and `lint` payloads carry no filename, and the narrowing says
+so rather than sweeping both machine formats out together. The annotation encoder, AD-34, and
+AD-35 are unchanged; this record moves a document, not a byte of output.
+
+**Consequences:** The cost is a genuinely weaker public promise, and it is worth stating plainly
+rather than as a technicality. Under `--no-color` or `NO_COLOR`, a repository containing a
+control-bearing document filename can still put that control character on stdout through
+`check --format github` and `lint --format github`. What bounds it is the channel: that output is
+addressed to the Actions log rather than to an interactive terminal, and a reader piping it to one
+inherits the same exposure they would from `cat` on the filename itself. Human output, help,
+usage errors, warnings, and diagnostics are unaffected and keep the full guarantee, which is where
+AD-34's vector actually ran.
+
+An end-to-end case in `tests/cli/test_contract.py` pins the exception under both levers, so the
+exclusion is enforced rather than merely written down, and a later change that starts spelling the
+annotation fails the suite instead of silently breaking attachment. It sits beside the byte-level
+cases the same harness already runs, which is what makes the pair legible: they assert no escape
+byte survives, and this one asserts that here it must.
+`tests/test_path_display_contract.py`'s encoder-boundary case is kept and is not redundant with
+it, because that case proves what `github_annotation` builds while this one proves what the two
+no-color levers do to it, and only the second is a statement about the promise.

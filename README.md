@@ -266,9 +266,20 @@ example `doc-lattice --no-color check`. Rich also honors the [`NO_COLOR`](https:
 environment variable; `--no-color` is the command-line equivalent. doc-lattice intentionally
 extends the `NO_COLOR` baseline: the standard itself only asks implementers to drop color and
 leaves bold, underline, and italic styling in place, but either lever here means no styling at
-all, so no terminal escape sequence reaches the output under either one, even when a
-terminal-forcing variable is set. This covers every command's output, not just help and
-usage-error text.
+all, so no terminal escape sequence reaches human-facing output under either one, even when a
+terminal-forcing variable is set. This covers every command's human-facing output, not just help
+and usage-error text: reports, warnings, and diagnostics alike.
+
+One machine channel is excluded from that guarantee, deliberately and by name: the `file=` value
+of a `--format github` annotation. It reproduces the document's repo-relative filename exactly, so
+a document whose filename contains a control character puts that character into the annotation
+under either lever. GitHub resolves that value against the file the annotation attaches to, and
+the workflow-command grammar defines substitutions for only `%`, `:`, `,`, carriage return, and
+line feed; there is no spelling of an `ESC` that GitHub decodes back to the original filename, and
+deleting it would map two differently named documents onto one annotation. Attachment is worth
+more there than styling a channel no terminal renders, so the raw spelling stays. Nothing else is
+excluded: `--format json` keeps the guarantee, because JSON's own encoder escapes control
+characters, and the `check` and `lint` payloads carry no filename at all.
 
 `check` and `lint` also accept `--format human|json|github`. `human` is the default. `github`
 emits one escaped GitHub Actions `::error` workflow command per drift finding or ladder
