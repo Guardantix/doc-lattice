@@ -872,9 +872,9 @@ columns are what keep defensive-only recovery shapes out of the publicly accepte
 | Entry | Key spelling | `ref` and an optional `seen` and nothing else. Either key may be written plainly, or as an explicit `? key` / `: value` pair. A key spelled through an alias needs one of two forms, the explicit `? *name` pair or `*name : value` with a space before its `:`, because the bare `*name:` form does not scan. Members may arrive through a merge in either spelling | Any extra key, which is tolerated and preserved |
 | Entry | Node properties | An anchor, a tag, or both opening the entry, including on the sequence line above and left of its first key | Nothing more |
 | Entry | Member layout | Layouts an appended `seen` has to land after that need no member beyond `ref` and `seen`: the next indented item of the enclosing sequence, a trailing comment, a flow entry written with or without a trailing comma, or a `ref` spanning lines as a block scalar in either style, a multi-line double-quoted scalar, or a multi-line plain scalar | The same landing after an extra member, which the strict load forbids: a trailing block scalar, a multi-line flow collection, or an implicit or explicit null |
-| Entry `ref` | Value | A control-free string (AD-35), which takes the same trailing-line-break spellings out of this column as the `seen` row below | Nothing more; a non-string `ref` is refused whenever planning is reached, while a control-bearing one is rewritten like any other |
+| Entry `ref` | Value | A control-free string (AD-35), which takes the same line-break-bearing spellings out of this column as the `seen` row below, interior breaks and trailing ones alike | Nothing more; a non-string `ref` is refused whenever planning is reached, while a control-bearing one is rewritten like any other |
 | Entry `seen` | Carrier shape | A scalar or null, never a collection | Nothing more; a collection-valued `seen` at a targeted entry is refused |
-| Entry `seen` | Scalar spelling | Any scalar spelling whose constructed value is a control-free string or null (AD-35): plain, single or double quoted, a block scalar in either style with an explicit indentation indicator and with strip chomping, or with clip or keep chomping where the value carries no trailing line break, an explicit `null` or `~`, an empty value, an absent key, an alias to such a value, or an explicit `? seen` left without its `:`, which constructs null. How the key itself may be written is the `Entry` `Key spelling` row above | Any scalar the safe constructor accepts, whatever it constructs to, an explicitly tagged one included, a control-bearing value among them |
+| Entry `seen` | Scalar spelling | Any scalar spelling whose constructed value is a control-free string or null (AD-35): plain, single or double quoted, a block scalar with an explicit indentation indicator whose constructed value carries no line break at all: folded in any chomping mode where the value keeps no trailing break, or literal on a single line under the same condition, since chomping governs only the break at the end and a literal style keeps the breaks between its own lines, an explicit `null` or `~`, an empty value, an absent key, an alias to such a value, or an explicit `? seen` left without its `:`, which constructs null. How the key itself may be written is the `Entry` `Key spelling` row above | Any scalar the safe constructor accepts, whatever it constructs to, an explicitly tagged one included, a control-bearing value among them |
 | Entry `seen` | Node properties | An anchor, a tag, or both, in either order, on the value's own line or on lines of their own, with the author's comments between a property and the value | Nothing more |
 
 Four behaviors of the loaded shape are recorded with the matrix rather than inside a cell.
@@ -1335,18 +1335,34 @@ migration note therefore gives a byte-level search rather than telling a reader 
 newline is reached through a spelling instead, and that spelling is what the next paragraph
 covers.
 
-The cost lands on AD-31 layer 2, which this record narrows. That table's strict tracked-document
-column accepts, for `ref` and for `seen`, "a block scalar in either style with any chomping or
-explicit indentation indicator". Clip and keep chomping construct a trailing line break, so those
-two chomping modes are no longer in the strict column for those two positions; strip chomping,
-and every folded spelling, join their lines with spaces and are unaffected. The reread column
+The cost lands on AD-31 layer 2, which this record narrows along two independent axes rather than
+the one it first appeared to. That table's strict tracked-document column accepts, for `ref` and
+for `seen`, "a block scalar in either style with any chomping or explicit indentation indicator".
+The first axis is chomping: clip and keep construct a trailing line break, so those two modes are
+no longer in the strict column for those two positions. The second is style, and it holds
+whatever the chomping is: a literal block scalar keeps the breaks *between* its own lines, so a
+multi-line `|-` constructs an interior newline and is refused as well. Only the folded styles join
+their lines with a space. What survives for a value written across lines is therefore `>-` alone,
+and `|-` survives only on a single line. Stating this as "strip chomping is unaffected" would have
+been wrong, and was: chomping governs the break at the end, never the ones in the middle. The
+reread column
 beside it does not move at all: `apply_reconcile` still rewrites such a document byte-correctly
 and still re-emits the value as an escape, which is what the two columns exist to distinguish.
-The affected spellings had no working use: a `seen` ending in a line break can never equal a
-content hash, and a `ref` ending in one can never resolve, since every id in the index comes from
-a frontmatter `id` or a heading slug. Such a document was permanently drifting or permanently
-broken, and is now refused with a diagnostic that says why. A folded `title` is the one plausible
-authoring casualty, and `>-` is the spelling that keeps it.
+Only one of the affected spellings had no working use: a `seen` ending in a line break can never
+equal a content hash, so such a document was permanently drifting and is now refused with a
+diagnostic that says why.
+
+The rest did have one, and the reasoning that said otherwise is recorded because its premise was
+sitting inside its own conclusion. It ran: a `ref` ending in a line break can never resolve, since
+every id in the index comes from a frontmatter `id` or a heading slug. A heading slug carries no
+break, but a frontmatter `id` is a value of exactly the kind under discussion, and `id: |`
+constructs one. An upstream naming itself that way and a downstream pointing at it the same way
+construct the same string, so the id registered, the ref resolved against it, and the edge
+reconciled to OK. Verified by execution against the pre-change tree rather than reasoned about,
+which is what the earlier claim needed and did not get. A folded `title` is not the one plausible
+casualty, then, but the most likely of several: any of `id`, `title`, `tickets`, and `ref` could
+carry a break and work, and CHANGELOG's migration scan covers all five keys rather than the two
+that hold hashes and refs.
 
 The load cache needs no separate rule. `NodeMeta` is nested inside a cache entry and an invalid
 snapshot is discarded whole, so a slot written before this change cannot replay a control

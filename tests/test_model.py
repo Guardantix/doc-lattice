@@ -199,16 +199,39 @@ def test_the_control_character_message_names_the_code_point_and_not_the_value():
     assert "\x1b" not in error["msg"]
 
 
-@pytest.mark.parametrize("char", ["\n", "\r"], ids=["newline", "carriage-return"])
-def test_a_line_break_is_answered_with_the_chomping_fix(char: str):
-    # A block scalar written `|` or `>` keeps a trailing break, which is the only way an author
+def test_a_trailing_line_break_is_answered_with_the_chomping_fix():
+    # A block scalar written `|` or `>` keeps a trailing break, which is the way an author
     # reaches this rule without meaning to, so that case gets the fix that actually applies
     # rather than the general "remove it".
     with pytest.raises(PydanticValidationError) as exc:
-        NodeMeta.model_validate({"id": "x", "title": f"A folded title{char}"})
+        NodeMeta.model_validate({"id": "x", "title": "A folded title\n"})
 
     (error,) = exc.value.errors(include_url=False, include_input=False)
-    assert "chomp a block scalar with '-'" in error["msg"]
+    assert "drop the trailing line break" in error["msg"]
+
+
+def test_an_interior_line_break_is_answered_with_the_joining_fix_not_the_chomping_one():
+    # An interior break survives every chomping mode: a `|-` spanning two lines is already
+    # chomped and still constructs one, and a double-quoted `"a\nb"` has no chomping indicator
+    # to change at all. Sending either author to `-` names a fix they have already applied or
+    # cannot apply, so position decides the advice.
+    with pytest.raises(PydanticValidationError) as exc:
+        NodeMeta.model_validate({"id": "x", "title": "first\nsecond"})
+
+    (error,) = exc.value.errors(include_url=False, include_input=False)
+    assert "join the lines" in error["msg"]
+    assert "chomp" not in error["msg"]
+
+
+def test_a_carriage_return_is_answered_with_the_general_fix():
+    # No chomping mode and no folding produces a carriage return: YAML normalizes a literal one
+    # to a line feed, so a value carrying one was written as an escape and removing it is the
+    # only fix that applies.
+    with pytest.raises(PydanticValidationError) as exc:
+        NodeMeta.model_validate({"id": "x", "title": "a\rb"})
+
+    (error,) = exc.value.errors(include_url=False, include_input=False)
+    assert "reaches terminal output as written" in error["msg"]
 
 
 def test_a_non_break_control_is_answered_with_the_general_fix():

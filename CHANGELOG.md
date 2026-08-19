@@ -85,16 +85,25 @@ and only the first is the one the vector was reported for:
    double-quoted, single-quoted, or block scalar. Nothing about it is visible on screen, so
    search for the byte rather than reading for it: `grep -rP '^\s*(id|title|tickets|ref|seen):.*\t'`
    over your docs roots, and widen it if your values span lines.
-3. **A block scalar keeping its trailing newline.** Tab, newline, and carriage return are C0
-   controls, and `|` or `>` without `-` keeps a break, so a value written that way is refused
-   where `|-` and `>-` are not. Search for a `seen` or a `ref` written as a block scalar with
-   no `-`.
+3. **A newline a block scalar keeps**, whether at the end of the value or inside it. Tab,
+   newline, and carriage return are C0 controls, so both spellings are refused. `|` or `>`
+   without `-` keeps a *trailing* break, which `|-` and `>-` chomp away. An *interior* break is
+   the case to look for after that, because chomping does not touch it: a `|-` spanning two
+   lines is already chomped and still constructs a newline between them. Only the folded styles
+   (`>` and `>-`) join their lines with a space, so `>-` is the block spelling that survives
+   this rule for a value written across lines, and `|-` survives it only on one line. Search
+   every one of the five keys, not just the two that carry hashes and refs: `id`, `title`,
+   `tickets`, `ref`, and `seen` are all constrained, and `id` and `title` are where a
+   multi-line value is most likely to have been written on purpose.
 
-A folded `title` is the only one of these with a working use today; a `seen` or `ref` carrying a
-break could never match a hash or resolve to an id, so those documents were already permanently
-drifting or broken. A literal carriage return or NEL needs no search: YAML reads both as line
-breaks and folds them to a space before any value is constructed. See **Changed** below and the
-frontmatter reference in README.md.
+All five had a working use, so treat this as a real scan rather than a formality. A folded
+`title` is the obvious one. Less obviously, an `id` written `|` constructs a trailing newline,
+and a `ref` written the same way constructs the same string, so the two matched and the edge
+resolved and reconciled to OK; verified by execution against the pre-change tree. Only a `seen`
+carrying a break was already broken, since it could never equal a content hash. A literal
+carriage return or NEL needs no search: YAML reads both as line breaks and folds them to a space
+before any value is constructed. See **Changed** below and the frontmatter reference in
+README.md.
 
 Everywhere, in both environments, the load cache is rebuilt once. `CACHE_VERSION` rises to 5 so a
 warm run can replay a new diagnostic, and entries written before it are discarded rather than read
@@ -169,9 +178,13 @@ as documents that reused no anchor. No action is needed: the next run rebuilds t
   Tab, newline, and carriage return are C0 controls and are included: the output being protected
   is line-oriented, so a newline in a value forges a whole report row rather than restyling one.
   That is also the only compatibility cost worth planning for. It narrows the block-scalar
-  spellings AD-31 declares supported for `ref` and `seen`: clip and keep chomping (`|`, `>`, and
-  their `+` forms) construct a trailing line break, so those are refused where `|-` and `>-` are
-  not. The reconcile rewriter is unchanged and still round-trips such a document byte for byte;
+  spellings AD-31 declares supported for `ref` and `seen` in two ways, not one. Clip and keep
+  chomping (`|`, `>`, and their `+` forms) construct a trailing line break, so those are refused
+  where `|-` and `>-` are not. Independently of chomping, a *literal* block scalar (`|` in any
+  chomping mode) keeps the breaks between its own lines, so a multi-line `|-` is refused too;
+  only the folded styles join their lines with a space, which leaves `>-` as the block spelling
+  that survives across lines and `|-` as one that survives on a single line. The reconcile
+  rewriter is unchanged and still round-trips such a document byte for byte;
   only the strict tracked-document load moved. Machine channels are untouched for every document
   that still loads, and a refused document fails before format selection rather than reaching one
   channel and not another. See

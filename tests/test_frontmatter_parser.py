@@ -694,3 +694,57 @@ def test_the_tab_is_the_only_raw_byte_the_validator_ever_sees():
     }
 
     assert reaching_validation == {"tab"}
+
+
+# GTX-208 (AD-35): which block-scalar spellings survive the rule, per style and chomping mode.
+# The migration guidance rests on this table, and its first version was wrong in one cell: it
+# read the rule as being about chomping alone, so it told an adopter that `|-` was safe. Chomping
+# governs only the break at the *end* of a block; a literal style keeps the breaks *between* its
+# lines whatever the chomping is, so a multi-line `|-` constructs an interior newline and is
+# refused. Only the folded styles join their lines with a space. Recorded as a measured table for
+# the same reason the raw-byte one above is: the belief is what shipped the wrong advice.
+_BLOCK_SCALAR_SPELLINGS = {
+    "literal-clip-one-line": ("|", ["up"], None),
+    "literal-strip-one-line": ("|-", ["up"], "up"),
+    "literal-keep-one-line": ("|+", ["up"], None),
+    "literal-clip-two-lines": ("|", ["up", "down"], None),
+    "literal-strip-two-lines": ("|-", ["up", "down"], None),
+    "folded-clip-two-lines": (">", ["up", "down"], None),
+    "folded-strip-one-line": (">-", ["up"], "up"),
+    "folded-strip-two-lines": (">-", ["up", "down"], "up down"),
+    "folded-keep-two-lines": (">+", ["up", "down"], None),
+}
+
+
+@pytest.mark.parametrize(
+    ("header", "lines", "constructed"),
+    [pytest.param(*row, id=name) for name, row in _BLOCK_SCALAR_SPELLINGS.items()],
+)
+def test_only_a_single_line_literal_or_a_folded_block_survives_the_control_rule(
+    header: str, lines: list[str], constructed: str | None
+):
+    body = "".join(f"  {line}\n" for line in lines)
+    block = f"id: doc\ntitle: {header}\n{body}"
+
+    if constructed is None:
+        with pytest.raises(FrontmatterError) as exc:
+            parse_meta(block, Path("a.md"))
+        assert "U+000A" in str(exc.value)
+        return
+
+    parsed = parse_meta(block, Path("a.md"))
+    assert parsed.meta is not None
+    assert parsed.meta.title == constructed
+
+
+def test_the_folded_styles_are_the_only_ones_that_survive_across_lines():
+    # The sentence README and CHANGELOG both give an adopter, stated once as a property of the
+    # table above. If a dependency change ever makes a literal block join its lines, or stops a
+    # folded one from doing so, the migration advice is wrong and this fails.
+    surviving_multi_line = {
+        header
+        for header, lines, constructed in _BLOCK_SCALAR_SPELLINGS.values()
+        if len(lines) > 1 and constructed is not None
+    }
+
+    assert surviving_multi_line == {">-"}

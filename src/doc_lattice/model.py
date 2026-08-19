@@ -23,17 +23,28 @@ def _reject_control_chars(value: str) -> str:
     Raises:
         ValueError: If the value holds a C0 control, DEL, or a C1 control. The message names
             the code point and its position rather than echoing the value, so the diagnostic
-            cannot carry the character it is refusing. A line break is answered with the
-            chomping fix rather than the general one, since a block scalar written ``|`` or
-            ``>`` keeps a trailing break and is the only way an author reaches this by accident.
+            cannot carry the character it is refusing. A line break is answered with a fix that
+            says how to make the value single-line, because a break is the one member of the
+            refused set an author reaches by accident. Which fix depends on where the break is,
+            not on how the value was spelled, which this function cannot see: a trailing break is
+            what clip or keep chomping leaves behind, while an interior one survives every
+            chomping mode and needs the lines joined instead. Answering both with the chomping
+            advice would send an author of a multi-line ``|-`` to a ``-`` that is already there.
     """
     index = first_control_index(value)
     if index is not None:
-        fix = (
-            "frontmatter values are single-line, so chomp a block scalar with '-'"
-            if value[index] in "\n\r"
-            else "remove it, since the value reaches terminal output as written"
-        )
+        if value[index] != "\n":
+            fix = "remove it, since the value reaches terminal output as written"
+        elif index == len(value) - 1:
+            fix = (
+                "frontmatter values are single-line, so drop the trailing line break; '|-' or "
+                "'>-' chomps one that a block scalar would keep"
+            )
+        else:
+            fix = (
+                "frontmatter values are single-line, so join the lines; '>-' folds a block "
+                "scalar's lines with spaces"
+            )
         msg = (
             f"must not contain a control character; found U+{ord(value[index]):04X} at index "
             f"{index}: {fix}"

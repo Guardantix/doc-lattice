@@ -379,9 +379,13 @@ the source line it choked on, and that path does not yet hold the promise.
 Two cases are worth knowing, because they are the ones you can write without meaning to. A
 **literal tab** inside a quoted or block scalar is the one control byte YAML itself admits, and
 nothing on screen distinguishes it from a run of spaces, so a value that looks fine can fail;
-`grep -rP '^\s*(id|title|tickets|ref|seen):.*\t'` finds them. A **trailing newline** comes from a
-block scalar written `|` or `>`, which keeps the break; write `|-` or `>-` instead, which is the
-difference between a folded title that loads and one that does not. Everything else in the
+`grep -rP '^\s*(id|title|tickets|ref|seen):.*\t'` finds them. A **newline from a block scalar** is
+the other, and it arrives in two ways that need different fixes. A block written `|` or `>` keeps
+a *trailing* break, which `|-` or `>-` chomps away. A literal block (`|` in any chomping mode)
+also keeps the breaks *between* its lines, and no chomping indicator touches those, so a `|-`
+spanning two lines still fails; only the folded styles join their lines with a space. Write a
+multi-line value as `>-`, which is the spelling that survives this rule, and keep `|-` for a
+value on one line. Everything else in the
 refused set, ESC and DEL and the C1 controls among them, YAML rejects as a raw byte, so it can
 only reach a value through a double-quoted escape such as `"\u001b"`.
 
