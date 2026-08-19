@@ -5,6 +5,7 @@ from pathlib import Path
 from .error_types import BrokenRefError
 from .hashing import content_hash
 from .model import Lattice, Node, TargetId
+from .path_utils import format_path_for_display
 from .sections import section_text
 
 
@@ -65,6 +66,6 @@ def node_for_path(lattice: Lattice, path: Path) -> Node:
     """
     node_id = lattice.file_id_by_path.get(path)
     if node_id is None:
-        msg = f"no node owns location path {path!r}"
+        msg = f"no node owns location path {format_path_for_display(path)}"
         raise BrokenRefError(msg)
     return lattice.nodes_by_id[node_id]

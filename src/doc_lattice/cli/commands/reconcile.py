@@ -9,7 +9,7 @@ from rich.markup import escape
 
 from ...constants import VALID_BASIC_OUTPUT_FORMATS
 from ...error_types import UnreadableDocError
-from ...path_utils import safe_resolve
+from ...path_utils import format_path_for_display, safe_resolve
 from ...reconcile import Rewrite, plan_rewrites
 from ...reconcile import reconcile as plan_reconcile
 from ...reconcile_transaction import (
@@ -53,8 +53,10 @@ def _print_reconcile_lines(
     dry_run: bool,
 ) -> None:
     verb = "would reconcile" if dry_run else "reconciled"
+    # The basename is still repo-controlled, so it is displayed rather than interpolated raw.
+    name = escape(format_path_for_display(Path(path.name)))
     for target_ref in sorted(applied):
-        runtime.stdout.print(f"{verb} {escape(path.name)}: {escape(target_ref)}")
+        runtime.stdout.print(f"{verb} {name}: {escape(target_ref)}")
 
 
 def _journal_selector(
@@ -91,7 +93,7 @@ def _resolve_reconcile_write_paths(
         try:
             write_paths[path] = safe_resolve(path, project_root)
         except ValueError as exc:
-            msg = f"cannot write {path}: it escapes the project root"
+            msg = f"cannot write {format_path_for_display(path)}: it escapes the project root"
             raise UnreadableDocError(msg) from exc
     return write_paths
 

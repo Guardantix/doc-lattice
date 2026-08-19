@@ -453,7 +453,7 @@ def test_reconcile_real_run_recovers_before_loading_and_plans_recovered_bytes(
     result = runner.invoke(app, ["reconcile", "pc-design"])
 
     assert result.exit_code == 0
-    assert "reconciled pc-design.md" in result.stdout
+    assert "reconciled 'pc-design.md'" in result.stdout
     assert "recovered reconcile transaction: rolled_back" in result.stderr
     assert b"seen:" in destination.read_bytes()
     assert not journal.exists()
@@ -696,8 +696,8 @@ def test_reconcile_real_run_reports_reconciled_lines(lattice_dir: Path, monkeypa
     monkeypatch.chdir(lattice_dir)
     result = runner.invoke(app, ["reconcile", "--all"])
     assert result.exit_code == 0
-    assert "reconciled pc-design.md: art-direction#accent" in result.stdout
-    assert "reconciled pc-design.md: art-direction#motion" in result.stdout
+    assert "reconciled 'pc-design.md': art-direction#accent" in result.stdout
+    assert "reconciled 'pc-design.md': art-direction#motion" in result.stdout
 
 
 def test_reconcile_dry_run_leaves_files_unchanged(lattice_dir: Path, monkeypatch):
@@ -714,8 +714,8 @@ def test_reconcile_dry_run_lists_stale_and_unreconciled_edges(lattice_dir: Path,
     monkeypatch.chdir(lattice_dir)
     result = runner.invoke(app, ["reconcile", "--all", "--dry-run"])
     assert result.exit_code == 0
-    assert "would reconcile pc-design.md: art-direction#accent" in result.stdout
-    assert "would reconcile pc-design.md: art-direction#motion" in result.stdout
+    assert "would reconcile 'pc-design.md': art-direction#accent" in result.stdout
+    assert "would reconcile 'pc-design.md': art-direction#motion" in result.stdout
     # gdd's ghost ref is BROKEN, which --all skips, so gdd never appears.
     assert "gdd" not in result.stdout
     assert "reconciled pc-design" not in result.stdout
@@ -727,8 +727,8 @@ def test_reconcile_dry_run_single_node_selection(lattice_dir: Path, monkeypatch)
     before = pc_path.read_text(encoding="utf-8")
     result = runner.invoke(app, ["reconcile", "pc-design", "--dry-run"])
     assert result.exit_code == 0
-    assert "would reconcile pc-design.md: art-direction#accent" in result.stdout
-    assert "would reconcile pc-design.md: art-direction#motion" in result.stdout
+    assert "would reconcile 'pc-design.md': art-direction#accent" in result.stdout
+    assert "would reconcile 'pc-design.md': art-direction#motion" in result.stdout
     assert pc_path.read_text(encoding="utf-8") == before
 
 
@@ -740,7 +740,7 @@ def test_reconcile_dry_run_composes_with_ref(lattice_dir: Path, monkeypatch):
         app, ["reconcile", "pc-design", "--ref", "art-direction#accent", "--dry-run"]
     )
     assert result.exit_code == 0
-    assert "would reconcile pc-design.md: art-direction#accent" in result.stdout
+    assert "would reconcile 'pc-design.md': art-direction#accent" in result.stdout
     assert "art-direction#motion" not in result.stdout
     assert pc_path.read_text(encoding="utf-8") == before
 

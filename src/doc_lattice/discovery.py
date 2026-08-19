@@ -7,7 +7,7 @@ from pathlib import Path
 
 from .error_types import UnreadableDocError
 from .hashing import normalize_newlines
-from .path_utils import safe_resolve
+from .path_utils import format_path_for_display, safe_resolve
 
 
 def discover_doc_paths(
@@ -57,8 +57,8 @@ def discover_doc_paths(
                 resolved = safe_resolve(path, project_root)
             except ValueError:
                 warnings.warn(
-                    f"skipping {path}: it escapes the project root via a symlink or "
-                    "absolute path and was not read",
+                    f"skipping {format_path_for_display(path)}: it escapes the project root "
+                    "via a symlink or absolute path and was not read",
                     stacklevel=2,
                 )
                 continue
@@ -82,7 +82,7 @@ def _unreadable(path: Path, exc: OSError | UnicodeDecodeError) -> UnreadableDocE
     Centralizing the message is what lets the cached load path (byte read, decode, stat)
     produce byte-identical errors to an uncached read.
     """
-    return UnreadableDocError(f"cannot read doc {path}: {exc}")
+    return UnreadableDocError(f"cannot read doc {format_path_for_display(path)}: {exc}")
 
 
 def read_doc_bytes(path: Path) -> bytes:

@@ -174,7 +174,7 @@ STALE         billing-integration-guide -> api-design#pagination
 1 edge: 0 OK, 1 STALE, 0 UNRECONCILED, 0 BROKEN
 
 $ doc-lattice impact api-design#pagination
-billing-integration-guide  (/work/acme-api/docs/billing-integration-guide.md)  tickets: ENG-412
+billing-integration-guide  ('/work/acme-api/docs/billing-integration-guide.md')  tickets: ENG-412
 ```
 
 `check` exits 1, so CI is now red. A human reviews the guide against the new pagination
@@ -182,7 +182,7 @@ scheme, updates the body if needed, and then locks in the new hash:
 
 ```console
 $ doc-lattice reconcile billing-integration-guide
-reconciled billing-integration-guide.md: api-design#pagination
+reconciled 'billing-integration-guide.md': api-design#pagination
 
 $ doc-lattice check
 1 edge: 1 OK, 0 STALE, 0 UNRECONCILED, 0 BROKEN

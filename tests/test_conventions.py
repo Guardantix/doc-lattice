@@ -1678,3 +1678,91 @@ def test_provenance_guard_leaves_before_images_and_rollback_alone():
     sources = _extended(_production_sources(), TRANSACTION_MODULE, NON_INVARIANT_ADDITIONS)
     violations = _provenance_violations(sources)
     assert not violations, "\n".join(violations)
+
+
+# GTX-125: the bug class is an omitted construction site, not a wrong renderer, so a behavioral
+# per-sink list cannot close it -- a sink added tomorrow is not in that list. This guard is the
+# static half: inside the modules GTX-125 owns, a path-typed expression may not be interpolated
+# into an f-string unless it goes through `format_path_for_display`. See AD-34.
+#
+# Names treated as path-typed. Deliberately a name heuristic rather than inferred types: the
+# suite has no type resolver, and every sink in the owned modules spells its path with one of
+# these. A false positive is cheap (wrap it, or add it to the exemptions below with a reason).
+_PATH_BEARING_NAMES = frozenset({"path", "source", "destination", "journal", "link", "cwd"})
+
+# Modules outside GTX-125's ownership, each with the reason it is not scanned.
+_DISPLAY_GUARD_EXEMPT_MODULES = {
+    # GTX-209 owns the reconcile transaction and recovery path sinks; it reuses this helper.
+    "reconcile_transaction.py",
+    # The helper's own containment error, which is what defines the boundary rather than
+    # crossing it, plus `safe_resolve`'s ValueError about a path it refused to resolve.
+    "path_utils.py",
+    # Not document paths: the config file the user pointed at, the tool's own cache location,
+    # and a `--docs-root` argument echoed back before any document is read. These carry no
+    # repo-controlled document filename, so GTX-125 leaves their spelling alone.
+    "config.py",
+    "store.py",
+    "init.py",
+}
+
+# Individual expressions inside scanned modules that are not paths despite the name.
+_DISPLAY_GUARD_EXEMPT_EXPRESSIONS = {
+    # `source` here is a slice of raw YAML text being re-emitted into a rewritten scalar, not a
+    # file path, and it is bytes destined for a document rather than for a human.
+    ("reconcile.py", "source", 873),
+}
+
+
+def _path_interpolations(source: str) -> list[tuple[int, str]]:
+    """Return (line, label) for every f-string interpolation of a path-bearing name."""
+
+    def label(node: ast.expr) -> str | None:
+        if isinstance(node, ast.Name):
+            return node.id
+        if isinstance(node, ast.Attribute):
+            base = label(node.value)
+            return f"{base}.{node.attr}" if base else None
+        return None
+
+    found: list[tuple[int, str]] = []
+    for node in ast.walk(ast.parse(source)):
+        if not isinstance(node, ast.JoinedStr):
+            continue
+        for value in node.values:
+            if not isinstance(value, ast.FormattedValue):
+                continue
+            name = label(value.value)
+            if name and name.split(".")[-1] in _PATH_BEARING_NAMES:
+                found.append((value.lineno, name))
+    return found
+
+
+def test_path_interpolation_detector_sees_a_bare_path_and_ignores_a_wrapped_one():
+    bare = 'msg = f"cannot read {path}: boom"'
+    wrapped = 'msg = f"cannot read {format_path_for_display(path)}: boom"'
+
+    assert _path_interpolations(bare) == [(1, "path")]
+    assert _path_interpolations(wrapped) == []
+
+
+def test_path_interpolation_detector_sees_an_attribute_path():
+    assert _path_interpolations('f"{node.path}"') == [(1, "node.path")]
+    assert _path_interpolations('f"{context.source}"') == [(1, "context.source")]
+
+
+def test_no_human_facing_sink_interpolates_a_raw_path():
+    offenders: list[str] = []
+    for file in _source_files():
+        if file.name in _DISPLAY_GUARD_EXEMPT_MODULES:
+            continue
+        for line, name in _path_interpolations(file.read_text(encoding="utf-8")):
+            if (file.name, name, line) in _DISPLAY_GUARD_EXEMPT_EXPRESSIONS:
+                continue
+            offenders.append(
+                f"{file.name}:{line} interpolates {{{name}}} without the display spelling"
+            )
+    assert not offenders, (
+        "GTX-125 (AD-34): route each of these through path_utils.format_path_for_display, or "
+        "add it to the exemptions above with the reason it is not a human-facing document "
+        "path:\n" + "\n".join(offenders)
+    )

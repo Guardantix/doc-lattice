@@ -122,7 +122,7 @@ def test_plan_rewrites_wraps_reader_error_with_path():
 
     with pytest.raises(UnreadableDocError) as exc_info:
         plan_rewrites({path: {"a#x": "newhash"}}, raise_os_error)
-    assert str(exc_info.value) == "cannot read downstream.md to reconcile: disk vanished"
+    assert str(exc_info.value) == "cannot read 'downstream.md' to reconcile: disk vanished"
 
 
 def test_plan_rewrites_names_unclosed_frontmatter_source():
@@ -133,7 +133,7 @@ def test_plan_rewrites_names_unclosed_frontmatter_source():
         plan_rewrites({path: {"a#x": "newhash"}}, lambda _path: source)
 
     assert str(exc_info.value) == (
-        "unclosed YAML frontmatter in downstream.md: add a closing '---' fence"
+        "unclosed YAML frontmatter in 'downstream.md': add a closing '---' fence"
     )
 
 
@@ -143,7 +143,7 @@ def test_plan_rewrites_wraps_invalid_utf8_with_path():
     with pytest.raises(UnreadableDocError) as exc_info:
         plan_rewrites({path: {"a#x": "newhash"}}, lambda _path: b"\xff")
 
-    assert str(exc_info.value).startswith("cannot read downstream.md to reconcile: ")
+    assert str(exc_info.value).startswith("cannot read 'downstream.md' to reconcile: ")
 
 
 def test_plan_rewrites_skips_file_when_updates_already_applied():

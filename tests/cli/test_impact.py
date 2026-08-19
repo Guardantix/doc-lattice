@@ -66,7 +66,7 @@ def test_impact_human_output_lists_tickets(lattice_dir: Path, monkeypatch):
     result = runner.invoke(app, ["impact", "art-direction#accent"])
     assert result.exit_code == 0
     path = (lattice_dir / "docs" / "pc-design.md").resolve()
-    assert result.stdout == f"pc-design  ({path})  tickets: PC-228\n"
+    assert result.stdout == f"pc-design  ({str(path)!r})  tickets: PC-228\n"
 
 
 def test_impact_human_output_dash_when_no_tickets(tmp_path: Path, monkeypatch):
@@ -82,7 +82,7 @@ def test_impact_human_output_dash_when_no_tickets(tmp_path: Path, monkeypatch):
     assert result.exit_code == 0
     # The repro's failure signature: `tickets: -` split away from the path it belongs to.
     path = (tmp_path / "docs" / "down.md").resolve()
-    assert result.stdout == f"down  ({path})  tickets: -\n"
+    assert result.stdout == f"down  ({str(path)!r})  tickets: -\n"
 
 
 def test_impact_unknown_token_exits_2(lattice_dir: Path, monkeypatch):

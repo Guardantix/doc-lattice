@@ -1130,3 +1130,85 @@ every leg. A future divergence between the two parsers reaches only `config.py`,
 boundary still declared as taking ruamel's default. Routing the reused-anchor warning adds a second
 cached diagnostic beside AD-29's disposition, so `CACHE_VERSION` rises to 5 and caches written
 before it are discarded and rebuilt rather than read as files that reused no anchor.
+
+
+### AD-34: A path is escaped where the message is built, not where it is printed
+
+**Date:** 2026-08-18
+**Status:** Accepted
+**Context:** A document path is a repo-controlled string that reaches human-facing output without
+passing the frontmatter parser at all. The parser refuses a literal C0 byte in the YAML source
+stream, so validated frontmatter values were the vector anyone looked at; a filename never went
+through it. Executing `check` under `NO_COLOR=1` against a file named `pwn<ESC>[31m<ESC>[Aevil.md`
+put the raw `0x1b` bytes on stderr in both the `UNREADABLE_DOC` line and the id-less skip, and
+`ESC[A` moves the cursor up a line, so a crafted filename could overwrite a diagnostic printed
+before it. README's `--no-color` section already owns the escape-free output contract, and its
+scope already reaches this output, so this was an unmet existing contract rather than a new
+extension. That section stays the single statement of what is promised; this record covers only
+where the escaping happens and why.
+
+Two renderers print these strings, and both leaked. `cli/errors.py::print_project_error` and the
+warning renderer in `cli/runtime.py` each apply `rich.markup.escape`, which neutralizes `[tag]`
+markup and does nothing whatever to ANSI, and the Console does not strip control codes for these
+strings either. Repairing either renderer would have left the other, every direct console write
+that is neither an error nor a warning, and every direct library consumer that formats a
+`ProjectError` itself.
+
+`strip_control_chars` in `text_utils.py` was the obvious reuse and is the wrong tool. It *deletes*
+controls, so `ESC[31m` and a literal `[31m` render identically, and a display spelling that maps
+two distinct filenames onto one string is not a diagnostic anyone can act on. It stays scoped to
+the network-sourced Linear data and `init` input it was written for, and its consumers are
+unchanged.
+
+**Decision:** Escaping happens at message construction. `path_utils.format_path_for_display`
+returns exactly `repr(str(path))` on the active supported interpreter, and every human-facing sink
+that names a path calls it while building the message. The raw `Path` remains the value the engine
+opens, compares, and writes; the display spelling exists only for text a person reads. Machine
+channels keep their own encoders: JSON output and the GitHub annotation `file=` value are
+deliberately excluded, because substituting a display spelling into an annotation's path breaks
+the attachment semantics GitHub resolves it against.
+
+The spelling is pinned to a single expression rather than a project-owned codec because
+`str.__repr__` is already injective, and injectivity is what turns "no two filenames render alike"
+into a property the suite can check instead of an argument it has to make. The exact escapes are
+CPython's: `\t`, `\n`, and `\r` get their named spellings, every other C0 code point plus DEL and
+the C1 range get `\xNN`, literal backslashes double so a filename cannot forge an escape,
+undecodable filename bytes render as their `\udcNN` surrogates without raising, and printable
+non-ASCII survives verbatim, so `café/naïve.md` reads as `'café/naïve.md'`.
+
+**Consequences:** Every path in human output is now quoted, and the quote character varies:
+CPython picks single quotes unless the string holds a single quote and no double quote. That is
+accepted rather than normalized, because pinning the delimiter would mean owning a codec, and the
+spelling is injective under either choice. The contract is therefore "the active supported
+interpreter's `repr(str(path))`", not a byte-identical guarantee across Python implementations;
+`pyproject.toml` pins 3.13+ without constraining the implementation, and exact quote selection is
+not a portable semantic the language documentation promises. What the suite asserts independently
+of the interpreter is what actually matters here: injectivity, and that no C0, DEL, or C1 code
+point survives into output.
+
+Two visible outputs move as a result. `impact`'s human report prints its path quoted inside the
+parentheses it already used, and `reconcile`'s success line quotes the basename it names; both
+README examples are updated in this change rather than deferred, since `CLAUDE.md` requires a
+behavior change to update its owner.
+
+The warning message prefixes are untouched. AD-29 records that `PYTHONWARNINGS` targetability and
+cold/warm cache parity both rest on the exact opening of each warning, so `skipping ` and `reused
+anchor in ` keep their spelling and only the path inside the message changes.
+
+This closes the document-path half of the repo-controlled vector. It is not the whole of it: YAML
+decodes a double-quoted `\u001b` into a real ESC, so `id`, `title`, `tickets`, `ref`, and `seen`
+can each carry a control character into human output through a validated frontmatter value. That
+vector turns on a decision this record does not make, between rejecting at validation and a typed
+value display encoding, because those values participate in identity and in structured output;
+it is GTX-208's. The reconcile transaction and recovery sinks interpolate destination, journal,
+and staged-artifact paths the same way this record governs, and stage names inherit
+`destination.name` so a hostile document filename propagates into them; those sinks are GTX-209's
+and reuse this helper rather than deciding a spelling of their own. GTX-125 and GTX-209 together
+close the document-path vector; nothing here claims the repo-controlled vector is fully closed.
+
+A static guard in `tests/test_conventions.py` enforces the boundary going forward: inside the
+modules this record covers, a path-bearing name interpolated into an f-string must go through the
+helper. The failure mode being guarded is an omitted construction site, which a per-sink
+behavioral list cannot catch for a sink that does not exist yet. Its exemptions name
+`reconcile_transaction.py` as GTX-209's, and the config, cache, and `init` paths as strings that
+carry no repo-controlled document filename.

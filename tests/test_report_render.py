@@ -298,8 +298,8 @@ def test_render_impact_writes_exact_plain_text_and_escapes_markup():
     render_impact(console, affected)
 
     assert output.getvalue() == (
-        "affected[/]  (docs/[plan].md)  tickets: GAME-[1]\n"
-        "unticketed  (docs/unticketed.md)  tickets: -\n"
+        "affected[/]  ('docs/[plan].md')  tickets: GAME-[1]\n"
+        "unticketed  ('docs/unticketed.md')  tickets: -\n"
     )
 
 
@@ -324,7 +324,7 @@ def test_render_impact_keeps_a_path_wider_than_the_console_on_one_line():
 
     render_impact(console, affected)
 
-    assert output.getvalue() == f"downstream  ({path})  tickets: -\n"
+    assert output.getvalue() == f"downstream  ({str(path)!r})  tickets: -\n"
 
 
 def test_render_impact_emits_no_ansi_under_no_color():

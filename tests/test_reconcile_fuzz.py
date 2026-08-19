@@ -2585,43 +2585,43 @@ UNREADABLE_ON_ANY_REREAD = (
         "unclosed-fence",
         "id: doc\nderives_from:\n  - ref: up-0#s0\n",
         False,
-        r"unclosed YAML frontmatter in doc\.md",
+        r"unclosed YAML frontmatter in 'doc\.md'",
     ),
     (
         "unparseable-flow",
         "id: doc\nderives_from: [1, 2\n",
         True,
-        r"cannot parse frontmatter of doc\.md to reconcile: ",
+        r"cannot parse frontmatter of 'doc\.md' to reconcile: ",
     ),
     (
         "unparseable-indent",
         "id: doc\n  stray: 1\nderives_from: []\n",
         True,
-        r"cannot parse frontmatter of doc\.md to reconcile: ",
+        r"cannot parse frontmatter of 'doc\.md' to reconcile: ",
     ),
     (
         "root-block-sequence",
         "- one\n- two\n",
         True,
-        r"frontmatter of doc\.md is not a mapping; cannot reconcile",
+        r"frontmatter of 'doc\.md' is not a mapping; cannot reconcile",
     ),
     (
         "root-flow-sequence",
         "[one, two]\n",
         True,
-        r"frontmatter of doc\.md is not a mapping; cannot reconcile",
+        r"frontmatter of 'doc\.md' is not a mapping; cannot reconcile",
     ),
     (
         "root-bare-scalar",
         "just prose\n",
         True,
-        r"frontmatter of doc\.md is not a mapping; cannot reconcile",
+        r"frontmatter of 'doc\.md' is not a mapping; cannot reconcile",
     ),
     (
         "root-quoted-scalar",
         '"just prose"\n',
         True,
-        r"frontmatter of doc\.md is not a mapping; cannot reconcile",
+        r"frontmatter of 'doc\.md' is not a mapping; cannot reconcile",
     ),
 )
 
@@ -2708,8 +2708,8 @@ def test_a_mapping_root_refuses_a_derives_from_that_is_not_a_list(data) -> None:
 def test_reached_planning_refuses_a_malformed_entry(data) -> None:
     # The two pools refuse for different reasons and say so differently, so each carries the
     # message it has to give rather than sharing one pattern loose enough to cover both.
-    not_a_mapping = r"frontmatter derives_from entry in doc\.md is not a mapping"
-    not_a_string = r"frontmatter derives_from entry ref in doc\.md is not a string"
+    not_a_mapping = r"frontmatter derives_from entry in 'doc\.md' is not a mapping"
+    not_a_string = r"frontmatter derives_from entry ref in 'doc\.md' is not a string"
     bad, message = data.draw(
         st.one_of(
             st.sampled_from(NON_MAPPING_ENTRIES).map(lambda line: ((line,), not_a_mapping)),
@@ -3332,7 +3332,7 @@ def test_a_malformed_ordered_map_is_reported_as_an_unreadable_document(
     text = f"---\n{meta}---\nbody\n"
 
     with pytest.raises(
-        UnreadableDocError, match=r"cannot parse frontmatter of doc\.md to reconcile: "
+        UnreadableDocError, match=r"cannot parse frontmatter of 'doc\.md' to reconcile: "
     ) as error:
         apply_reconcile(text, updates, DOC)
 
@@ -3352,7 +3352,7 @@ def test_a_merge_inside_an_ordered_map_is_reported_as_an_unreadable_document(met
     text = f"---\n{meta}---\nbody\n"
 
     with pytest.raises(
-        UnreadableDocError, match=r"cannot parse frontmatter of doc\.md to reconcile: "
+        UnreadableDocError, match=r"cannot parse frontmatter of 'doc\.md' to reconcile: "
     ) as error:
         apply_reconcile(text, {"up-0#s0": "new0000beef"}, DOC)
 
