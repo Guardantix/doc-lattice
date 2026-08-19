@@ -1526,13 +1526,17 @@ lossless: nothing is dropped, so the original wording is recoverable by reading 
 
 A static construction-site guard in `tests/test_conventions.py` accompanies this record, and unlike
 AD-35's it is owed rather than optional. A display strategy is only as complete as its sink list,
-which is AD-34's own rule, and this strategy has sinks. The guard is keyed on every
-`except YAML_LOAD_ERRORS` clause in production code, requiring either a call to the renderer inside
-the handler or membership in a named exemption list. Keying it on the clause rather than on
-whether the clause binds a name is deliberate: `reconcile.py`'s round-trip probe binds none and
-would have been exempted structurally, and so would every future handler that swallows the family.
-That probe is the list's single entry, and its own comment records why a failed probe answers with
-the quoted form instead of reporting anything. The detector is self-tested the way AD-34's is.
+which is AD-34's own rule, and this strategy has sinks. The guard is keyed on every `except` clause
+in production code that names the load-failure family, the shared `YAML_LOAD_ERRORS` alias and the
+`YAMLError` base type alike and in either the bare or the attribute spelling, requiring either a
+call to the renderer inside the handler or membership in a named exemption list. It also requires
+that the bound name reach nothing but that call and the chained `raise ... from`, so a handler with
+two exits cannot spell one and interpolate the exception raw down the other. Keying it on the
+clause rather than on whether the clause binds a name is deliberate: `reconcile.py`'s round-trip
+probe binds none and would have been exempted structurally, and so would every future handler that
+swallows the family. That probe is the list's single entry, and its own comment records why a
+failed probe answers with the quoted form instead of reporting anything. The detector is
+self-tested the way AD-34's is.
 
 The suite pins the readability cost as a relation to the caught exception rather than as a literal
 string. `ruamel`'s wording differs across the releases and accelerator cells CI runs, so a fixed

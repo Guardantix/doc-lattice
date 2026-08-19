@@ -2064,7 +2064,13 @@ def test_no_human_facing_sink_interpolates_a_raw_path():
 # small and every member of it reaches a user through some handler, so the guard is keyed on the
 # `except` clause rather than on an f-string, which also makes it see a handler that builds its
 # detail above the message the way `config.py` does.
-_YAML_ERROR_FAMILY = "YAML_LOAD_ERRORS"
+#
+# Both spellings of the family are recognized, and `YAMLError` itself beside the shared alias: a
+# clause is matched on its final attribute name, so `except yaml_boundary.YAML_LOAD_ERRORS` and a
+# handler that narrows to the ruamel base type `yaml_boundary.py` re-exports are both seen. A
+# name-only match would have exempted either silently, which is the one direction this guard
+# cannot afford to be wrong in.
+_YAML_ERROR_FAMILY = frozenset({"YAML_LOAD_ERRORS", "YAMLError"})
 _YAML_ERROR_HELPER = "format_yaml_error_for_display"
 
 # Handlers that catch the family without reporting it, keyed on (module, qualified function).
@@ -2079,29 +2085,52 @@ _YAML_ERROR_RENDER_EXEMPT = {("reconcile.py", "_seen_scalar_source")}
 def _catches_yaml_load_errors(handler: ast.ExceptHandler) -> bool:
     """True for an ``except`` clause naming the shared load-failure family."""
     return handler.type is not None and any(
-        isinstance(node, ast.Name) and node.id == _YAML_ERROR_FAMILY
+        (isinstance(node, ast.Name) and node.id in _YAML_ERROR_FAMILY)
+        or (isinstance(node, ast.Attribute) and node.attr in _YAML_ERROR_FAMILY)
         for node in ast.walk(handler.type)
     )
 
 
-def _yaml_handlers(source: str) -> list[tuple[int, bool]]:
-    """Return (line, whether it spells the exception) for every load-failure handler.
+def _spells_the_caught_exception(handler: ast.ExceptHandler) -> bool:
+    """Whether a handler renders the exception it caught and reaches it no other way.
 
     The helper is looked for anywhere inside the handler body rather than inside an f-string,
     because a caller may render the detail into a local above the message it builds, which
     ``config.py`` does so its own parser note stays on one line. A scan keyed on interpolation
     would call that handler clean however it is spelled.
+
+    Finding the call is not enough on its own. A handler with two exits -- one spelled, one
+    interpolating the bound name directly -- would be reported clean by a presence test while
+    still printing ``ruamel``'s bytes down the second path, so the bound name must reach nothing
+    else. Two positions are not uses: the argument of the renderer itself, and the ``raise ...
+    from exc`` cause, which sets ``__cause__`` rather than rendering anything and which every
+    handler in the family carries.
     """
-    found: list[tuple[int, bool]] = []
-    for node in ast.walk(ast.parse(source)):
-        if isinstance(node, ast.ExceptHandler) and _catches_yaml_load_errors(node):
-            spelled = any(
-                _is_call_to(child, _YAML_ERROR_HELPER)
-                for statement in node.body
-                for child in ast.walk(statement)
-            )
-            found.append((node.lineno, spelled))
-    return sorted(found)
+    spelled = False
+    rendered: set[int] = set()
+    for statement in handler.body:
+        for node in ast.walk(statement):
+            if _is_call_to(node, _YAML_ERROR_HELPER):
+                spelled = True
+                rendered.update(id(child) for child in ast.walk(node))
+            elif isinstance(node, ast.Raise) and node.cause is not None:
+                rendered.update(id(child) for child in ast.walk(node.cause))
+    if not spelled or handler.name is None:
+        return spelled
+    return not any(
+        isinstance(node, ast.Name) and node.id == handler.name and id(node) not in rendered
+        for statement in handler.body
+        for node in ast.walk(statement)
+    )
+
+
+def _yaml_handlers(source: str) -> list[tuple[int, bool]]:
+    """Return (line, whether it spells the exception) for every load-failure handler."""
+    return sorted(
+        (node.lineno, _spells_the_caught_exception(node))
+        for node in ast.walk(ast.parse(source))
+        if isinstance(node, ast.ExceptHandler) and _catches_yaml_load_errors(node)
+    )
 
 
 def test_yaml_handler_detector_sees_a_raw_interpolation():
@@ -2143,6 +2172,45 @@ def test_yaml_handler_detector_ignores_a_spelling_outside_the_handler():
 
 def test_yaml_handler_detector_ignores_an_unrelated_family():
     assert _yaml_handlers("try:\n    load()\nexcept OSError as exc:\n    raise E(exc)\n") == []
+
+
+def test_yaml_handler_detector_sees_the_attribute_spelling_of_the_family():
+    # `except yaml_boundary.YAML_LOAD_ERRORS` names the same family. A detector matching only a
+    # bare name would exempt it structurally, which is the direction this guard cannot be wrong
+    # in: an unspelled handler would then be reported by nothing.
+    source = (
+        "try:\n    load()\nexcept yaml_boundary.YAML_LOAD_ERRORS as exc:\n    raise E(f'{exc}')\n"
+    )
+    assert _yaml_handlers(source) == [(3, False)]
+
+
+def test_yaml_handler_detector_sees_a_handler_narrowed_to_the_ruamel_base_type():
+    # The family is a tuple around `YAMLError`, so a handler that catches the base type directly
+    # reports the same third-party message and belongs to the same rule.
+    source = "try:\n    load()\nexcept YAMLError as exc:\n    raise E(f'{exc}')\n"
+    assert _yaml_handlers(source) == [(3, False)]
+
+
+def test_yaml_handler_detector_reports_a_handler_that_also_reaches_the_raw_exception():
+    # Two exits, one of them unspelled. A presence test for the renderer calls this clean while
+    # the first branch still puts `ruamel`'s bytes on stderr.
+    source = (
+        "try:\n    load()\nexcept YAML_LOAD_ERRORS as exc:\n"
+        "    if strict:\n        raise E(f'strict: {exc}')\n"
+        "    raise E(f'lenient: {format_yaml_error_for_display(exc)}')\n"
+    )
+    assert _yaml_handlers(source) == [(3, False)]
+
+
+def test_yaml_handler_detector_accepts_the_chained_raise_every_handler_carries():
+    # `raise ... from exc` sets `__cause__`; it renders nothing, and every handler in the family
+    # is written this way, so reading it as a raw use would report all four production sites.
+    source = (
+        "try:\n    load()\nexcept YAML_LOAD_ERRORS as exc:\n"
+        "    detail = format_yaml_error_for_display(exc)\n"
+        "    raise E(f'bad: {detail}') from exc\n"
+    )
+    assert _yaml_handlers(source) == [(3, True)]
 
 
 def _qualified_yaml_handlers(source: str) -> list[tuple[str, int, bool]]:
