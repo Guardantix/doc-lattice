@@ -1384,3 +1384,75 @@ block that loads until it lands.
 No static construction-site guard accompanies this record, and none is owed. AD-34 needs one
 because a display strategy is only as complete as its sink list; a validation rule has one site,
 and the parser matrix over the five value families is what pins it.
+
+
+### AD-36: Journal provenance is spelled for display, because it is informational
+
+**Date:** 2026-08-19
+**Status:** Accepted
+**Context:** GTX-126 made the reconcile journal record a `created_at`, a `tool_version`, and a
+typed selector, and GTX-196 surfaced them through `reconcile --recover`. That put two new
+untrusted strings into human output. A journal is a file a person can edit, so `tool_version` and
+the selector's `downstream_id` and `ref` can each carry a terminal control byte the way a document
+filename can.
+
+AD-34 and AD-35 answer that question two different ways, and this record is as much about which
+of them applies as about the strings themselves. The axis between them is not how untrusted a
+value is; both are equally untrusted. It is what else the value does. A path is refused nowhere
+because the engine has to open it, so AD-34 spells it at the message. A frontmatter value
+participates in identity and in structured output, so AD-35 refuses it at validation and closes
+the vector at one boundary rather than at eight sinks.
+
+Provenance sits at the far display-only end of that axis. Recovery never reads it: it is captured
+so a report can name what produced a crash journal, and the rollback is described entirely by the
+entries and their SHA-256 fingerprints. Two options were weighed and rejected. Resting on AD-35's
+upstream refusal does not hold, because that rule runs at frontmatter load and a hand edit reaches
+the journal directly, at a different boundary and in a different file. Extending AD-35's refusal
+to the journal wire model was the closer call and was rejected on two grounds. It would make an
+inert field a reason to strand a rollback the entries still fully describe, and because automatic
+pre-run recovery gates every ordinary `reconcile`, refusing would stop the command outright until
+an operator restored by hand. And it would not buy what it appears to: the v2 model establishes
+required structure and types, not authenticity, so it already accepts an invented `tool_version`
+or a selector naming a run that never happened. A rule that refused a control byte while accepting
+those is output-driven validation wearing an integrity argument, and it would give journal-sourced
+strings two policies in one output block, since GTX-209 already re-spells the journal path, every
+unresolved destination, and every orphaned artifact rather than refusing the file that named them.
+
+**Decision:** `tool_version` and the selector strings take AD-34's spelling at the sink that
+prints them: `repr`, then `rich.markup.escape`. Both halves are load-bearing and neither
+substitutes for the other. `repr` is injective and leaves no C0, DEL, or C1 code point in the
+line, for the reason AD-34 records. The Rich escape covers markup, which is printable text that
+no control-character rule would catch and that the Console would otherwise interpret. The
+journal's own validation is unchanged: no control-free type is added to the wire model.
+
+The quoting `repr` brings does a second job here that it does not do for a path. A selector field
+the run left unset prints as a bare `null`, so quoting is what keeps it distinct from a recorded
+string spelling that word, which prints as `'null'`.
+
+`created_at` needs no display spelling, because `UtcTimestamp` has already made it a datetime
+rather than text by the time anything reports it. It does need a chosen spelling, since the wire
+format accepts both `Z` and `+00:00` and retains neither token. `journal_timestamp_text` emits the
+`Z` form, and the test pins it against the serializer's own output rather than against a literal,
+so a journal and the report about it cannot drift apart.
+
+The machine channel is excluded on the reasoning AD-34 records, and here the exclusion costs
+nothing on the terminal-safety axis: `json.dumps` escapes every non-printable code point under its
+default settings, so the payload preserves the recorded value without ever emitting a raw control
+byte.
+
+**Consequences:** A hand-edited or crafted journal recovers normally and shows its tampering in
+the report instead of failing the command. That is the intended trade, and it is the same one
+GTX-209 already made for the paths in the same file.
+
+No static construction-site guard accompanies this record either, and for a different reason than
+AD-35's. A display strategy is only as complete as its sink list, so AD-34's guard is earned by
+having many sinks across many modules; provenance has exactly one renderer in one adapter, and the
+behavioral tests over it are what pin the spelling.
+
+This record covers the provenance display path and nothing else. It does not close the journal's
+own load diagnostic, which is a separate sink: `_invalid_journal_error` interpolates a pydantic
+`ValidationError` verbatim, and while that formatter renders a rejected *input value* through
+`repr`, it renders an error *location* raw, so a control-bearing extra key in a hand-edited journal
+still reaches stderr unspelled. That is the shape AD-35 closed for frontmatter with
+`_format_location_part`, unclosed at this boundary, and it is GTX-227's rather than an extension of
+this one.

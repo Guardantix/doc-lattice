@@ -158,6 +158,25 @@ UtcTimestamp = Annotated[
 ]
 
 
+def journal_timestamp_text(value: datetime) -> str:
+    """Render a validated journal timestamp in the one spelling this project emits.
+
+    The wire format accepts both ``Z`` and ``+00:00`` and parses either into a datetime, so
+    the original token is gone by the time anything reports on it. Recovery output therefore
+    normalizes rather than echoing, and it normalizes onto the spelling the serializer already
+    writes, so a journal and the report about it never disagree about how an instant is
+    written. ``tests/test_reconcile_transaction.py`` pins the two against each other.
+
+    Args:
+        value: A timestamp already validated as aware and UTC by ``UtcTimestamp``.
+
+    Returns:
+        The ISO 8601 spelling with ``Z`` in place of the zero offset, keeping microseconds
+        exactly when the value carries them.
+    """
+    return f"{value.isoformat().removesuffix('+00:00')}Z"
+
+
 class JournalSelector(BaseModel):
     """The reconcile selection a transaction was planned from.
 
@@ -272,7 +291,14 @@ class ScanFailure:
 
 @dataclass(frozen=True, slots=True)
 class RecoveryResult:
-    """The action taken for a project reconcile journal."""
+    """The action taken for a project reconcile journal.
+
+    ``journal_version`` and ``provenance`` are captured from the journal while it is still
+    loaded, because a successful recovery deletes the file before the caller reports on it.
+    Both are None when no journal was found at all. A recovered version 1 journal carries its
+    version with a None ``provenance``, which is what lets a report distinguish "this format
+    recorded none" from "there was nothing to recover" rather than rendering both as blank.
+    """
 
     action: RecoveryAction
     journal: Path
@@ -281,6 +307,8 @@ class RecoveryResult:
     unresolved: tuple[str, ...] = ()
     orphans: tuple[str, ...] = ()
     scan_errors: tuple[ScanFailure, ...] = ()
+    journal_version: int | None = None
+    provenance: JournalProvenance | None = None
 
     @property
     def is_incomplete(self) -> bool:
@@ -371,9 +399,10 @@ class _ResolvedEntry:
 class _LoadedJournal:
     """One journal of any supported version, normalized to the shared recovery shape.
 
-    ``provenance`` is None for a v1 journal, which recorded none. Recovery never reads it;
-    the field exists so a freshly published prepared journal can be checked against the
-    provenance it was built from.
+    ``provenance`` is None for a v1 journal, which recorded none. The rollback itself never
+    reads it. The field exists so a freshly published prepared journal can be checked against
+    the provenance it was built from, and so recovery can carry it out to a report under AD-36
+    before a successful cleanup deletes the file it came from.
     """
 
     version: int
@@ -1869,6 +1898,8 @@ def _recover_transaction_locked(project_root: Path) -> RecoveryResult:
             journal=journal,
             orphans=orphans,
             scan_errors=scan_errors,
+            journal_version=loaded.version,
+            provenance=loaded.provenance,
         )
     outcome = _rollback_prepared(entries, journal, journal_bytes)
     retained = _retained_artifacts(entries, journal) if outcome.unresolved else frozenset()
@@ -1881,4 +1912,6 @@ def _recover_transaction_locked(project_root: Path) -> RecoveryResult:
         unresolved=_project_relative(outcome.unresolved, canonical_root),
         orphans=orphans,
         scan_errors=scan_errors,
+        journal_version=loaded.version,
+        provenance=loaded.provenance,
     )

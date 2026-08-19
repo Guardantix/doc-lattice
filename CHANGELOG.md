@@ -347,6 +347,18 @@ as documents that reused no anchor. No action is needed: the next run rebuilds t
   `unresolved`, `orphans`, and `scan_errors` alongside `action` and `journal`, and `action` gained
   the `partially_rolled_back` value. Consumers asserting the exact key set need updating; the
   previous two keys are unchanged in name and meaning.
+- **BREAKING:** the `reconcile --recover --format json` object gained an eighth key, `provenance`,
+  carrying the `created_at`, `tool_version`, and `selector` a version 2 journal records. The key is
+  always present. It is `null` for a recovered version 1 journal, which recorded no provenance, and
+  for a run that found no journal at all; `action` already separates those two, so no
+  `journal_version` key was added. `created_at` is emitted in the spelling the journal is written
+  in, ending in `Z`, whichever accepted spelling the file itself used. Consumers asserting the
+  exact key set need updating again; the previous seven keys are unchanged in name and meaning.
+  The human `--recover` output gained the same three fields, indented under its summary line, with
+  `provenance: not recorded by journal version 1` in place of blank fields for a version 1 journal
+  and nothing at all when there was no journal. Automatic pre-run recovery is unchanged and still
+  reports only its action. The journal's own strings are quoted and escaped in the human lines
+  rather than refused at load, so a hand-edited journal still recovers; see AD-36.
 - `reconcile --recover` now reports orphaned transaction artifacts that no retained journal
   accounts for, instead of printing `nothing to recover` over a tree that still holds them. The
   scan runs after journal handling in every branch, so a journal publication interrupted between
