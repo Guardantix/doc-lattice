@@ -30,10 +30,12 @@ group below, since the error codes it settles are what GTX-113 waits on.
 - Bring the diagnostics an external user meets first up to the standard the transaction layer
   already sets. The load boundary introduces a frontmatter-specific error code and so has to land
   in this window (GTX-112). Warning presentation matters now that GTX-102 makes the id-less skip
-  fire on every adopter run rather than in an edge case (GTX-124). Control bytes in a document
-  filename are the one repo-controlled string reaching a diagnostic without passing the parser,
-  and the fix belongs at message construction so it survives whichever renderer prints it
-  (GTX-125).
+  fire on every adopter run rather than in an edge case (GTX-124). A document path reaches human
+  output without passing the frontmatter parser, so control bytes in a filename can forge or
+  corrupt a diagnostic, and the fix belongs at message construction so it survives whichever
+  renderer prints it (GTX-125). Typed frontmatter values are a second such vector, since YAML
+  decodes a double-quoted escape into a real control character, and closing that one turns on its
+  own decision about rejecting them at validation (GTX-208).
 - Make README describe what 5.0 actually prints and enforces (GTX-113). This lands last, once the
   error codes and the documentation owners above have stopped moving.
 - Confirm on a published artifact that step 1 of [MANAGED_CI.md](MANAGED_CI.md) exits 0 against
