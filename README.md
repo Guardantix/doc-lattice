@@ -376,30 +376,60 @@ the error rejecting it for the same reason. What the rule is scoped to is a bloc
 block that fails to parse at all is reported through the YAML parser's own message, which quotes
 the source line it choked on, and that path does not yet hold the promise.
 
-Two cases are worth knowing, because they are the ones you can write without meaning to. A
-**literal tab** inside a quoted or block scalar is the one control byte YAML itself admits, and
-nothing on screen distinguishes it from a run of spaces, so a value that looks fine can fail.
-Scan the frontmatter block rather than a list of key spellings, because the tab need not share a
-line with its key: a `derives_from` edge writes `- ref:` behind a sequence dash, and a block-form
-`tickets` entry is a bare `- "GTX-1"` item with no key on the line at all.
+Three spellings reach this rule, and two of them are ones you can write without meaning to.
+
+A **literal tab** is the one control byte YAML itself admits as a raw byte, inside a quoted or a
+block scalar, and nothing on screen distinguishes it from a run of spaces, so a value that looks
+fine can fail. An **escape in a double-quoted scalar** is how everything else in the refused set
+reaches a value, since YAML rejects those as raw bytes. `"\u001b"` is the spelling to picture, but
+it is far from the only one: `\0`, `\a`, `\b`, `\t`, `\n`, `\v`, `\f`, `\r`, `\e`, and `\N`
+each name a refused code point directly, and `\xNN` and `\U00000000` reach the same points as
+`\uNNNN` does. A **newline from a block scalar** is the third, and it arrives in two ways that
+need different fixes. A block written `|` or `>` keeps a *trailing* break, which `|-` or `>-`
+chomps away. A literal block (`|` in any chomping mode) also keeps the breaks *between* its
+lines, and no chomping indicator touches those, so a `|-` spanning two lines still fails; only
+the folded styles join their lines with a space. Write a multi-line value as `>-`, which is the
+spelling that survives this rule, and keep `|-` for a value on one line. Folding has two limits
+worth knowing, because a `>-` that hits either keeps an interior break anyway: a blank line
+between the lines is a paragraph break, and a line indented past the block keeps its own break.
+Keep a folded value's lines adjacent and equally indented.
+
+To find all three, scan the frontmatter block itself rather than a list of key spellings. Neither
+a tab nor an escape has to share a line with its key: a `derives_from` edge writes `- ref:`
+behind a sequence dash, a block-form `tickets` entry is a bare `- "GTX-1"` item with no key on
+the line at all, and a block scalar puts its value on later lines entirely. This reads the fence
+the way the loader does, so a file saved with a byte-order mark, CRLF endings, or a padded `---`
+is scanned rather than skipped, and a tab in body prose or an indented code block is not a hit:
 
 ```bash
-find . -name '*.md' -exec awk \
-  'FNR==1{inb=($0=="---")} inb&&FNR>1&&$0=="---"{inb=0} inb&&/\t/{print FILENAME":"FNR": "$0}' \
-  {} +
+python3 - <<'PY'
+import pathlib, re
+ESC = re.compile(r"\\\\|\\([0abtnvfreN]|x[0-9A-Fa-f]{2}|u[0-9A-Fa-f]{4}|U[0-9A-Fa-f]{8})")
+BLOCK = re.compile(r"(^|[\s-])(id|title|tickets|ref|seen):\s*[|>]|^\s*-\s*[|>][-+]?\s*$")
+NAMED = {"0": 0, "a": 7, "b": 8, "t": 9, "n": 10, "v": 11, "f": 12, "r": 13, "e": 27, "N": 0x85}
+
+for path in sorted(pathlib.Path(".").rglob("*.md")):
+    lines = path.read_text(errors="replace").lstrip("\ufeff").split("\n")
+    if not lines or lines[0].strip() != "---":
+        continue
+    for num, line in enumerate(lines[1:], start=2):
+        if line.strip() == "---":
+            break
+        found = {NAMED[e] if e in NAMED else int(e[1:], 16) for e in ESC.findall(line) if e}
+        if "\t" in line:
+            found.add(9)
+        note = sorted(f"U+{c:04X}" for c in found if c < 0x20 or c == 0x7F or 0x80 <= c <= 0x9F)
+        if BLOCK.search(line):
+            note.append("block-scalar: check for a kept line break")
+        if note:
+            print(f"{path}:{num}: {', '.join(note)}: {line!r}")
+PY
 ```
 
-A **newline from a block scalar** is the other, and it arrives in two ways that need different
-fixes. A block written `|` or `>` keeps a *trailing* break, which `|-` or `>-` chomps away. A
-literal block (`|` in any chomping mode) also keeps the breaks *between* its lines, and no
-chomping indicator touches those, so a `|-` spanning two lines still fails; only the folded
-styles join their lines with a space. Write a multi-line value as `>-`, which is the spelling
-that survives this rule, and keep `|-` for a value on one line. One thing folding does not
-absorb: a blank line inside a folded block is a paragraph break and constructs a newline of its
-own, so a `>-` whose lines are separated by one still fails. Keep a folded value's lines
-adjacent. Everything else in the refused set, ESC and DEL and the C1 controls among them, YAML
-rejects as a raw byte, so it can only reach a value through a double-quoted escape such as
-`"\u001b"`.
+A code point it names is a value that will not load. A `block-scalar` line is a prompt to look
+rather than a verdict, since whether a break survives depends on the lines beneath it, which is
+also why a correct `>-` is listed. `doc-lattice check` is the authority either way: it names the
+key and the code point for the first document it finds, one run at a time.
 
 ### Files with no `id`
 
@@ -836,7 +866,7 @@ than be re-chomped. Anything in the `U+001B` neighborhood is an escape sequence 
 value on purpose and should come out as well. The message names the key and the offending code
 point rather than repeating the value, so reading it never puts the byte back on your terminal.
 See the [Frontmatter reference](#frontmatter-reference) for the exact accepted set and for a scan
-that finds a tab you cannot see.
+that finds every spelling that reaches this rule, including the ones nothing on screen shows you.
 
 **`skipping ... its frontmatter declares no 'id'` on stderr.** Not an error: a file with fenced
 frontmatter that declares no `id` and no lattice keys is left out of the lattice, and the exit

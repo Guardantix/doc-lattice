@@ -78,23 +78,13 @@ control character: any C0 code point (`U+0000` to `U+001F`), DEL (`U+007F`), or 
 and only the first is the one the vector was reported for:
 
 1. **An escape in a double-quoted scalar**, which is the only way to write ESC, DEL, NUL, or a
-   C1 control into a value at all: YAML refuses each of those as a raw byte in the file, so
-   `"\u001b"` and its siblings are the whole of that group. Search for `\u00`, `\t`, `\n`, and
-   `\r` inside a double-quoted frontmatter scalar.
+   C1 control into a value at all, since YAML refuses each of those as a raw byte in the file.
+   `"\u001b"` is the spelling to picture but not the only one to search for: `\0`, `\a`, `\b`,
+   `\t`, `\n`, `\v`, `\f`, `\r`, `\e`, and `\N` each name a refused code point directly, and
+   `\xNN` and `\U00000000` reach the same points `\uNNNN` does.
 2. **A literal tab**, which is the one control character YAML does admit as a raw byte, inside a
-   double-quoted, single-quoted, or block scalar. Nothing about it is visible on screen, so
-   search for the byte rather than reading for it. Scan the whole frontmatter block, not a list
-   of key spellings: a tab need not share a line with its key, since a `derives_from` edge
-   writes `- ref:` behind a sequence dash and a block-form `tickets` entry is a bare `- "GTX-1"`
-   item with no key on the line at all. This scan is scoped to the fenced block, so a tab in
-   body prose or an indented code block is not a hit:
-
-   ```bash
-   find . -name '*.md' -exec awk \
-     'FNR==1{inb=($0=="---")} inb&&FNR>1&&$0=="---"{inb=0} inb&&/\t/{print FILENAME":"FNR": "$0}' \
-     {} +
-   ```
-
+   double-quoted, single-quoted, or block scalar. Nothing about it is visible on screen, so it
+   has to be searched for rather than read for.
 3. **A newline a block scalar keeps**, whether at the end of the value or inside it. Tab,
    newline, and carriage return are C0 controls, so both spellings are refused. `|` or `>`
    without `-` keeps a *trailing* break, which `|-` and `>-` chomp away. An *interior* break is
@@ -107,6 +97,13 @@ and only the first is the one the vector was reported for:
    that carry hashes and refs: `id`, `title`, `tickets`, `ref`, and `seen` are all constrained,
    and `id` and `title` are where a multi-line value is most likely to have been written on
    purpose.
+
+The frontmatter reference in README.md carries one scan covering all three. It reads the fence
+the way the loader does, so a file saved with a byte-order mark, CRLF endings, or a padded `---`
+is scanned rather than skipped, and it reads the whole block rather than a list of key spellings,
+because neither a tab nor an escape has to share a line with its key: a `derives_from` edge
+writes `- ref:` behind a sequence dash, a block-form `tickets` entry is a bare `- "GTX-1"` item
+with no key on the line at all, and a block scalar puts its value on later lines entirely.
 
 All five had a working use, so treat this as a real scan rather than a formality. A folded
 `title` is the obvious one. Less obviously, an `id` written `|` constructs a trailing newline,
