@@ -32,6 +32,7 @@ from doc_lattice.reconcile_transaction import (
     _serialize_journal,
     reconcile_lock,
 )
+from doc_lattice.text_utils import is_control_char
 
 from .helpers import _clean_docs, _run, runner
 
@@ -59,43 +60,84 @@ def _tree_snapshot(root: Path) -> dict[str, tuple[str, bytes]]:
     return snapshot
 
 
-def _write_cli_transaction(
-    root: Path,
-    destination: Path,
-    before_bytes: bytes,
-    after_bytes: bytes,
-    *,
-    state: JournalState = "prepared",
-) -> tuple[Path, Path, Path]:
-    """Write a valid single-entry recovery transaction for CLI integration tests."""
+_DEFAULT_CLI_PROVENANCE = JournalProvenance(
+    created_at=datetime(2026, 8, 17, 12, 0, 0, tzinfo=UTC),
+    tool_version="9.9.9",
+    selector=JournalSelector(mode="all", downstream_id=None, ref=None),
+)
+
+
+def _cli_transaction_entry(
+    root: Path, destination: Path, before_bytes: bytes, after_bytes: bytes
+) -> JournalEntry:
+    """Stage one entry's before and after images and describe them for a journal."""
     before = destination.with_name(f".{destination.name}.doc-lattice-before.test.tmp")
     after = destination.with_name(f".{destination.name}.doc-lattice-after.test.tmp")
-    journal = root / RECONCILE_JOURNAL_NAME
     before.write_bytes(before_bytes)
     after.write_bytes(after_bytes)
-    entry = JournalEntry(
+    return JournalEntry(
         destination=destination.relative_to(root).as_posix(),
         before_path=before.relative_to(root).as_posix(),
         before_sha256=sha256(before_bytes).hexdigest(),
         after_path=after.relative_to(root).as_posix(),
         after_sha256=sha256(after_bytes).hexdigest(),
     )
+
+
+def _write_cli_transaction(  # noqa: PLR0913
+    root: Path,
+    destination: Path,
+    before_bytes: bytes,
+    after_bytes: bytes,
+    *,
+    state: JournalState = "prepared",
+    provenance: JournalProvenance | None = None,
+) -> tuple[Path, Path, Path]:
+    """Write a valid single-entry recovery transaction for CLI integration tests."""
+    entry = _cli_transaction_entry(root, destination, before_bytes, after_bytes)
+    journal = root / RECONCILE_JOURNAL_NAME
     journal.write_text(
         _serialize_journal(
             JournalV2(
                 version=RECONCILE_JOURNAL_VERSION,
                 state=state,
-                provenance=JournalProvenance(
-                    created_at=datetime(2026, 8, 17, 12, 0, 0, tzinfo=UTC),
-                    tool_version="9.9.9",
-                    selector=JournalSelector(mode="all", downstream_id=None, ref=None),
-                ),
+                provenance=provenance if provenance is not None else _DEFAULT_CLI_PROVENANCE,
                 entries=(entry,),
             )
         ).decode("utf-8"),
         encoding="utf-8",
     )
-    return journal, before, after
+    return journal, root / entry.before_path, root / entry.after_path
+
+
+def _write_legacy_cli_transaction(
+    root: Path,
+    destination: Path,
+    before_bytes: bytes,
+    after_bytes: bytes,
+    *,
+    state: JournalState = "prepared",
+) -> Path:
+    """Write the version 1 journal a pre-provenance release would have left behind.
+
+    Built as literal JSON rather than through a model, because no model this release ships
+    writes version 1 any more and the point of the fixture is the bytes an older one wrote.
+    """
+    entry = _cli_transaction_entry(root, destination, before_bytes, after_bytes)
+    journal = root / RECONCILE_JOURNAL_NAME
+    journal.write_text(
+        json.dumps(
+            {
+                "version": 1,
+                "state": state,
+                "entries": [entry.model_dump(mode="json")],
+            },
+            indent=2,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    return journal
 
 
 def _two_downstream_project(tmp_path: Path) -> Path:
@@ -204,6 +246,9 @@ def test_reconcile_recover_without_journal_reports_exact_json(lattice_dir: Path,
         "unresolved": [],
         "orphans": [],
         "scan_errors": [],
+        # Null because there was no journal at all, which `action` is what distinguishes from
+        # a recovered version 1 journal that carried no provenance.
+        "provenance": None,
     }
 
 
@@ -265,11 +310,203 @@ def test_reconcile_recover_cleans_committed_without_planning(tmp_path: Path, mon
         "unresolved": [],
         "orphans": [],
         "scan_errors": [],
+        # Captured before cleanup deleted the journal this describes.
+        "provenance": {
+            "created_at": "2026-08-17T12:00:00Z",
+            "tool_version": "9.9.9",
+            "selector": {"mode": "all", "downstream_id": None, "ref": None},
+        },
     }
     assert destination.read_bytes() == after_bytes
     assert not journal.exists()
     assert not before.exists()
     assert not after.exists()
+
+
+def _prepared_project(tmp_path: Path, **journal_kwargs) -> tuple[Path, Path]:
+    """Build a project holding one prepared transaction ready to roll back."""
+    docs = tmp_path / "docs"
+    docs.mkdir()
+    destination = docs / "down.md"
+    destination.write_bytes(b"transaction document\n")
+    journal, _before, _after = _write_cli_transaction(
+        tmp_path,
+        destination,
+        b"original document\n",
+        b"transaction document\n",
+        **journal_kwargs,
+    )
+    return journal, destination
+
+
+def test_reconcile_recover_reports_v2_provenance_in_human_output(tmp_path: Path, monkeypatch):
+    """A recovered version 2 journal says when it was written, by what, and from which run."""
+    _prepared_project(
+        tmp_path,
+        provenance=JournalProvenance(
+            created_at=datetime(2026, 8, 17, 12, 0, 0, 123456, tzinfo=UTC),
+            tool_version="5.0.0",
+            selector=JournalSelector(mode="downstream", downstream_id="pc-design", ref="up#x"),
+        ),
+    )
+    monkeypatch.chdir(tmp_path)
+
+    result = runner.invoke(app, ["reconcile", "--recover"])
+
+    assert result.exit_code == 0
+    assert "rolled back reconcile transaction" in result.stdout
+    assert "  created_at: 2026-08-17T12:00:00.123456Z" in result.stdout
+    assert "  tool_version: '5.0.0'" in result.stdout
+    assert "  selector: mode 'downstream', downstream_id 'pc-design', ref 'up#x'" in result.stdout
+
+
+def test_reconcile_recover_json_carries_a_downstream_selector(tmp_path: Path, monkeypatch):
+    """The machine payload spells a narrowed downstream selection, ref included."""
+    journal, _destination = _prepared_project(
+        tmp_path,
+        provenance=JournalProvenance(
+            created_at=datetime(2026, 8, 17, 12, 0, 0, tzinfo=UTC),
+            tool_version="5.0.0",
+            selector=JournalSelector(mode="downstream", downstream_id="pc-design", ref="up#x"),
+        ),
+    )
+    monkeypatch.chdir(tmp_path)
+
+    result = runner.invoke(app, ["reconcile", "--recover", "--format", "json"])
+
+    assert result.exit_code == 0
+    assert json.loads(result.stdout) == {
+        "action": "rolled_back",
+        "journal": str(journal),
+        "restored": 1,
+        "already_before": 0,
+        "unresolved": [],
+        "orphans": [],
+        "scan_errors": [],
+        "provenance": {
+            "created_at": "2026-08-17T12:00:00Z",
+            "tool_version": "5.0.0",
+            "selector": {"mode": "downstream", "downstream_id": "pc-design", "ref": "up#x"},
+        },
+    }
+
+
+def test_reconcile_recover_normalizes_a_plus_offset_timestamp(tmp_path: Path, monkeypatch):
+    """A journal spelled with +00:00 reports in the single spelling this project emits.
+
+    The wire format accepts both spellings and parsing keeps neither token, so the report
+    has to pick one; this pins which, in both channels at once.
+    """
+    journal, _destination = _prepared_project(tmp_path)
+    wire = journal.read_text(encoding="utf-8")
+    assert '"2026-08-17T12:00:00Z"' in wire
+    journal.write_text(
+        wire.replace('"2026-08-17T12:00:00Z"', '"2026-08-17T12:00:00+00:00"'), encoding="utf-8"
+    )
+    monkeypatch.chdir(tmp_path)
+
+    human = runner.invoke(app, ["reconcile", "--recover"])
+
+    assert human.exit_code == 0
+    assert "  created_at: 2026-08-17T12:00:00Z" in human.stdout
+    assert "+00:00" not in human.stdout
+
+
+def test_reconcile_recover_reports_v1_provenance_as_absent(tmp_path: Path, monkeypatch):
+    """A version 1 journal says its format recorded no provenance, rather than showing blanks."""
+    docs = tmp_path / "docs"
+    docs.mkdir()
+    destination = docs / "down.md"
+    destination.write_bytes(b"transaction document\n")
+    journal = _write_legacy_cli_transaction(
+        tmp_path, destination, b"original document\n", b"transaction document\n"
+    )
+    monkeypatch.chdir(tmp_path)
+
+    result = runner.invoke(app, ["reconcile", "--recover"])
+
+    assert result.exit_code == 0
+    assert "rolled back reconcile transaction" in result.stdout
+    assert "  provenance: not recorded by journal version 1" in result.stdout
+    assert destination.read_bytes() == b"original document\n"
+    assert not journal.exists()
+
+
+def test_reconcile_recover_v1_json_provenance_is_null(tmp_path: Path, monkeypatch):
+    """Version 1 recovery reports null provenance; `action` is what separates it from no journal."""
+    docs = tmp_path / "docs"
+    docs.mkdir()
+    destination = docs / "down.md"
+    destination.write_bytes(b"transaction document\n")
+    journal = _write_legacy_cli_transaction(
+        tmp_path, destination, b"original document\n", b"transaction document\n"
+    )
+    monkeypatch.chdir(tmp_path)
+
+    result = runner.invoke(app, ["reconcile", "--recover", "--format", "json"])
+
+    assert result.exit_code == 0
+    payload = json.loads(result.stdout)
+    assert payload["provenance"] is None
+    assert payload["action"] == "rolled_back"
+    assert payload["journal"] == str(journal)
+
+
+def test_reconcile_recover_displays_control_bearing_provenance_without_refusing(
+    tmp_path: Path, monkeypatch
+):
+    """A hand-edited journal recovers, and its control bytes reach neither channel raw.
+
+    AD-36: provenance is informational, so a control character in it is spelled for display
+    rather than made a reason to strand an otherwise valid rollback. The values survive
+    exactly in JSON, where the encoder escapes them instead of emitting them raw.
+    """
+    hostile_version = "5.0.0\x1b[31m"
+    hostile_id = "pc\x1b[Adesign"
+    hostile_ref = "up#\x7fx"
+    journal, destination = _prepared_project(
+        tmp_path,
+        provenance=JournalProvenance(
+            created_at=datetime(2026, 8, 17, 12, 0, 0, tzinfo=UTC),
+            tool_version=hostile_version,
+            selector=JournalSelector(mode="downstream", downstream_id=hostile_id, ref=hostile_ref),
+        ),
+    )
+    monkeypatch.chdir(tmp_path)
+
+    human = runner.invoke(app, ["reconcile", "--recover"])
+
+    assert human.exit_code == 0
+    assert "rolled back reconcile transaction" in human.stdout
+    assert destination.read_bytes() == b"original document\n"
+    assert not journal.exists()
+    for text in (human.stdout, human.stderr):
+        assert not any(is_control_char(char) for char in text.replace("\n", ""))
+    assert "  tool_version: '5.0.0\\x1b[31m'" in human.stdout
+
+    _write_cli_transaction(
+        tmp_path,
+        destination,
+        b"original document\n",
+        b"transaction document\n",
+        provenance=JournalProvenance(
+            created_at=datetime(2026, 8, 17, 12, 0, 0, tzinfo=UTC),
+            tool_version=hostile_version,
+            selector=JournalSelector(mode="downstream", downstream_id=hostile_id, ref=hostile_ref),
+        ),
+    )
+    destination.write_bytes(b"transaction document\n")
+    machine = runner.invoke(app, ["reconcile", "--recover", "--format", "json"])
+
+    assert machine.exit_code == 0
+    assert not any(is_control_char(char) for char in machine.stdout.replace("\n", ""))
+    provenance = json.loads(machine.stdout)["provenance"]
+    assert provenance["tool_version"] == hostile_version
+    assert provenance["selector"] == {
+        "mode": "downstream",
+        "downstream_id": hostile_id,
+        "ref": hostile_ref,
+    }
 
 
 @pytest.mark.parametrize(
@@ -519,6 +756,11 @@ def test_reconcile_recover_partial_json_names_the_unresolved_destination(
         "unresolved": ["docs/down.md"],
         "orphans": [],
         "scan_errors": [],
+        "provenance": {
+            "created_at": "2026-08-17T12:00:00Z",
+            "tool_version": "9.9.9",
+            "selector": {"mode": "all", "downstream_id": None, "ref": None},
+        },
     }
 
 
@@ -598,12 +840,13 @@ def test_reconcile_recover_splits_a_scan_failure_between_its_two_encoders(
     assert format_path_for_display(unreadable) not in scan_errors[0].split(": ", 1)[0]
 
 
-def test_recovery_json_payload_is_byte_identical_for_a_hostile_path():
-    """The JSON encoder reproduces the pre-GTX-209 payload byte for byte.
+def test_recovery_json_payload_keeps_the_raw_path_encoding_and_order():
+    """The machine channel spells a hostile path raw and orders its arrays as the producer did.
 
-    Compared as literal payload bytes rather than as parsed JSON, because the criterion this
-    covers promises byte identity and a parsed comparison would accept a reordered array or a
-    different escape for the same code point.
+    GTX-196 added the eighth key, so this no longer claims the whole payload is byte-identical
+    to the pre-GTX-209 one; what it still pins is the part that criterion was about. Compared
+    as literal payload bytes rather than as parsed JSON, because a parsed comparison would
+    accept a reordered array or a different escape for the same code point.
     """
     hostile = f"docs/{_HOSTILE_DOC_NAME}"
     journal = Path("/project") / _HOSTILE_DOC_NAME
@@ -636,6 +879,7 @@ def test_recovery_json_payload_is_byte_identical_for_a_hostile_path():
                 "cannot scan /a for orphaned artifacts: zzz",
                 "cannot scan /b for orphaned artifacts: aaa",
             ],
+            "provenance": None,
         }
     )
     assert payload.encode("utf-8") == expected.encode("utf-8")

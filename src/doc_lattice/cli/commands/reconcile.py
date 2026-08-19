@@ -13,11 +13,13 @@ from ...path_utils import format_path_for_display, safe_resolve
 from ...reconcile import Rewrite, plan_rewrites
 from ...reconcile import reconcile as plan_reconcile
 from ...reconcile_transaction import (
+    JournalProvenance,
     JournalSelector,
     RecoveryAction,
     RecoveryResult,
     commit_rewrites,
     ensure_dry_run_safe,
+    journal_timestamp_text,
     reconcile_lock,
     recover_transaction,
 )
@@ -123,6 +125,35 @@ _RECOVERY_SUMMARIES: dict[RecoveryAction, str] = {
 }
 
 
+def _provenance_payload(
+    provenance: JournalProvenance | None,
+) -> dict[str, str | dict[str, str | None]] | None:
+    """Render journal provenance for the machine channel, or None when there is none.
+
+    Null covers both a recovered version 1 journal and a run that found no journal at all.
+    ``action`` already separates those two, so a second key spelling the journal version
+    would only give a consumer a way to disagree with it.
+
+    Args:
+        provenance: The provenance a version 2 journal recorded, or None.
+
+    Returns:
+        The provenance object with its values in their recorded spelling, or None.
+    """
+    if provenance is None:
+        return None
+    selector = provenance.selector
+    return {
+        "created_at": journal_timestamp_text(provenance.created_at),
+        "tool_version": provenance.tool_version,
+        "selector": {
+            "mode": selector.mode,
+            "downstream_id": selector.downstream_id,
+            "ref": selector.ref,
+        },
+    }
+
+
 def _recovery_json_payload(recovery: RecoveryResult) -> str:
     return json.dumps(
         {
@@ -136,6 +167,10 @@ def _recovery_json_payload(recovery: RecoveryResult) -> str:
             # included: AD-34 excludes JSON from the display spelling, and `_scan_orphan_artifacts`
             # already orders the records by this rendering so the array order is unchanged too.
             "scan_errors": [failure.legacy_text for failure in recovery.scan_errors],
+            # The journal's own strings, in the spelling it recorded them in: this channel is
+            # excluded from the display spelling for the reason AD-34 records, and the
+            # encoder escapes a control character rather than emitting it raw.
+            "provenance": _provenance_payload(recovery.provenance),
         }
     )
 
@@ -152,6 +187,50 @@ def _report_recovery(runtime: CliRuntime, recovery: RecoveryResult, *, json_out:
         summary = _RECOVERY_SUMMARIES[recovery.action]
     runtime.stdout.print(
         f"{summary}: {escape(format_path_for_display(recovery.journal))}", soft_wrap=True
+    )
+    _report_provenance(runtime, recovery)
+
+
+def _display_journal_string(value: str | None) -> str:
+    """Spell one journal-recorded string for a person, or name its absence.
+
+    A journal is a file a person can edit, so its strings are untrusted exactly as a document
+    path is. AD-36 gives them AD-34's spelling for that reason: ``repr`` is injective and
+    leaves no control character in the line, and the Rich escape on top of it neutralizes
+    markup, which is printable text no control-character rule would catch.
+
+    Args:
+        value: A recorded string, or None for a selector field the run left unset.
+
+    Returns:
+        The quoted display spelling, or a bare ``null``. The quoting is what keeps the two
+        apart: a recorded string spelling the word null reads as ``'null'``.
+    """
+    return "null" if value is None else escape(repr(value))
+
+
+def _report_provenance(runtime: CliRuntime, recovery: RecoveryResult) -> None:
+    """Print what produced the recovered journal, or say the format recorded nothing.
+
+    Silent when no journal was found: there is no provenance to be absent.
+    """
+    provenance = recovery.provenance
+    if provenance is None:
+        if recovery.journal_version is not None:
+            runtime.stdout.print(
+                f"  provenance: not recorded by journal version {recovery.journal_version}"
+            )
+        return
+    selector = provenance.selector
+    runtime.stdout.print(f"  created_at: {journal_timestamp_text(provenance.created_at)}")
+    runtime.stdout.print(
+        f"  tool_version: {_display_journal_string(provenance.tool_version)}", soft_wrap=True
+    )
+    runtime.stdout.print(
+        f"  selector: mode {_display_journal_string(selector.mode)}, "
+        f"downstream_id {_display_journal_string(selector.downstream_id)}, "
+        f"ref {_display_journal_string(selector.ref)}",
+        soft_wrap=True,
     )
 
 

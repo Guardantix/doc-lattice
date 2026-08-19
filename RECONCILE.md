@@ -144,13 +144,26 @@ After an interrupted run, use this workflow:
    scan reported an orphan or a failure. A full rollback, a committed cleanup, and a clean
    no-journal run exit 0. A partial rollback, any orphaned artifact, and any scan failure exit 2,
    whichever journal state the run started from.
-3. For machine-readable recovery, add `--format json`. The complete stdout object contains exactly
-   `action`, `journal`, `restored`, `already_before`, `unresolved`, `orphans`, and `scan_errors`,
-   with no additional keys, for example `{"action": "none", "journal": "PATH", "restored": 0,
-   "already_before": 0, "unresolved": [], "orphans": [], "scan_errors": []}`. `action` is `none`,
-   `rolled_back`, `partially_rolled_back`, or `cleaned_committed`. `restored` and `already_before`
-   count rolled-back destinations; `unresolved`, `orphans`, and `scan_errors` are the sorted
-   details behind a nonzero exit.
+3. A recovered journal then reports what produced it, indented under the summary line. A version
+   2 journal prints its `created_at`, its `tool_version`, and its selector as
+   `selector: mode 'downstream', downstream_id 'pc-design', ref 'up#x'`, with a selector field the
+   run left unset printed as a bare `null`. A version 1 journal recorded no provenance, so it
+   prints `provenance: not recorded by journal version 1` rather than empty fields. A run that
+   found no journal prints nothing here, because there is no provenance to be absent. The
+   automatic pre-run recovery a normal reconcile performs is unchanged and still reports only its
+   action.
+4. For machine-readable recovery, add `--format json`. The complete stdout object contains exactly
+   `action`, `journal`, `restored`, `already_before`, `unresolved`, `orphans`, `scan_errors`, and
+   `provenance`, with no additional keys, for example `{"action": "none", "journal": "PATH",
+   "restored": 0, "already_before": 0, "unresolved": [], "orphans": [], "scan_errors": [],
+   "provenance": null}`. `action` is `none`, `rolled_back`, `partially_rolled_back`, or
+   `cleaned_committed`. `restored` and `already_before` count rolled-back destinations;
+   `unresolved`, `orphans`, and `scan_errors` are the sorted details behind a nonzero exit.
+   `provenance` is the journal's own `created_at`, `tool_version`, and `selector` object, or
+   `null`. The key is always present, and `null` covers both a version 1 journal and a run that
+   found no journal; `action` is what separates those two, which is why there is no
+   `journal_version` key to disagree with it. `created_at` is emitted in the same spelling the
+   journal is written in, ending in `Z`, whichever accepted spelling the file used.
 
 Every path in the human lines above is quoted, because a document filename is repo-controlled
 text and a reconcile stage is named after the destination it is written beside, so an artifact
@@ -160,6 +173,15 @@ orphaned artifact, and the path component of each scan failure are all spelled t
 terminal control byte in it. The `--format json` payload is deliberately unchanged: it is a
 machine channel, so it keeps the raw spelling and its own encoder, and `scan_errors` keeps both
 its wording and its array order.
+
+The provenance lines are quoted for the same reason and by the same spelling, which
+[ARCHITECTURE.md](ARCHITECTURE.md)'s AD-36 extends to them: a journal is a file a person can
+edit, so `tool_version` and the selector strings are untrusted exactly as an artifact path is.
+They are spelled for display rather than made a reason to refuse the journal, because provenance
+is informational and recovery never reads it, so refusing would strand a rollback the entries
+still describe. `created_at` needs no spelling of its own, since it is a validated timestamp
+before it is text. The quoting is also what keeps a recorded string apart from an unset selector
+field: `'null'` is a value, `null` is the absence of one.
 
 ## Partial rollback
 

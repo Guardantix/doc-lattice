@@ -631,8 +631,13 @@ def test_recovery_result_is_frozen_and_slotted(tmp_path: Path):
         "unresolved",
         "orphans",
         "scan_errors",
+        "journal_version",
+        "provenance",
     )
     assert not result.is_incomplete
+    # No journal was read, so neither provenance field claims anything about one.
+    assert result.journal_version is None
+    assert result.provenance is None
     with pytest.raises(FrozenInstanceError):
         result.action = "rolled_back"  # ty: ignore[invalid-assignment]
 
@@ -966,6 +971,8 @@ def test_prepared_after_image_is_rolled_back_and_artifacts_are_cleaned(tmp_path:
         action="rolled_back",
         journal=transaction.journal,
         restored=1,
+        journal_version=RECONCILE_JOURNAL_VERSION,
+        provenance=_provenance(),
     )
     assert not result.is_incomplete
     assert transaction.destination.read_bytes() == b"before image\n"
@@ -983,6 +990,8 @@ def test_prepared_destination_already_at_before_image_is_a_full_rollback(tmp_pat
         action="rolled_back",
         journal=transaction.journal,
         already_before=1,
+        journal_version=RECONCILE_JOURNAL_VERSION,
+        provenance=_provenance(),
     )
     assert not result.is_incomplete
     assert transaction.destination.read_bytes() == b"before image\n"
@@ -1034,7 +1043,13 @@ def test_committed_recovery_never_reads_or_changes_destination(tmp_path: Path, m
 
     result = recover_transaction(tmp_path)
 
-    assert result == RecoveryResult(action="cleaned_committed", journal=transaction.journal)
+    assert result == RecoveryResult(
+        action="cleaned_committed",
+        journal=transaction.journal,
+        journal_version=RECONCILE_JOURNAL_VERSION,
+        # Captured while the journal was still on disk; cleanup has deleted it by now.
+        provenance=_provenance(),
+    )
     assert transaction.destination.read_bytes() == b"newer unrelated bytes\n"
     assert not transaction.before.exists()
     assert not transaction.after.exists()
@@ -2534,6 +2549,27 @@ def test_created_at_accepts_every_spelling_of_the_same_utc_instant(accepted: str
     assert provenance.created_at == datetime(2026, 8, 17, 12, 0, tzinfo=UTC) + timedelta(
         microseconds=123456 if "123456" in accepted else 0
     )
+
+
+@pytest.mark.parametrize(
+    "accepted",
+    ["2026-08-17T12:00:00Z", "2026-08-17T12:00:00.123456Z", "2026-08-17T12:00:00+00:00"],
+    ids=["z", "z-microseconds", "explicit-zero-offset"],
+)
+def test_reported_timestamp_matches_the_spelling_the_serializer_writes(accepted: str):
+    """Recovery reports an instant in the one spelling a journal is ever written in.
+
+    Both accepted spellings parse to the same datetime and the wire token is not retained, so
+    a report has to choose. Pinning the choice against the serializer rather than against a
+    literal is what keeps a journal and the report about it from disagreeing if the
+    serializer's own spelling ever moves.
+    """
+    provenance = JournalProvenance.model_validate(_provenance_with(accepted))
+
+    reported = reconcile_transaction.journal_timestamp_text(provenance.created_at)
+
+    assert json.loads(provenance.model_dump_json())["created_at"] == reported
+    assert reported.endswith("Z")
 
 
 @pytest.mark.parametrize(
