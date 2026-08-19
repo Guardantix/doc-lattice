@@ -1233,18 +1233,28 @@ document paths, so the promise was unmet at those sinks. What remains is per-exp
 machine-only: the journal serializer, the staged-artifact filenames, and the recovery payload's
 own JSON spelling. Every config, cache, and `init` diagnostic now quotes the path it names, the
 way `impact` and `reconcile` already did. Because a name can be a path in one module and
-something else in another, the
-path-bearing name set is the global one widened per module rather than grown globally.
+something else in another, the path-bearing name set is the global one widened per module
+rather than grown globally.
 
 Retiring the module exemptions is not the same as enforcing the boundary, and GTX-212 closed two
 gaps that made the difference. Both scans used to `continue` past a named module, so re-adding
 one silently switched the scan off for that file while every assertion still passed; the scan now
 reports which modules it read and the production test asserts that set is every source module, so
 a reintroduced skip fails rather than hides. And the detector's name vocabulary did not cover the
-operands those modules spell, so dropping the entries alone would have caught two of eight sinks.
-An alias defeats it the same way: binding `where = str(source)` above a message removes the
-path-bearing name before the scan reaches it, which is why the config validation header is built
-in two branches whose guarded expression is the helper call alone.
+operands those modules spell, so dropping the entries alone would have caught three of the
+thirteen operands that needed the helper: the two locals literally named `path` in `config.py`,
+and the cache store's own. The configured `config_path`, `entry`, `project_root`, and `safe`, the
+header's aliased `source`, and every `init` operand were invisible to it. An alias defeats it the
+same way: binding `where = str(source)` above a message removes the path-bearing name before the
+scan reaches it, which is why the config validation header is built in two branches whose guarded
+expression is the helper call alone.
+
+What the guard reaches is therefore bounded by the vocabulary rather than by the module list.
+Retiring the module exemptions widened where it looks, not what it recognizes: a name that is not
+classified for a module is still invisible in it, and a module nobody has audited contributes
+whatever its own operands happen to be named. Widening a name globally is the fix where the name
+is unambiguous, and it is a scope decision rather than a free one, because it reports every
+existing sink spelling that name at once.
 
 One classification is worth recording because it is not about safety. `init` names the config file
 it scaffolds by a compile-time constant, so wrapping it neutralizes nothing today, and quoting it

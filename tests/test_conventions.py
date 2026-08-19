@@ -1752,6 +1752,11 @@ _MODULE_PATH_BEARING_NAMES: dict[str, frozenset[str]] = {
     # remaining use of it human-facing and wrapped. What this buys is the next edit: widening
     # `target` from the basename to the full path, or letting the name come from a flag, is
     # caught here rather than passing silently.
+    #
+    # `value` is deliberately absent. The loop it names validates `--docs-root` and
+    # `--linear-team` together, so it holds a path only half the time, and routing a team key
+    # through a path helper would use it against its own contract. That message keeps `!r`, and
+    # what makes it control-safe is that it is the rejection of a control-bearing value.
     "cli/commands/init.py": frozenset({"root", "target", "target_name"}),
 }
 
