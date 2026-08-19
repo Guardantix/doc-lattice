@@ -103,6 +103,13 @@ def _validate_init_flags(docs_roots: tuple[str, ...], linear_team: str | None) -
         raise ConfigError(msg)
 
 
+def _init_persistence_error(target_name: str, cause: OSError) -> InitPersistenceError:
+    """Wrap one scaffold write failure, preserving the low-level remediation notes."""
+    error = InitPersistenceError(f"cannot write {target_name}: {cause}")
+    copy_exception_notes(error, cause)
+    return error
+
+
 def _print_unmanaged_guidance(runtime: CliRuntime, ci_text: str) -> None:
     """Print the ordinary workflow and the instructions for placing every printed block."""
     runtime.write_stdout("# ===== .github/workflows/doc-lattice.yml (new file) =====")
@@ -176,13 +183,9 @@ def register_init(app: typer.Typer) -> None:
                         f"{escape(target.name)} already exists, leaving it untouched"
                     )
                 else:
-                    error = InitPersistenceError(f"cannot write {target.name}: {exc}")
-                    copy_exception_notes(error, exc)
-                    raise error from exc
+                    raise _init_persistence_error(target.name, exc) from exc
             except OSError as exc:
-                error = InitPersistenceError(f"cannot write {target.name}: {exc}")
-                copy_exception_notes(error, exc)
-                raise error from exc
+                raise _init_persistence_error(target.name, exc) from exc
             else:
                 runtime.stderr.print(f"wrote {escape(target.name)}")
             runtime.stderr.print(f"workflow triggers on branch {escape(branch)} ({branch_source})")
