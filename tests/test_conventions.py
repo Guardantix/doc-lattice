@@ -1758,8 +1758,9 @@ _DISPLAY_GUARD_EXEMPT_MODULES = {
 # reformat -- exempting nothing while hiding the sink it was written for. A function key survives
 # every edit that does not move the expression to another function, and moving it there is
 # exactly the change that should be re-judged. Two unwrapped spellings of the same name in one
-# function share an entry; none of these functions has one, and splitting a function is the
-# natural fix if a future one does.
+# function share an entry, so an entry has to be judged against every one of them:
+# `_prepare_transaction` interpolates `destination.name` into both stage prefixes, and both are
+# the same machine construction. Splitting a function is the natural fix if a future pair is not.
 _DISPLAY_GUARD_EXEMPT_EXPRESSIONS = {
     # `source` here is a slice of raw YAML text being re-emitted into a rewritten scalar, not a
     # file path, and it is bytes destined for a document rather than for a human.
