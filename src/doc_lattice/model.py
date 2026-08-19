@@ -30,6 +30,10 @@ def _reject_control_chars(value: str) -> str:
             what clip or keep chomping leaves behind, while an interior one survives every
             chomping mode and needs the lines joined instead. Answering both with the chomping
             advice would send an author of a multi-line ``|-`` to a ``-`` that is already there.
+            The interior fix states the two conditions folding needs rather than naming ``>-``
+            alone, because a ``>-`` keeps an interior break when a blank line separates its
+            lines or one is indented further than the block, and an author already spelling
+            ``>-`` would otherwise read the advice as a step they had taken.
     """
     index = first_control_index(value)
     if index is not None:
@@ -43,7 +47,8 @@ def _reject_control_chars(value: str) -> str:
         else:
             fix = (
                 "frontmatter values are single-line, so join the lines; '>-' folds a block "
-                "scalar's lines with spaces"
+                "scalar's lines with spaces only where they are equally indented and no blank "
+                "line separates them"
             )
         msg = (
             f"must not contain a control character; found U+{ord(value[index]):04X} at index "

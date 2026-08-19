@@ -378,16 +378,28 @@ the source line it choked on, and that path does not yet hold the promise.
 
 Two cases are worth knowing, because they are the ones you can write without meaning to. A
 **literal tab** inside a quoted or block scalar is the one control byte YAML itself admits, and
-nothing on screen distinguishes it from a run of spaces, so a value that looks fine can fail;
-`grep -rP '^\s*(id|title|tickets|ref|seen):.*\t'` finds them. A **newline from a block scalar** is
-the other, and it arrives in two ways that need different fixes. A block written `|` or `>` keeps
-a *trailing* break, which `|-` or `>-` chomps away. A literal block (`|` in any chomping mode)
-also keeps the breaks *between* its lines, and no chomping indicator touches those, so a `|-`
-spanning two lines still fails; only the folded styles join their lines with a space. Write a
-multi-line value as `>-`, which is the spelling that survives this rule, and keep `|-` for a
-value on one line. Everything else in the
-refused set, ESC and DEL and the C1 controls among them, YAML rejects as a raw byte, so it can
-only reach a value through a double-quoted escape such as `"\u001b"`.
+nothing on screen distinguishes it from a run of spaces, so a value that looks fine can fail.
+Scan the frontmatter block rather than a list of key spellings, because the tab need not share a
+line with its key: a `derives_from` edge writes `- ref:` behind a sequence dash, and a block-form
+`tickets` entry is a bare `- "GTX-1"` item with no key on the line at all.
+
+```bash
+find . -name '*.md' -exec awk \
+  'FNR==1{inb=($0=="---")} inb&&FNR>1&&$0=="---"{inb=0} inb&&/\t/{print FILENAME":"FNR": "$0}' \
+  {} +
+```
+
+A **newline from a block scalar** is the other, and it arrives in two ways that need different
+fixes. A block written `|` or `>` keeps a *trailing* break, which `|-` or `>-` chomps away. A
+literal block (`|` in any chomping mode) also keeps the breaks *between* its lines, and no
+chomping indicator touches those, so a `|-` spanning two lines still fails; only the folded
+styles join their lines with a space. Write a multi-line value as `>-`, which is the spelling
+that survives this rule, and keep `|-` for a value on one line. One thing folding does not
+absorb: a blank line inside a folded block is a paragraph break and constructs a newline of its
+own, so a `>-` whose lines are separated by one still fails. Keep a folded value's lines
+adjacent. Everything else in the refused set, ESC and DEL and the C1 controls among them, YAML
+rejects as a raw byte, so it can only reach a value through a double-quoted escape such as
+`"\u001b"`.
 
 ### Files with no `id`
 
@@ -813,12 +825,18 @@ lists `authority` and `tickets` when those are what the block declared.
 
 **`must not contain a control character; found U+000A at index ...` exits 2.** A frontmatter
 value decoded to a byte a terminal acts on, so the document is refused rather than loaded and
-printed. `U+000A`, `U+000D`, and `U+0009` are the common ones and usually mean a block scalar
-kept its trailing line break: change `|` to `|-`, or `>` to `>-`. Anything in the `U+001B`
-neighborhood is an escape sequence written into the value on purpose and should come out. The
-message names the key and the offending code point rather than repeating the value, so reading it
-never puts the byte back on your terminal. See the
-[Frontmatter reference](#frontmatter-reference) for the exact accepted set.
+printed. The fix depends on which code point the message names, and the three common ones do not
+share one. `U+000A` is a line break a block scalar kept, and chomping removes it only when it is
+*trailing*: change `|` to `|-`, or `>` to `>-`. A break *between* the lines of a value survives
+that edit, so if the error repeats, fold the value with `>-` and keep its lines adjacent, or put
+it on one line. `U+0009` is a tab, which no chomping indicator touches: it is a literal tab or a
+`\t` escape in the value, and it has to come out. `U+000D` reaches a value only as a `\r`
+escape, since YAML folds a literal carriage return to a space, so it too has to come out rather
+than be re-chomped. Anything in the `U+001B` neighborhood is an escape sequence written into the
+value on purpose and should come out as well. The message names the key and the offending code
+point rather than repeating the value, so reading it never puts the byte back on your terminal.
+See the [Frontmatter reference](#frontmatter-reference) for the exact accepted set and for a scan
+that finds a tab you cannot see.
 
 **`skipping ... its frontmatter declares no 'id'` on stderr.** Not an error: a file with fenced
 frontmatter that declares no `id` and no lattice keys is left out of the lattice, and the exit

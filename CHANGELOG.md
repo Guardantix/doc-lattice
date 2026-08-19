@@ -83,18 +83,30 @@ and only the first is the one the vector was reported for:
    `\r` inside a double-quoted frontmatter scalar.
 2. **A literal tab**, which is the one control character YAML does admit as a raw byte, inside a
    double-quoted, single-quoted, or block scalar. Nothing about it is visible on screen, so
-   search for the byte rather than reading for it: `grep -rP '^\s*(id|title|tickets|ref|seen):.*\t'`
-   over your docs roots, and widen it if your values span lines.
+   search for the byte rather than reading for it. Scan the whole frontmatter block, not a list
+   of key spellings: a tab need not share a line with its key, since a `derives_from` edge
+   writes `- ref:` behind a sequence dash and a block-form `tickets` entry is a bare `- "GTX-1"`
+   item with no key on the line at all. This scan is scoped to the fenced block, so a tab in
+   body prose or an indented code block is not a hit:
+
+   ```bash
+   find . -name '*.md' -exec awk \
+     'FNR==1{inb=($0=="---")} inb&&FNR>1&&$0=="---"{inb=0} inb&&/\t/{print FILENAME":"FNR": "$0}' \
+     {} +
+   ```
+
 3. **A newline a block scalar keeps**, whether at the end of the value or inside it. Tab,
    newline, and carriage return are C0 controls, so both spellings are refused. `|` or `>`
    without `-` keeps a *trailing* break, which `|-` and `>-` chomp away. An *interior* break is
    the case to look for after that, because chomping does not touch it: a `|-` spanning two
-   lines is already chomped and still constructs a newline between them. Only the folded styles
-   (`>` and `>-`) join their lines with a space, so `>-` is the block spelling that survives
-   this rule for a value written across lines, and `|-` survives it only on one line. Search
-   every one of the five keys, not just the two that carry hashes and refs: `id`, `title`,
-   `tickets`, `ref`, and `seen` are all constrained, and `id` and `title` are where a
-   multi-line value is most likely to have been written on purpose.
+   lines is already chomped and still constructs a newline between them. The folded styles (`>`
+   and `>-`) join adjacent lines with a space, so `>-` is the block spelling that survives this
+   rule for a value written across lines, and `|-` survives it only on one line. Folding stops
+   at a blank line, which is a paragraph break and constructs a newline `>-` does not chomp, so
+   keep a folded value's lines adjacent. Search every one of the five keys, not just the two
+   that carry hashes and refs: `id`, `title`, `tickets`, `ref`, and `seen` are all constrained,
+   and `id` and `title` are where a multi-line value is most likely to have been written on
+   purpose.
 
 All five had a working use, so treat this as a real scan rather than a formality. A folded
 `title` is the obvious one. Less obviously, an `id` written `|` constructs a trailing newline,

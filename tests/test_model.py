@@ -223,6 +223,19 @@ def test_an_interior_line_break_is_answered_with_the_joining_fix_not_the_chompin
     assert "chomp" not in error["msg"]
 
 
+def test_the_joining_fix_states_what_folding_needs_rather_than_naming_the_indicator():
+    # `>-` is necessary but not sufficient: a folded scalar keeps an interior break when a blank
+    # line separates its lines or one is indented past the block, so an author who already wrote
+    # `>-` and hit this rule reads a bare "use '>-'" as a step they have taken. Both conditions
+    # are named so the advice tells that author what to change.
+    with pytest.raises(PydanticValidationError) as exc:
+        NodeMeta.model_validate({"id": "x", "title": "first\nsecond"})
+
+    (error,) = exc.value.errors(include_url=False, include_input=False)
+    assert "equally indented" in error["msg"]
+    assert "blank line" in error["msg"]
+
+
 def test_a_carriage_return_is_answered_with_the_general_fix():
     # No chomping mode and no folding produces a carriage return: YAML normalizes a literal one
     # to a line feed, so a value carrying one was written as an escape and removing it is the
