@@ -588,9 +588,20 @@ decided per dependency by how much of its behavior this engine actually reads.
   `markdown-it-py` itself, so a future `rich` whose floor moves past 4.2.0 is unresolvable until
   this pin is re-reviewed and section identity re-verified. That is the intended trade, because an
   unresolvable lock fails loudly and a shifted slug does not.
-- `typer`, `rich`, and `pydantic` carry bounds only. No leg verifies the span beneath each ceiling,
+- `typer` and `pydantic` carry bounds only. No leg verifies the span beneath either ceiling,
   because nothing here reads their internals; the bound exists to hold the next major out until
   someone looks at it.
+- `rich` was in that group and **AD-40 moves it out**. The per-channel broken-pipe policy is built
+  on `Console.on_broken_pipe`, a documented but overridable hook, which makes one piece of rich's
+  behavior something this engine reads rather than merely calls. That has two consequences this
+  record now carries. The floor rises from `13` to `13.8.0`, the first release in which the hook
+  exists -- verified against the published wheels, where 13.7.1 lacks it and 13.8.0 has it -- so
+  the declaration no longer admits a version under which the override is silently inert. And the
+  span gets a leg: `rich-floor` in `ci.yml` installs that exact floor and runs the CLI suite
+  against it, for the reason the ruamel leg exists, since the lock only ever installs the ceiling
+  and a difference at the floor would otherwise ship unseen. A test also asserts the hook is still
+  present on the class, so its removal in a future rich fails here rather than quietly restoring
+  exit 1 on `--help`.
 
 **Consequences:** An upstream major cannot reach a pinned adopter without a doc-lattice release,
 and raising a ceiling is a compatibility review with the suite as its evidence.
@@ -689,22 +700,21 @@ one warning is not asked again. The guard deliberately stops at the phase bounda
 work inside raises `OSError` for real read failures and those must keep propagating. Rich's own
 `Console.on_broken_pipe` is unusable here for the same reason: it points `sys.stdout` at
 `os.devnull` and raises `SystemExit(1)`, so a dead *stderr* discards the report a succeeding
-command is still computing, and it does that before any caller could catch. `CliConsole` overrides
-it to re-raise the `BrokenPipeError` instead, which also settles the identical exposure
-`cli/errors.py` carries: every CLI write now fails like an ordinary stream write, and the entry
-point's existing `OSError` handling governs it. The one write that handling cannot govern is its
-own: an exception raised inside an `except` clause is never retried against a sibling clause, so
-the entry point suppresses `OSError` and `ValueError`, a closed stream's write error, around
-the error report itself and keeps the tool-error exit, since a report to a stderr that refuses
-the write cannot be delivered anyway.
-`BrokenPipeError` alone is caught ahead of that generic `OSError` handling, and it exits 141
-(128+SIGPIPE) silently rather than joining the tool-error mapping: a departed reader is
-truncation, not a tool failure, and reusing 2 for it would make the 0/1/2 contract CI relies on
-ambiguous between "the tool broke" and "something downstream stopped reading." The handler still
-has one write of its own to answer for, though: flushing already-buffered stdout can raise the
-same `BrokenPipeError` again, and the interpreter's own shutdown flush of the now-dead stream
-would otherwise print exactly the "Exception ignored" noise this handler exists to suppress, so
-it points both stdout and stderr at `os.devnull` before returning.
+command is still computing, and it does that before any caller could catch.
+**AD-40 amends what replaces it**, and supersedes this record's original account of the broken
+pipe in three places. Where this record said `CliConsole` re-raises the `BrokenPipeError` so that
+"every CLI write now fails like an ordinary stream write", the policy is now per channel rather
+than uniform: only a failed *stdout* write is escalated, and a failed *stderr* write is answered
+in place so the run keeps the exit code it had already decided on. Where it said the entry point
+"suppresses `OSError` and `ValueError` around the error report itself and keeps the tool-error
+exit", that was true only of `main()`'s own `except ProjectError` clause, which almost no command
+reaches: every command wraps orchestration in `exit_on_project_error`, whose report ran unguarded,
+so a dead stderr exited 141 rather than 2. And where it said the 141 handler "points both stdout
+and stderr at `os.devnull` before returning", that redirect is now the backstop rather than the
+mechanism, because a stream is neutralized by the policy at the point its own write fails.
+What survives unchanged is why 141 exists at all: a departed reader is truncation, not a tool
+failure, and reusing 2 for it would make the 0/1/2 contract CI relies on ambiguous between "the
+tool broke" and "something downstream stopped reading."
 Costs survive it. Under `PYTHONWARNINGS=error` the warning is raised before `showwarning` is
 consulted, so no hook can reach it and no substitution made here can present it; that is why the
 exit-status guarantee below is stated for ordinary warning configuration. What that cost was is
@@ -1806,3 +1816,87 @@ spelling is what reaches this line. A dependency's message is passed through as 
 which is what `CliRuntime._render_warning` already does for the same warning when it is displayed
 rather than raised; this record moves that text between two sinks and does not widen what reaches
 either.
+
+### AD-40: A broken pipe is answered per channel, because the two streams carry different things
+
+**Date:** 2026-08-20
+**Status:** Accepted
+**Context:** AD-29 settled that Rich's default `on_broken_pipe` is unusable here and had
+`CliConsole` re-raise the `BrokenPipeError` so that "every CLI write now fails like an ordinary
+stream write". Treating every write alike was the error. A departed reader means opposite things
+on the two streams: on stdout it truncates the command's own result, so there is nothing left to
+finish; on stderr it loses a remark *about* a result the command is still computing correctly.
+One uniform answer cannot be right for both, and the uniform answer chosen was the stdout one, so
+four user-visible paths carried a dead stderr into the wrong exit code and a fifth carried a dead
+stdout into it.
+
+- **The adapter-caught path exited 141 instead of 2.** Every command wraps orchestration in
+  `exit_on_project_error`, which calls `print_project_error` unguarded, so a dead stderr raised
+  before `typer.Exit(EXIT_TOOL_ERROR)` was ever reached and `main()`'s broken-pipe branch ran
+  instead. AD-29's claim that the tool-error exit is kept when a report cannot be delivered was
+  true only of `main()`'s own `except ProjectError`, which almost no command reaches.
+- **A written-to dead stderr overrode the run's exit code with 120.** The phase guard contained
+  the exception but not the bytes already buffered in `sys.stderr`. A failed flush does not
+  discard what it could not write, and the interpreter's shutdown flush is the retry: it failed a
+  second time, after every handler had finished, and CPython replaced the run's exit code with
+  its own 120.
+- **Typer's consoles were outside the seam.** Help and usage rendering uses `typer.rich_utils`'
+  plain `rich.console.Console` instances, built outside `_create_runtime`, so `CliConsole` could
+  not govern them and Rich's default applied: `doc-lattice --help` piped into a departing reader
+  exited 1, the code `check` and `lint` reserve for drift.
+- **The one non-Rich stdout path exited 1.** `CliRuntime.write_stdout` carries `--format json`
+  and `init`'s guidance blocks, and writes directly. Its `BrokenPipeError` therefore arrives with
+  `errno` set to `EPIPE`, and Typer's `_main` converts exactly that into `sys.exit(1)` -- on the
+  formats most likely to be piped into `head` or `jq` in the first place.
+- **The seam was absent across the declared dependency range.** `Console.on_broken_pipe` does not
+  exist before rich 13.8.0, but the floor was declared as `13`, so at the bottom of the range the
+  override was inert and none of the above was fixed.
+
+**Decision:** The policy is stated once, by channel, at one CLI-owned boundary.
+A failed **stdout** write is escalated: it becomes `PipeClosed`, which the entry point answers
+with a silent 141. A failed **stderr** write is answered in place: the console is silenced, its
+unwritten Rich buffer dropped, its file descriptor pointed at `os.devnull`, and control returns
+so the caller's own exit path continues undisturbed. The command's semantic result therefore
+never depends on whether its diagnostics could be delivered.
+
+- `apply_broken_pipe_policy` in `cli/runtime.py` holds the decision. `CliConsole` overrides the
+  hook so the runtime's own consoles carry it unconditionally, including on the entry-point
+  diagnostic paths; `broken_pipe_policy()` substitutes the same function onto
+  `rich.console.Console` for the duration of `application()` so Typer's consoles inherit it.
+  Substituting Rich's documented hook is preferred over replacing `typer.rich_utils`' private
+  console factory, which would make the declared `typer` span a second compatibility surface for
+  a seam Rich already offers. The substitution is process-global and restored in a `finally`, and
+  it carries the same unrepaired concurrency cost AD-29 records for `warnings.showwarning`, for
+  the same reason: the CLI creates no threads and one invocation owns its process.
+- `PipeClosed` carries no `errno`, and that is load-bearing rather than incidental. Typer's
+  `_main` converts an `OSError` whose `errno` is `EPIPE` into `sys.exit(1)`; an `errno` of `None`
+  does not match, so Typer re-raises it and the entry point's own handler sees it. This is the
+  only reason `write_stdout` re-raises rather than letting the original propagate, so it is
+  pinned by a test rather than left to the call sites.
+- Neutralizing the descriptor, not merely dropping the diagnostic, is what answers the 120. Only
+  the descriptor that actually failed is redirected, which is the precise fault in Rich's own
+  hook: it redirects file descriptor 1 whichever stream broke.
+- The primitives live in `cli/pipe_policy.py`, which imports nothing but `os` and `contextlib`.
+  That is what lets `cli/__init__.py` reach them from its *unguarded* import block, so the
+  pre-renderer fallback -- which runs when `rich`, `typer`, and most of the engine failed to
+  import -- can neutralize file descriptor 2 without depending on any of what just failed. That
+  path gets its own stdlib-only equivalent of the stderr half rather than a share of the policy,
+  because the policy is part of what is unavailable there.
+- The `rich` floor rises to `13.8.0` and gets a compatibility leg, amending AD-27. A
+  write-boundary fallback covering the whole `>=13` range was the alternative; it was rejected
+  because it means wrapping every stream this CLI writes through in order to reproduce a seam the
+  supported versions already expose, and the floor is four years of releases old.
+
+Explicitly not chosen: a local `try`/`except` at any individual diagnostic site. By the time such
+a guard could catch, the exit code has already been decided elsewhere and the bytes are already
+buffered, so a partial guard would read as a solved problem while leaving both failures intact.
+
+**Consequences:** A command's exit code is now a function of what it found, never of which of its
+streams survived. `check --format json | head -1` exits 141 rather than 1, and a run whose stderr
+died mid-advisory still finishes its stdout and exits on its own finding. The costs are three.
+One dependency behavior -- Rich's hook -- is now something this engine reads, so it needs a floor,
+a leg, and a presence test, where AD-27 previously owed `rich` only a bound. A shared class
+attribute is mutated for the duration of an invocation, which an embedder driving this from
+several threads would observe. And the entry point's unguarded import surface widens from one
+module to two, which is why `cli/pipe_policy.py`'s standard-library-only import list is asserted
+by a test rather than left as a convention.

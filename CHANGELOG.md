@@ -8,6 +8,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Changed
 
+- The declared `rich` floor rises from `13` to `13.8.0`. The CLI's broken-pipe policy is built on
+  `Console.on_broken_pipe`, which does not exist before that release, so the previous floor
+  admitted versions where the policy was silently inert. A new `rich-floor` CI leg installs that
+  exact version and runs the CLI suite against it. AD-27 in ARCHITECTURE.md records why `rich`
+  now carries a compatibility leg where it previously carried only a bound.
+
 - The `--no-color` / `NO_COLOR` escape-free promise in README.md is narrowed to human-facing
   output and now names its one exception. No behavior changes: this corrects a documented
   guarantee that was always broader than the engine kept. A repository holding a document whose
@@ -26,6 +32,34 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   the carriage-return and line-feed boundary rather than leaving either written down.
 
 ### Fixed
+
+- A command's exit code no longer depends on which of its output streams survived. Piping
+  `doc-lattice` into a reader that departs early -- `head`, `jq -e`, a shell that closes the pipe
+  -- could put five different wrong codes on the wire, and each is now the code the run actually
+  earned.
+
+  A dead **stderr** kept its diagnostics undelivered but changed the verdict: a genuinely broken
+  lattice reported 141 ("something downstream stopped reading") instead of 2, because every
+  command reports through `exit_on_project_error` before raising its exit, and that report ran
+  unguarded. A run whose only stderr traffic was an advisory finished all of its stdout work and
+  then exited 120 -- CPython's code for a failed shutdown flush -- instead of its own 0 or 1,
+  because the bytes the failed write left buffered were flushed again after every handler had
+  finished. Both now leave the semantic exit code untouched.
+
+  A dead **stdout** exited 1, the code `check` and `lint` reserve for drift, on two paths.
+  `doc-lattice --help` did so because help and usage text are rendered by typer's own consoles,
+  which the previous fix could not reach; `--format json` and `init` did so because they write
+  without going through Rich, and typer converts that particular failure into exit 1 itself. Both
+  now exit 141 silently, as the human-rendered paths already did.
+
+  The fifth path is the entry point's own fallback for an escalated warning raised while importing
+  its reporter. It reports through a plain `sys.stderr` write precisely because the reporter is
+  what failed, and it now neutralizes that stream itself rather than letting a dead one turn its
+  exit 2 into 120.
+
+  AD-40 in ARCHITECTURE.md owns the per-channel policy and amends AD-29, which had recorded the
+  previous uniform one and had claimed the tool-error exit was already retained when a report
+  could not be delivered.
 
 - The load-cache write warning is now one physical stderr line for every failure it can report.
   Both the module boundary and `_write` promise a single line, and the diagnostic built that line

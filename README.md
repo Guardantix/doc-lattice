@@ -97,8 +97,10 @@ and exits 1. Invalid config or lattice frontmatter, unreadable or non-UTF-8 docu
 containment failures, and incoherent ids are tool errors that exit 2. An index is incoherent
 when two files repeat a file id or two headings in one file resolve to the same file-scoped
 anchor. Equal anchors in different files, and a file id equal to another file's anchor, remain
-distinct `TargetId(file_id, anchor)` keys and do not collide. A write refused because the pipe's
-reader closed (for example, piping into `head`) exits 141, printing nothing.
+distinct `TargetId(file_id, anchor)` keys and do not collide. A **stdout** write refused because
+the pipe's reader closed (for example, piping into `head`) exits 141, printing nothing. A refused
+**stderr** write is not an outcome: the diagnostic is dropped and the command still exits on what
+it found, so `2>/dev/null` and a departing log reader leave every code above unchanged.
 
 A Markdown file without an opening `---` fence is valid untracked prose. Once a file opens YAML
 frontmatter with `---`, it must include a closing `---` fence; otherwise every lattice-loading
@@ -869,6 +871,7 @@ scope is applied. Set the team the query targets with `linear_team` in `.doc-lat
 | `0` | Success; no coherent policy or gate finding. |
 | `1` | Coherent finding: lattice drift, an authority inversion, or a Linear gate failure. |
 | `2` | Invalid, unreadable, unsafe, ambiguous, or unreliable tool state, including confirmation refusal, persistence or recovery failure, and an advisory a warning filter escalated to an error. |
+| `141` | Standard output could not be written because its reader departed. Nothing is printed. Only stdout produces this; a dead stderr leaves the code the run had otherwise earned. |
 
 ## Troubleshooting
 

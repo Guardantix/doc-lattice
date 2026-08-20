@@ -125,10 +125,38 @@ def test_runtime_dependency_bounds_match_the_recorded_decisions():
     assert _PYPROJECT["project"]["dependencies"] == [
         "markdown-it-py==4.2.0",
         "typer>=0.12,<1",
-        "rich>=13,<16",
+        "rich>=13.8.0,<16",
         "pydantic>=2,<3",
         "ruamel.yaml>=0.18,<0.20",
     ]
+
+
+def test_the_rich_floor_carries_the_hook_the_broken_pipe_policy_needs():
+    """GTX-201: the declared floor, not just the locked version, has to have the seam.
+
+    ``cli/runtime.py`` implements this CLI's per-channel broken-pipe policy by overriding
+    ``rich.console.Console.on_broken_pipe``. That method does not exist before rich 13.8.0 --
+    verified against the published wheels, where 13.7.1 lacks it and 13.8.0 has it -- so under
+    any earlier release the override is inert, nothing catches the ``BrokenPipeError``, and
+    every case the policy exists to fix returns. The lock only ever installs the ceiling, so a
+    floor that drifted below this would ship unseen.
+
+    This pins the declared floor and nothing else. Correlating it with the version the
+    ``rich-floor`` leg actually installs belongs to
+    ``tests/test_release_workflow.py::test_the_rich_floor_leg_installs_the_declared_floor``,
+    because this module ships in the sdist and so cannot read ``.github/``.
+    """
+    floors = [
+        specifier.removeprefix(">=")
+        for requirement in _PYPROJECT["project"]["dependencies"]
+        if requirement.startswith("rich")
+        for specifier in _specifiers(requirement)
+        if specifier.startswith(">=")
+    ]
+    assert floors == ["13.8.0"], (
+        f"expected a single rich floor of 13.8.0, found {floors}. Lowering it removes "
+        "Console.on_broken_pipe, which AD-27 records as a read compatibility surface."
+    )
 
 
 @pytest.mark.parametrize(

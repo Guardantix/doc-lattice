@@ -1,5 +1,6 @@
 """Tests for per-invocation CLI runtime state."""
 
+import errno
 import os
 import sys
 import warnings
@@ -14,10 +15,13 @@ from typer.testing import CliRunner
 
 import doc_lattice.cli.runtime as runtime_module
 from doc_lattice.cli.application import create_app
+from doc_lattice.cli.pipe_policy import STDERR_FILENO, PipeClosed
 from doc_lattice.cli.runtime import (
     CliConsole,
     CliRuntime,
     LatticeLoader,
+    apply_broken_pipe_policy,
+    broken_pipe_policy,
     default_runtime,
     diagnostic_runtime,
     get_runtime,
@@ -693,3 +697,122 @@ def test_annotation_root_falls_back_to_cwd_when_no_workspace_is_set(tmp_path: Pa
 
     assert no_workspace.workspace is None
     assert no_workspace.annotation_root(document) == tmp_path
+
+
+def test_the_stdout_channel_escalates_a_broken_pipe(tmp_path: Path):
+    # Losing stdout truncates the command's own result, so there is nothing left to finish.
+    del tmp_path
+    console = CliConsole(file=StringIO(), no_color=True, color_system=None)
+
+    with pytest.raises(PipeClosed):
+        apply_broken_pipe_policy(console)
+
+
+def test_the_stderr_channel_answers_a_broken_pipe_in_place():
+    # Losing stderr must not change what the run concludes: the console is silenced, its
+    # unwritten buffer dropped, and control returns so the caller's own exit path continues.
+    stream = _RefusingStream(BrokenPipeError())
+    console = CliConsole(file=stream, stderr=True, no_color=True, color_system=None)
+    console.print("a diagnostic nobody will read")
+
+    apply_broken_pipe_policy(console)
+
+    assert console.quiet is True
+    assert console._buffer == []
+
+
+def test_the_stderr_channel_is_recognized_from_an_explicit_file(monkeypatch):
+    # Typer declares the flag; an embedder may instead hand a console `file=sys.stderr` with the
+    # flag left at its default. Both spellings name the diagnostic channel, so both are read.
+    #
+    # The case only means anything with a console bound to the real file descriptor 2, which is
+    # what the recognition is read from -- and taking the stderr branch neutralizes it, pointing
+    # this process's own stderr at os.devnull. Saved and restored around the call for that
+    # reason: without it the test silences the test runner's stderr for the rest of the session,
+    # which pytest's per-test capture happens to paper over and `-s` does not.
+    saved = os.dup(STDERR_FILENO)
+    try:
+        monkeypatch.setattr(sys, "stderr", sys.__stderr__)
+        console = CliConsole(file=sys.stderr, no_color=True, color_system=None)
+
+        assert console.stderr is False
+        apply_broken_pipe_policy(console)  # returns rather than raising
+
+        assert console.quiet is True
+    finally:
+        os.dup2(saved, STDERR_FILENO)
+        os.close(saved)
+
+
+def test_the_policy_reaches_a_console_this_package_did_not_build():
+    # Help and usage rendering uses typer.rich_utils' plain consoles, built outside
+    # _create_runtime, so CliConsole cannot govern them. Substituting the base-class hook is
+    # what puts them under the same policy without reaching into typer's internals.
+    plain = Console(file=StringIO(), no_color=True, color_system=None)
+    assert plain.on_broken_pipe.__func__ is Console.on_broken_pipe
+
+    with broken_pipe_policy(), pytest.raises(PipeClosed):
+        plain.on_broken_pipe()
+
+    assert plain.on_broken_pipe.__func__ is Console.on_broken_pipe
+
+
+def test_the_policy_is_restored_after_an_exception():
+    # The attribute is process-global and shared with every other consumer of rich in the
+    # process, so it is restored on the exception path for the same reason rendered_warnings
+    # restores warnings.showwarning.
+    sentinel = Console.on_broken_pipe
+
+    def raise_inside_the_policy() -> None:
+        with broken_pipe_policy():
+            assert Console.on_broken_pipe is not sentinel
+            msg = "command blew up"
+            raise RuntimeError(msg)
+
+    with pytest.raises(RuntimeError, match="command blew up"):
+        raise_inside_the_policy()
+
+    assert Console.on_broken_pipe is sentinel
+
+
+def test_the_subclass_keeps_precedence_over_the_installed_policy():
+    # Both call the same function, so this is about ordering rather than behavior: the runtime's
+    # own consoles must not depend on the context manager being active, since the entry point's
+    # diagnostic paths render outside it.
+    console = CliConsole(file=StringIO(), stderr=True, no_color=True, color_system=None)
+
+    with broken_pipe_policy():
+        assert console.on_broken_pipe.__func__ is CliConsole.on_broken_pipe
+
+
+def test_write_stdout_reraises_a_departed_reader_as_pipe_closed(tmp_path: Path):
+    # The one output path that does not go through rich, so no hook governs it and the
+    # BrokenPipeError arrives carrying errno EPIPE -- exactly what typer's `_main` converts into
+    # sys.exit(1), the drift code. It is re-raised so it reaches the entry point's 141 instead.
+    stream = _RefusingStream(BrokenPipeError(errno.EPIPE, "Broken pipe"))
+    runtime = replace(
+        _runtime(StringIO(), StringIO(), tmp_path, no_color=True),
+        stdout=CliConsole(file=stream, no_color=True, color_system=None),
+    )
+
+    with pytest.raises(PipeClosed) as info:
+        runtime.write_stdout('{"findings": []}')
+
+    assert info.value.errno is None
+    assert isinstance(info.value.__cause__, BrokenPipeError)
+    assert info.value.__cause__.errno == errno.EPIPE
+
+
+def test_write_stdout_still_propagates_an_ordinary_write_failure(tmp_path: Path):
+    # Only a departed reader is reclassified. A full disk is a real failure of the run and must
+    # keep reaching the entry point's tool-error mapping rather than the silent 141.
+    stream = _RefusingStream(OSError(errno.ENOSPC, "No space left on device"))
+    runtime = replace(
+        _runtime(StringIO(), StringIO(), tmp_path, no_color=True),
+        stdout=CliConsole(file=stream, no_color=True, color_system=None),
+    )
+
+    with pytest.raises(OSError, match="No space left on device") as info:
+        runtime.write_stdout("payload")
+
+    assert not isinstance(info.value, BrokenPipeError)
