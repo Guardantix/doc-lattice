@@ -1,15 +1,22 @@
 """Render pydantic validation failures as the diagnostic lines this project owns.
 
-Both load boundaries validate user-authored YAML against a strict pydantic model: the config
-file in ``config.py`` and a document's frontmatter in ``frontmatter_parser.py``. Neither hands
-``str(ValidationError)`` to the user, because that renderer emits a ``pydantic.dev`` URL, echoes
-the offending input back, and prefixes domain-authored sentences with its own boilerplate. This
-module owns the replacement so the two boundaries cannot drift apart.
+Three load boundaries validate a user-authored file against a strict pydantic model: the config
+file in ``config.py``, a document's frontmatter in ``frontmatter_parser.py``, and the reconcile
+journal's wire models in ``reconcile_transaction.py``. The first two read YAML and the third
+reads JSON, which changes nothing here: the input is hand-editable either way, and a mapping key
+is untrusted in both. None of them hands ``str(ValidationError)`` to the user, because that
+renderer emits a ``pydantic.dev`` URL, echoes the offending input back, and prefixes
+domain-authored sentences with its own boilerplate. This module owns the replacement so the
+boundaries cannot drift apart.
 
 Dropping the echoed input is not on its own enough to keep repo-controlled bytes out of the
 message, because one part of a pydantic error location is repo-controlled too: a key rejected by
 ``extra="forbid"`` is reported as the location itself. ``_format_location`` therefore spells a
 location part the way AD-34 spells a path.
+
+The caller composes anything that follows the rendered block, rather than passing it on as a
+clause of a larger sentence: the return value is a header plus one line per error, so a suffix
+joined to it would read as part of the last error's message.
 """
 
 from collections.abc import Callable
@@ -79,8 +86,9 @@ def _format_location(location: tuple[int | str, ...], root_label: str) -> str:
 
     pydantic reports an empty location for an error about the input as a whole rather than about
     one field: a validator that runs on the whole model, and also an input that is not a mapping
-    at all, which both boundaries can reach because a YAML file may hold a list or a scalar.
-    Naming a field there would invent one the user never wrote.
+    at all, which every boundary can reach because a YAML file may hold a list or a scalar and a
+    journal is validated from text, so a JSON syntax failure lands here too. Naming a field there
+    would invent one the user never wrote.
 
     Args:
         location: The ``loc`` tuple from one pydantic error.
@@ -99,8 +107,10 @@ def _format_location_part(part: int | str) -> str:
     sequence index is an integer. A key rejected by ``extra="forbid"`` is neither. It is the
     author's text, and safe YAML decodes a double-quoted ``\\u001b`` in a mapping key exactly as
     it does in a value, so an unspelled part puts a raw ESC on the terminal through the very
-    message refusing the key. AD-35 closes that route for a value by refusing it at validation;
-    a rejected key is already refused, so what is left is how the refusal names it.
+    message refusing the key. JSON spells the same escape the same way, which is why the journal
+    boundary shares this renderer rather than its own. AD-35 closes that route for a value by
+    refusing it at validation; a rejected key is already refused, so what is left is how the
+    refusal names it.
 
     The spelling is ``repr`` on the offending part alone, which is AD-34's spelling for a path
     and injective for the same reason. It is applied only where it is needed, so an ordinary

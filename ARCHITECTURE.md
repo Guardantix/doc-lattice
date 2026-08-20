@@ -1362,6 +1362,24 @@ keys at load instead would have been circular, because the new refusal would sti
 name the key. The spelling is AD-34's, and injective for AD-34's reason; the difference is that a
 path is untrusted whole while a location is untrusted in exactly one part.
 
+That reasoning is not about YAML, and GTX-227 extends it to the third file this project validates
+against a strict model: the reconcile journal. `reconcile_transaction.py` reads JSON rather than
+YAML, and it validates against versioned wire models rather than one model, but neither difference
+reaches the premise. JSON spells `\u001b` in a mapping key exactly as safe YAML does, and every
+journal model is `extra="forbid"`, so a hand-edited key arrived on the terminal through
+`_invalid_journal_error`, which interpolated `str(ValidationError)` as a clause of one sentence.
+The journal boundary therefore shares `validation_render` rather than growing a renderer beside it;
+a second copy of this rule would be a second thing to keep right, and it is the duplication the
+module's own docstring exists to prevent. Two things do follow from the boundary's shape. The model
+is bound at each of the three validation stages -- the lax version probe, v1, and v2 -- because the
+accepted-key help is answered from the model that rejected the text, and naming one model for all
+three would offer a v1 journal the keys only v2 accepts. And the remediation sentence is appended
+as its own line rather than interpolated, because the renderer returns a header plus one line per
+error, so a suffix joined to that block would read as part of the last error's message rather than
+as a property of the failure. `_invalid_journal_error` is unchanged for the project-constructed
+causes it still serves: an `OSError`, a containment or path-role refusal, and the
+unsupported-version refusal, none of which carry author text.
+
 Machine channels are excluded on the same reasoning AD-34 records, and the exclusion means
 something different under this decision: JSON output and the GitHub annotation encoder are
 unchanged for every document that still loads, and a refused document fails uniformly before
@@ -1504,13 +1522,17 @@ AD-35's. A display strategy is only as complete as its sink list, so AD-34's gua
 having many sinks across many modules; provenance has exactly one renderer in one adapter, and the
 behavioral tests over it are what pin the spelling.
 
-This record covers the provenance display path and nothing else. It does not close the journal's
-own load diagnostic, which is a separate sink: `_invalid_journal_error` interpolates a pydantic
-`ValidationError` verbatim, and while that formatter renders a rejected *input value* through
-`repr`, it renders an error *location* raw, so a control-bearing extra key in a hand-edited journal
-still reaches stderr unspelled. That is the shape AD-35 closed for frontmatter with
-`_format_location_part`, unclosed at this boundary, and it is GTX-227's rather than an extension of
-this one.
+This record covers the provenance display path and nothing else. The journal's own load diagnostic
+is a separate sink, and it was open when this record was written: `_invalid_journal_error`
+interpolated a pydantic `ValidationError` verbatim, and while that formatter renders a rejected
+*input value* through `repr`, it renders an error *location* raw, so a control-bearing extra key in
+a hand-edited journal reached stderr unspelled. **GTX-227 closes that half**, and it closes it under
+AD-35 rather than by extending this record: the journal's wire-model failures now render through
+`validation_render`, which is where `_format_location_part` already spells exactly that shape.
+Nothing here moves. The wire model still refuses no control byte, provenance is still spelled at the
+sink that prints it, and the axis this record states is what sends the two halves to different
+answers -- provenance is a value the journal records, while a rejected key is the diagnostic's own
+naming of what it refused.
 
 
 ### AD-37: A YAML load failure's message is spelled whole, at the sink that reports it
