@@ -24,7 +24,7 @@ breaking, so the window is open again as a fact rather than by choice, and the n
 Admission is unchanged and still narrow on purpose: an item belongs here only if it is breaking,
 or if it has to be true at the moment a major ships. Everything else waits for 6.x, which is what
 keeps this release from staying open indefinitely. Applying that rule moved six issues back in
-from the minor train, so ten are open here rather than four. Start with the two groups below that
+from the minor train, so nine are open here rather than three. Start with the two groups below that
 GTX-113 waits on.
 
 - Report a bad `--docs-root` or `--linear-team` from `init` as `VALIDATION_ERROR` rather than
@@ -53,11 +53,6 @@ GTX-113 waits on.
   (GTX-213), so the preamble's claim that every open issue sits in exactly one release project is
   something a sweep confirms rather than something a hand pass asserted. The 5.0.0 boundary is
   what showed the claim was unchecked: it moved without this section moving with it.
-- Confirm on a published artifact that step 1 of [MANAGED_CI.md](MANAGED_CI.md) exits 0 against
-  the 5.0 pin (GTX-169). GTX-164's walk found it exits 2 on every release available at the time,
-  and the recipe is the sole installation path. 5.0.0 is published, so a failure there is a defect
-  in a released artifact rather than something that can block it, and takes the recovery path
-  [RELEASING.md](RELEASING.md) owns.
 
 ## 6.x: make the honor-system rules mechanical
 
