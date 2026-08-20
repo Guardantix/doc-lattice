@@ -25,8 +25,8 @@ breaking, so the window is open again as a fact rather than by choice, and the n
 Admission is unchanged and still narrow on purpose: an item belongs here only if it is breaking,
 or if it has to be true at the moment a major ships. Everything else waits for 6.x, which is what
 keeps this release from staying open indefinitely. Applying that rule admitted nine here rather
-than three, six of them moved back in from the minor train; eight are still open, since GTX-238
-has landed. Start with the two groups below that GTX-113 waits on.
+than three, six of them moved back in from the minor train; seven are still open, since GTX-238
+and GTX-202 have landed. Start with the two groups below that GTX-113 waits on.
 
 - Report a bad `--docs-root` or `--linear-team` from `init` as `VALIDATION_ERROR` rather than
   `CONFIG_ERROR` (GTX-216). It is the last raise site in that file naming a command-line value
@@ -42,12 +42,14 @@ has landed. Start with the two groups below that GTX-113 waits on.
   issue rather than widening its own scope, so it is sequenced by a recorded decision rather than
   by preference. None of the three sequences against another. Landing them here is what keeps the
   promise GTX-214 narrowed true at every sink the README pass is about to document.
-- Settle the two edge cases where what breaks is the run's own contract rather than a spelling: a
-  broken stderr pipe (GTX-201), and `PYTHONWARNINGS=error` (GTX-202). They moved with the four
-  above, on a stricter reading of the same rule, since an exit status is as much a contract as a
-  printed string. Neither sequences against the other.
+- Settle the one remaining edge case where what breaks is the run's own contract rather than a
+  spelling: a broken stderr pipe (GTX-201). It moved with the sinks above, on a stricter reading of
+  the same rule, since an exit status is as much a contract as a printed string. It was paired
+  here with `PYTHONWARNINGS=error` (GTX-202), which is now in `## [Unreleased]`: the entry point
+  catches `Warning` beside `ProjectError` and reports it as a coded error exiting 2 (AD-39).
+  Neither sequenced against the other, so the pairing was a shared rationale rather than an order.
 - Make README describe what 6.0 actually prints and enforces (GTX-113). This still lands last.
-  Six open issues now block it -- GTX-216 and the five above -- on the rule that the README pass
+  Five open issues now block it -- GTX-216 and the four above -- on the rule that the README pass
   cannot land ahead of the behavior it documents; every other blocker either shipped in 5.0.0 or is
   already in `## [Unreleased]`.
 - Bring this document and the release dependency graph back into agreement with what is open

@@ -110,3 +110,17 @@ class InitPersistenceError(ProjectError):
 
     def __init__(self, message: str) -> None:
         super().__init__(message, code="INIT_PERSISTENCE")
+
+
+class EscalatedWarningError(ProjectError):
+    """A warning filter turned an advisory into an exception, ending the run.
+
+    The engine never raises this: it is constructed at the command-line boundary from a
+    ``Warning`` that reached it as an exception, which is what ``PYTHONWARNINGS=error`` and
+    ``-W error`` make every warning do. It lives here rather than in the CLI package because
+    every code in the printed domain belongs to a type in this module, and a library consumer
+    matching on ``WARNING_AS_ERROR`` matches on this one.
+    """
+
+    def __init__(self, message: str) -> None:
+        super().__init__(message, code="WARNING_AS_ERROR")

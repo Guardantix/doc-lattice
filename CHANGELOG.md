@@ -27,6 +27,31 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Fixed
 
+- Running any command under `PYTHONWARNINGS=error` (or `-W error`) no longer ends in a Python
+  traceback naming this package's own source and exiting 1, the code `check` and `lint` reserve
+  for drift. That setting does not suppress or display a warning, it raises the warning instance
+  as an exception, and no handler at the entry point matched it. README documents
+  `PYTHONWARNINGS` as a supported control, so the escalating form has to land on the same
+  contract as every other failure, and it now does: one `error (WARNING_AS_ERROR): <Category>:
+  <message>` line and exit 2.
+
+  The new `WARNING_AS_ERROR` code joins the printed error-code domain; nothing raises it except
+  this mapping. The category name leads the message because it is the handle an escalating filter
+  is written against, and a note records that a filter rather than a document ended the run.
+
+  The repair is at the command-line boundary and touches no warning emission: every category,
+  filter, and message is unchanged, ordinary runs are byte-identical, and a library consumer
+  calling `load_lattice()` directly still receives the raised warning itself. Catching the base
+  `Warning` class is what makes the coverage complete rather than site-by-site -- it reaches this
+  engine's four warning sites, the two paths where ruamel raises its own `ReusedAnchorWarning`
+  directly (config loading and `reconcile`'s rewrite reread), and any category a dependency adds
+  later. AD-39 in ARCHITECTURE.md owns the reasoning and amends AD-29, which had recorded the
+  traceback as a measured, accepted cost.
+
+  Escalating remains a way to make any advisory fatal, not a way to make one fatal on its own:
+  the filters decide which warnings are raised, and the first one raised is the one that ends the
+  run.
+
 - A `--config` path, a cache location, and a `--docs-root` value carrying a terminal control
   character no longer reach human-facing output raw. Running `check --config` against a config
   named with an embedded escape sequence printed those bytes verbatim under `NO_COLOR`, so a

@@ -560,8 +560,8 @@ def test_main_exits_silently_with_141_on_a_broken_pipe(monkeypatch, capsys):
 )
 @pytest.mark.parametrize(
     "exc",
-    [ConfigError("cfg"), RuntimeError("loop")],
-    ids=["project-error", "internal-error"],
+    [ConfigError("cfg"), RuntimeError("loop"), UserWarning("advisory")],
+    ids=["project-error", "internal-error", "escalated-warning"],
 )
 def test_main_exits_cleanly_when_stderr_refuses_the_error_report(monkeypatch, exc, stream_error):
     # An exception raised inside an `except` clause is never retried against a sibling
@@ -584,6 +584,65 @@ def test_main_exits_cleanly_when_stderr_refuses_the_error_report(monkeypatch, ex
         cli_mod.main()
 
     assert info.value.code == 2
+
+
+class _DependencyWarning(Warning):
+    """Stands in for a category a dependency declares, such as ruamel's ``ReusedAnchorWarning``.
+
+    Declared here rather than imported so the case stays about the base class the boundary
+    catches: a dependency that renames or reparents its own category must not change what this
+    asserts.
+    """
+
+
+@pytest.mark.parametrize(
+    "exc",
+    [
+        UserWarning("skipping 'docs/x.md': its frontmatter declares no 'id'"),
+        DeprecationWarning("a dependency deprecated something"),
+        _DependencyWarning("found duplicate anchor 't'"),
+    ],
+    ids=["engine-category", "stdlib-category", "dependency-category"],
+)
+def test_main_renders_an_escalated_warning_as_a_coded_project_error(monkeypatch, capsys, exc):
+    # Three categories from three owners, because catching the base `Warning` is what makes the
+    # mapping complete: no shared engine category exists to keep in sync, and the two paths
+    # AD-29 leaves outside the strict frontmatter boundary raise a dependency's own class.
+    def boom():
+        raise exc
+
+    monkeypatch.setenv("NO_COLOR", "1")
+    monkeypatch.setattr(cli_mod, "app", boom)
+
+    with pytest.raises(SystemExit) as info:
+        cli_mod.main()
+
+    assert info.value.code == 2  # never 1, which check reserves for drift
+    assert capsys.readouterr().err == (
+        f"error (WARNING_AS_ERROR): {type(exc).__name__}: {exc}; a warning filter escalated "
+        "this advisory to an error, so the run stopped here instead of continuing past it\n"
+    )
+
+
+def test_main_maps_a_warning_escalated_while_loading_the_application(monkeypatch, capsys):
+    # `_load_app()` imports every engine module and their dependencies, so under an escalating
+    # filter a deprecation raised at import time is an escalated warning like any other. It sits
+    # inside the guarded block for that reason; run before it, this case is a bare traceback.
+    def boom():
+        raise DeprecationWarning("imported module is deprecated")
+
+    monkeypatch.setenv("NO_COLOR", "1")
+    monkeypatch.setattr(cli_mod, "_load_app", boom)
+
+    with pytest.raises(SystemExit) as info:
+        cli_mod.main()
+
+    assert info.value.code == 2
+    assert capsys.readouterr().err == (
+        "error (WARNING_AS_ERROR): DeprecationWarning: imported module is deprecated; a warning "
+        "filter escalated this advisory to an error, so the run stopped here instead of "
+        "continuing past it\n"
+    )
 
 
 def test_main_maps_non_callable_app_to_internal_error(monkeypatch, capsys):

@@ -45,11 +45,12 @@ def main() -> None:
     """Run the console application with lazy no-color and error setup.
 
     Intended ``SystemExit`` values raised by Typer propagate unchanged. Mapped project or
-    internal errors exit 2. A broken pipe exits 141 silently.
+    internal errors exit 2, as does a warning an escalating filter raised in place of
+    displaying it. A broken pipe exits 141 silently.
 
     Raises:
-        SystemExit: With exit code 2 for mapped project or internal errors, or 141 for a
-            broken pipe.
+        SystemExit: With exit code 2 for mapped project, escalated-warning, or internal
+            errors, or 141 for a broken pipe.
     """
     no_color = "--no-color" in sys.argv[1:] or os.environ.get("NO_COLOR", "") != ""
     if no_color:
@@ -60,13 +61,18 @@ def main() -> None:
     from .errors import (  # noqa: PLC0415
         EXIT_PIPE_CLOSED,
         EXIT_TOOL_ERROR,
+        escalated_warning_error,
         print_internal_error,
         print_project_error,
     )
     from .runtime import diagnostic_runtime  # noqa: PLC0415
 
-    application = _load_app()
     try:
+        # Inside the guarded block, not before it: importing the application reaches every
+        # engine module and its dependencies, and under an escalating warning filter a
+        # deprecation raised at import time is exactly the traceback the `Warning` clause
+        # below exists to replace. Loading it here costs nothing, since the export is cached.
+        application = _load_app()
         if not callable(application):
             msg = "CLI application is not callable"
             raise RuntimeError(msg)
@@ -92,6 +98,17 @@ def main() -> None:
             os.dup2(devnull, sys.stdout.fileno())
             os.dup2(devnull, sys.stderr.fileno())
         raise SystemExit(EXIT_PIPE_CLOSED) from exc
+    except Warning as exc:
+        # `PYTHONWARNINGS=error` and `-W error` raise the warning instance rather than
+        # displaying it, and CPython does that before consulting `showwarning`, so AD-29's
+        # renderer is unreachable and no engine-side change could catch it. Catching the base
+        # class is what makes the mapping complete: it covers this engine's own warning family
+        # and the ones ruamel raises directly from `config.py` and `reconcile`'s reread, with no
+        # shared category to keep in sync and no emission site touched. Ordinary runs never
+        # reach here, because an unescalated warning is displayed and never raised.
+        with suppress(OSError, ValueError):
+            print_project_error(diagnostic_runtime(no_color=no_color), escalated_warning_error(exc))
+        raise SystemExit(EXIT_TOOL_ERROR) from exc
     except (OSError, RuntimeError, ValueError) as exc:
         with suppress(OSError, ValueError):
             print_internal_error(diagnostic_runtime(no_color=no_color), exc)
