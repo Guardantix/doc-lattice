@@ -6,7 +6,34 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Migration
+
+One thing to act on, and it applies only to a caller that reads the printed error code rather than
+the message. Every value `init` validates before it writes anything now exits with
+`VALIDATION_ERROR` instead of `CONFIG_ERROR`. That covers four inputs, and all four move together:
+an unsafe or empty or control-bearing `--docs-root`, a `--linear-team` that is not a Linear team
+key or is empty or control-bearing, a `--default-branch` outside the supported branch-name domain,
+and a branch name the local `origin/HEAD` probe discovered that fails the same domain. The
+probed candidate is not a command-line value, but it is still an input the run validated, and
+`CONFIG_ERROR` named a config file `init` has not written at that point and never reads.
+
+Repoint anything matching on the printed code, and anything catching `ConfigError` around
+`doc_lattice.cli.git_repository.validate_default_branch` or around `init`'s flag validation, at
+`ValidationError`. It is a sibling of `ConfigError`, not a subclass, so an existing
+`except ConfigError` stops catching it. Catching `ProjectError` keeps working unchanged. The exit
+status is unchanged at 2, the messages are unchanged, and no other command's error-code mapping
+moves. See **Changed** below.
+
 ### Changed
+
+- A rejected `init` input now reports `VALIDATION_ERROR` rather than `CONFIG_ERROR`. `init` writes
+  `.doc-lattice.yml` and never reads one, so a bad `--docs-root`, `--linear-team`, or
+  `--default-branch` was pointing the user at a file that did not exist yet and had nothing to do
+  with the failure. A branch name the local `origin/HEAD` probe discovered and then failed the
+  branch-name policy moves with the flag rather than keeping the old code on one side of the same
+  validator. This completes the boundary that 5.0 started: `FRONTMATTER_ERROR` took the load
+  boundary and `INIT_PERSISTENCE` took `init`'s write boundary, leaving the values `init` checks
+  before either as the last ones naming config. See **Migration** above.
 
 - The declared `rich` floor rises from `13` to `13.8.0`. The CLI's broken-pipe policy is built on
   `Console.on_broken_pipe`, which does not exist before that release, so the previous floor
