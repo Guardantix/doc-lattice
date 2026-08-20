@@ -1353,15 +1353,15 @@ def test_reconcile_rewrite_warnings_use_the_same_stderr_voice_as_the_load(tmp_pa
         check=False,
     )
 
-    # Never Python's default formatter, whichever way the strict load resolved this document.
+    # Never Python's default formatter, at either of the two warning sites.
     assert "ReusedAnchorWarning" not in completed.stderr
     assert "composer.py" not in completed.stderr
     assert "site-packages" not in completed.stderr
-    if completed.returncode == 0:
-        # The pure-parser cell, where the load warns instead of raising: the reread warns too,
-        # and both arrive in this voice. On the clib cell the strict load rejects the document
-        # before any rewrite, so there is nothing to render and only the negatives above hold.
-        assert "warning: found duplicate anchor 'shared'" in completed.stderr
+    # AD-33 pins the strict load to the pure parser, which warns and rebinds rather than
+    # refusing this document, so the rewrite phase is reached on both cells of the
+    # yaml-compatibility leg and both warnings arrive in this voice.
+    assert completed.returncode == 0
+    assert "warning: found duplicate anchor 'shared'" in completed.stderr
 
 
 def test_reconcile_reread_warning_escalated_to_an_error_lands_on_the_coded_contract(
