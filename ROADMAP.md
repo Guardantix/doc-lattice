@@ -17,15 +17,16 @@ drift apart. An item with no stated dependency has none.
 
 5.0.0 shipped ahead of this section rather than at the end of it: six admitted items were still
 open at the tag. Two of them, GTX-212 and GTX-214, have landed on main since and wait in
-`## [Unreleased]`, where [CHANGELOG.md](CHANGELOG.md) records what they changed. GTX-212 is
+`## [Unreleased]`, where [CHANGELOG.md](CHANGELOG.md) records what they changed; GTX-238, which
+GTX-212's own review spawned into this section, has landed and waits there with them. GTX-212 is
 breaking, so the window is open again as a fact rather than by choice, and the next version is
 6.0.0.
 
 Admission is unchanged and still narrow on purpose: an item belongs here only if it is breaking,
 or if it has to be true at the moment a major ships. Everything else waits for 6.x, which is what
-keeps this release from staying open indefinitely. Applying that rule moved six issues back in
-from the minor train, so nine are open here rather than three. Start with the two groups below that
-GTX-113 waits on.
+keeps this release from staying open indefinitely. Applying that rule admitted nine here rather
+than three, six of them moved back in from the minor train; eight are still open, since GTX-238
+has landed. Start with the two groups below that GTX-113 waits on.
 
 - Report a bad `--docs-root` or `--linear-team` from `init` as `VALIDATION_ERROR` rather than
   `CONFIG_ERROR` (GTX-216). It is the last raise site in that file naming a command-line value
@@ -33,20 +34,20 @@ GTX-113 waits on.
   and it is here for the reason GTX-112 and GTX-198 were: GTX-113 rewrites README against the
   codes the release actually prints, and moving a documented code afterwards would be a break in
   a minor.
-- Close the four output sinks 5.0's group did not reach: reconcile's post-load re-parse warning
-  (GTX-200), the load-cache write warning (GTX-221), the journal's own validation diagnostic
-  (GTX-227), and reconcile's lock diagnostics (GTX-238). They moved here from the minor train
-  because each changes the spelling of something the engine prints, which is the ground that
-  admitted GTX-212. AD-36 leaves GTX-227's sink to that issue rather than widening its own scope,
-  so it is sequenced by a recorded decision rather than by preference. None of the four sequences
-  against another. Landing them here is what keeps the promise GTX-214 narrowed true at every sink
-  the README pass is about to document.
+- Close the three output sinks still open of the four 5.0's group did not reach: reconcile's
+  post-load re-parse warning (GTX-200), the load-cache write warning (GTX-221), and the journal's
+  own validation diagnostic (GTX-227). Reconcile's lock diagnostics (GTX-238) were the fourth and
+  have landed. They moved here from the minor train because each changes the spelling of something
+  the engine prints, which is the ground that admitted GTX-212. AD-36 leaves GTX-227's sink to that
+  issue rather than widening its own scope, so it is sequenced by a recorded decision rather than
+  by preference. None of the three sequences against another. Landing them here is what keeps the
+  promise GTX-214 narrowed true at every sink the README pass is about to document.
 - Settle the two edge cases where what breaks is the run's own contract rather than a spelling: a
   broken stderr pipe (GTX-201), and `PYTHONWARNINGS=error` (GTX-202). They moved with the four
   above, on a stricter reading of the same rule, since an exit status is as much a contract as a
   printed string. Neither sequences against the other.
 - Make README describe what 6.0 actually prints and enforces (GTX-113). This still lands last.
-  Seven open issues now block it -- GTX-216 and the six above -- on the rule that the README pass
+  Six open issues now block it -- GTX-216 and the five above -- on the rule that the README pass
   cannot land ahead of the behavior it documents; every other blocker either shipped in 5.0.0 or is
   already in `## [Unreleased]`.
 - Bring this document and the release dependency graph back into agreement with what is open
