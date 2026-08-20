@@ -498,6 +498,15 @@ outside the project root opens with the same `skipping ` prefix, so filtering on
 too. The report is identical whether the load was accelerated by the
 [load cache](#load-cache-opt-in) or not.
 
+An escalating filter is supported the same way. Under `PYTHONWARNINGS=error` (or `-W error`)
+Python raises the warning instead of displaying it, which ends the command, and doc-lattice
+reports that as `error (WARNING_AS_ERROR): <Category>: <the warning's message>` and exits 2. The
+category name leads the line because it is the handle your filter is written against. This holds
+for every warning a run can raise, including the ones its dependencies raise rather than
+doc-lattice itself. Escalating is therefore a way to make any advisory fatal, but not a way to
+make one fatal on its own: the filters select which warnings are raised, and the first one raised
+is the one that ends the run.
+
 Section ids are optional: a heading is addressed by its GitHub slug by default (e.g.
 `## Error Handling` resolves to `error-handling`). An explicit marker must be the trailing heading
 token and match `{#[A-Za-z0-9][A-Za-z0-9_-]*}`; a whitespace-separated ATX closing sequence may
@@ -859,7 +868,7 @@ scope is applied. Set the team the query targets with `linear_team` in `.doc-lat
 |------|---------|
 | `0` | Success; no coherent policy or gate finding. |
 | `1` | Coherent finding: lattice drift, an authority inversion, or a Linear gate failure. |
-| `2` | Invalid, unreadable, unsafe, ambiguous, or unreliable tool state, including confirmation refusal and persistence or recovery failure. |
+| `2` | Invalid, unreadable, unsafe, ambiguous, or unreliable tool state, including confirmation refusal, persistence or recovery failure, and an advisory a warning filter escalated to an error. |
 
 ## Troubleshooting
 
@@ -908,6 +917,14 @@ status is unchanged. Expected when a docs root holds frontmatter belonging to an
 the file with `ignore_globs` to silence it precisely; see
 [Files with no `id`](#files-with-no-id) for why the `PYTHONWARNINGS` alternatives are blunter than
 they look.
+
+**`error (WARNING_AS_ERROR): ...` exits 2.** A warning filter escalated an advisory into an
+exception, so the command stopped where it would otherwise have continued. Something in the
+environment is setting `PYTHONWARNINGS=error` or passing `-W error`; the run is reporting the
+first warning that filter raised, and the category the line names is what the filter matched. Drop
+the escalation, or narrow it so this category is not caught, and the run continues past the
+advisory as before. A dependency's own category can appear here as well as doc-lattice's
+`UserWarning`, because the escalation applies to every warning a run raises.
 
 **`duplicate id ...` exits 2.** A duplicate id makes the index incoherent, so loading the lattice
 fails with exit 2 (a tool error, distinct from the exit 1 that `check` and `lint` use for drift).

@@ -705,10 +705,15 @@ has one write of its own to answer for, though: flushing already-buffered stdout
 same `BrokenPipeError` again, and the interpreter's own shutdown flush of the now-dead stream
 would otherwise print exactly the "Exception ignored" noise this handler exists to suppress, so
 it points both stdout and stderr at `os.devnull` before returning.
-Costs survive it. Under `PYTHONWARNINGS=error` the warning escapes the entry point's
-`ProjectError` mapping entirely, printing a traceback and exiting 1, the code otherwise reserved
-for drift: it is raised before `showwarning` is consulted, so no hook can reach it, and that is
-why the exit-status guarantee below is stated for ordinary warning configuration. And replacing
+Costs survive it. Under `PYTHONWARNINGS=error` the warning is raised before `showwarning` is
+consulted, so no hook can reach it and no substitution made here can present it; that is why the
+exit-status guarantee below is stated for ordinary warning configuration. What that cost was is
+now narrower than this record originally set down. It escaped the entry point's `ProjectError`
+mapping entirely, printing a traceback and exiting 1, the code otherwise reserved for drift, and
+**AD-39 amends that half**: the entry point catches `Warning` beside `ProjectError` and reports it
+as a coded `WARNING_AS_ERROR` error exiting 2. Nothing here changes -- no emission site, category,
+filter, or `showwarning` substitution moves -- because the repair belongs at the boundary rather
+than at the sites this record owns. And replacing
 `showwarning` takes the warning out of reach of anything that records rather than prints it:
 CPython dispatches to the substitute instead of the recording branch, so a `catch_warnings(record=True)`
 around a wrapped phase collects nothing and an embedder's `logging.captureWarnings(True)` router is
@@ -1673,3 +1678,109 @@ end-to-end case built on an `ESC`-bearing filename cannot catch that error: ever
 exercises is on the raw side of the boundary. A public guarantee narrowed too far is its own
 defect, so the two code points that keep their encoding are pinned as deliberately as the ones
 that do not.
+
+### AD-39: An escalated warning is caught at the CLI boundary, not translated at its sites
+
+**Date:** 2026-08-19
+**Status:** Accepted
+**Context:** AD-29 raises this engine's skip, reused-anchor, and duplicate-`derives_from`
+diagnostics through `warnings` rather than through AD-9's `CliRuntime.stderr`, so that
+`PYTHONWARNINGS` can suppress them; README documents that setting as a supported control. It has
+a third form. `PYTHONWARNINGS=error` and `-W error` do not suppress or display a warning, they
+raise the warning instance as an exception, and CPython does that before the replaceable
+`showwarning` stage. `main()` mapped `ProjectError`, `BrokenPipeError`, and
+`(OSError, RuntimeError, ValueError)`; `Warning` derives from `Exception` and matches none of
+them, so an escalated advisory left the entry point as an unhandled traceback naming this
+package's own source and exiting 1, the code `check` reserves for drift. A documented control
+therefore produced the one exit status the 0/1/2 contract cannot afford to be ambiguous about,
+and printed a maintainer's traceback where every other failure prints `error (CODE): ...`.
+
+The decision is where the repair goes. The alternative considered was a shared project warning
+category the boundary could recognize, with each `warnings.warn` site translated to it. It is
+wider and still incomplete. Wider, because AD-33 treats the existing categories and filter
+behavior as observable, so changing what a site raises changes what an adopter's filters match.
+Incomplete, because the sites are not the whole population: `config.py` asks ruamel for the
+platform-default parser per AD-33 and `reconcile`'s rewrite reread builds its own loader per
+AD-26, and both let ruamel's own `ReusedAnchorWarning` escape unchanged, as AD-29 records. Any
+dependency this engine imports can raise a category nobody here declares, and a per-site
+translation has to be extended for each new one or silently regress.
+
+**Decision:** `main()` catches the base `Warning` beside its existing clauses and reports it
+through `print_project_error` as `EscalatedWarningError`, a `ProjectError` carrying the new
+`WARNING_AS_ERROR` code, exiting 2. Nothing about emission moves: no site changes category, no
+filter is reimplemented, no `showwarning` substitution is touched, and a library consumer calling
+`load_lattice()` directly still gets the raised warning. Ordinary runs never reach the clause,
+because an unescalated warning is displayed rather than raised.
+
+Catching the base class is the point rather than a shortcut. It covers this engine's warning
+family, the two dependency-raised paths AD-29 names, and every category a dependency may add
+later, with one clause and nothing to keep in sync. `print_internal_error` was rejected as the
+renderer: it prints an uncoded `internal error` line, and an escalated advisory is a consequence
+of the caller's own configuration rather than a defect in this tool, so it belongs on the coded
+grammar `print_project_error` owns.
+
+The rendered message leads with the warning's category name, which `CliRuntime._render_warning`
+deliberately discards for a displayed warning. The two diagnostics answer different questions. A
+displayed advisory is addressed to someone reading about their documents, where the category is
+noise; this one is addressed to whoever configured the filter that stopped the run, and the
+category is the handle that configuration is written against. The warning's own message follows,
+and a note records that a filter, not the document, ended the run.
+
+Import time is guarded too, and it takes two regions rather than one. `_load_app()` moves inside
+the main block, since an import-time deprecation from a command adapter is an escalated warning
+like any other. That alone is not enough, and the first draft of this record claimed otherwise:
+the boundary's own support imports run before that block, and `from .errors import ...` reaches
+`cli/runtime.py`, which reaches `config` and `orchestrate` -- 25 engine modules plus ruamel,
+markdown-it, rich, and typer, every one of them imported while still unguarded. Those imports
+therefore get a guard of their own.
+
+That second guard cannot report through `print_project_error`, because that function is exactly
+what failed to import. It writes the same `error (CODE): ...` line to `sys.stderr` directly and
+exits 2. `escape` is not applied and does not need to be: it neutralizes Rich markup that Rich
+then renders back, so a terminal receives the same bytes either way, and nothing on this path
+goes through Rich. `EXIT_TOOL_ERROR` is unavailable for the same reason, so the literal `2` is
+used and pinned equal to the constant by a test.
+
+Building that message needs a chain that cannot itself fail, which is why
+`escalated_warning_error` lives in `error_types.py` rather than beside the rest of the boundary's
+rendering in `cli/errors.py`. `error_types` imports `constants`, and `constants` imports
+`typing`. That two-module chain is the residual, and it is accepted rather than closed: a warning
+escalated while importing it would still be an unhandled traceback, but neither module imports a
+dependency or contains a `warnings.warn` site, so there is nothing there to raise one, and a
+guard for it would need a third chain with the same problem one level further down.
+
+**Consequences:** `PYTHONWARNINGS=error` is now a supported way to make any advisory fatal, and
+lands on the same contract as every other tool error: exit 2, one `error (CODE): ...` line, no
+traceback naming this package. It is not a way to make one advisory fatal on its own. The filters
+select which warnings are raised and the first one raised ends the run, so a corpus that trips two
+sites reports only whichever the load reaches first. That is visible in the reconcile reread's own
+coverage: a document whose frontmatter reuses an anchor raises this engine's advisory during the
+strict load, so reaching the reread's `ReusedAnchorWarning` at all takes a filter that ignores the
+first and escalates the rest. The suite exercises exactly that pair rather than asserting the
+reread is reachable under a bare `error`, which it is not.
+
+The `config.py` path is covered by the same clause, but which diagnostic a reader sees there is a
+property of the environment rather than of this engine, because the `platform-default` request
+AD-33 records takes the C accelerator wherever it is installed. The two cells of the
+`yaml-compatibility` leg do not merely differ in whether a warning is shown; they diverge before
+any filter applies. Ruamel's pure composer treats a reused anchor as a warning, so an escalating
+filter reaches it and the run reports `WARNING_AS_ERROR`. The accelerator refuses the same
+document outright, so the config boundary raises `ConfigError` and no warning is ever reached.
+Both cells exit 2 with no traceback, which is exactly why the test branches on the parser in hand
+rather than on the exit code: keying on the code would take the accelerator's `CONFIG_ERROR` for
+the warning path. Each cell's line is pinned rather than one of them skipped, since what the
+accelerator leg proves is that this boundary still lands on the coded contract by its own route.
+
+The cost is that `main()` now maps a category of exception it does not own and cannot enumerate.
+A dependency that raises a warning during ordinary operation, under an escalating filter, is
+reported as this tool's coded error rather than as that dependency's traceback, which is less
+information for someone debugging the dependency. That is accepted: the traceback was never the
+contract, the exception chain preserves the original via `raise ... from exc`, and a user who
+wants the traceback has the same lever they used to escalate.
+
+The escape-free promise AD-38 narrowed is unaffected in both directions. An engine warning's
+message already carries its path through `format_path_for_display` per AD-34, so the escaped
+spelling is what reaches this line. A dependency's message is passed through as it was written,
+which is what `CliRuntime._render_warning` already does for the same warning when it is displayed
+rather than raised; this record moves that text between two sinks and does not widen what reaches
+either.

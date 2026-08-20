@@ -110,3 +110,53 @@ class InitPersistenceError(ProjectError):
 
     def __init__(self, message: str) -> None:
         super().__init__(message, code="INIT_PERSISTENCE")
+
+
+class EscalatedWarningError(ProjectError):
+    """A warning filter turned an advisory into an exception, ending the run.
+
+    The engine never raises this: it is constructed at the command-line boundary from a
+    ``Warning`` that reached it as an exception, which is what ``PYTHONWARNINGS=error`` and
+    ``-W error`` make every warning do. It lives here rather than in the CLI package because
+    every code in the printed domain belongs to a type in this module, and a library consumer
+    matching on ``WARNING_AS_ERROR`` matches on this one.
+    """
+
+    def __init__(self, message: str) -> None:
+        super().__init__(message, code="WARNING_AS_ERROR")
+
+
+def escalated_warning_error(exc: Warning) -> EscalatedWarningError:
+    """Restate a warning that a filter escalated to an exception as a coded project error.
+
+    ``PYTHONWARNINGS=error`` and ``-W error`` raise the warning instance itself, and CPython
+    does that before the replaceable ``showwarning`` stage, so AD-29's stderr renderer never
+    sees one and cannot present it. Without this, the escalated advisory leaves the entry point
+    as an unhandled traceback naming this package's own source and exits 1, the code ``check``
+    reserves for drift. Restating it here is what puts it back on the ``error (CODE)`` contract
+    the rest of the boundary prints.
+
+    This lives beside the exception rather than in ``cli/errors.py``, where the rest of the
+    boundary's rendering does, because ``cli/errors.py`` reaches ``cli/runtime.py`` and through
+    it the whole engine and its dependencies. The entry point has to be able to report a warning
+    escalated while importing exactly that chain, so the message it prints then cannot be built
+    by it. This module imports only ``constants``, which imports only ``typing``.
+
+    The category name leads the message even though ``CliRuntime._render_warning`` deliberately
+    discards it for a displayed warning. The two diagnostics answer different questions: a
+    displayed advisory is addressed to someone reading about their documents, while this one is
+    addressed to someone who configured the filter that stopped the run, and the category is the
+    handle that configuration is written against.
+
+    Args:
+        exc: The warning instance a filter raised in place of displaying it.
+
+    Returns:
+        The coded project error to render and exit on.
+    """
+    error = EscalatedWarningError(f"{type(exc).__name__}: {exception_details(exc).strip()}")
+    error.add_note(
+        "a warning filter escalated this advisory to an error, so the run stopped here instead "
+        "of continuing past it"
+    )
+    return error

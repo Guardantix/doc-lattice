@@ -1362,3 +1362,50 @@ def test_reconcile_rewrite_warnings_use_the_same_stderr_voice_as_the_load(tmp_pa
         # and both arrive in this voice. On the clib cell the strict load rejects the document
         # before any rewrite, so there is nothing to render and only the negatives above hold.
         assert "warning: found duplicate anchor 'shared'" in completed.stderr
+
+
+def test_reconcile_reread_warning_escalated_to_an_error_lands_on_the_coded_contract(
+    tmp_path: Path,
+):
+    """The second of the two dependency-raised paths AD-29 names, reached end to end.
+
+    A bare ``PYTHONWARNINGS=error`` cannot reach it. This document's frontmatter reuses an
+    anchor, so the strict load raises this engine's own ``reused anchor in`` advisory first and
+    the run now exits 2 there, before any rewrite is planned. Silencing that one warning is what
+    leaves the reread as the only site left to raise: ``PYTHONWARNINGS`` entries are processed
+    left to right and each is inserted at the front of the filter list, so the rightmost wins,
+    and ``ignore:reused anchor`` matches this engine's message prefix while ruamel's own message
+    (which opens with a newline and then ``found duplicate anchor``) is left to escalate.
+
+    Both parsers involved are pinned pure -- ``frontmatter_parser`` by AD-33 and the reread's own
+    loader by AD-26 -- so unlike the ``config.py`` path this behaves identically on both cells of
+    the ``yaml-compatibility`` leg and is asserted unconditionally.
+    """
+    project_root = _reused_anchor_project(tmp_path)
+    before = (project_root / "docs" / "down.md").read_bytes()
+
+    completed = subprocess.run(
+        [sys.executable, "-c", "from doc_lattice.cli import main; main()", "reconcile", "--all"],
+        cwd=project_root,
+        env={
+            **os.environ,
+            "NO_COLOR": "1",
+            "PYTHONPATH": str(_SRC),
+            "PYTHONWARNINGS": "error,ignore:reused anchor",
+        },
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert completed.returncode == 2
+    assert completed.stderr.startswith(
+        "error (WARNING_AS_ERROR): ReusedAnchorWarning: found duplicate anchor 'shared'"
+    )
+    assert "a warning filter escalated this advisory to an error" in completed.stderr
+    assert "Traceback" not in completed.stderr
+    assert "composer.py" not in completed.stderr
+    assert "site-packages" not in completed.stderr
+    # The reread happens before any write, so the escalation stops a planned rewrite rather
+    # than leaving a half-applied one behind.
+    assert (project_root / "docs" / "down.md").read_bytes() == before

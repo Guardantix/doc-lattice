@@ -8,6 +8,7 @@ import subprocess
 import sys
 import time
 from pathlib import Path
+from types import ModuleType
 
 import pytest
 from rich.text import Text
@@ -16,6 +17,7 @@ import doc_lattice.cli as cli_mod
 import doc_lattice.cli.runtime as runtime_module
 from doc_lattice import __version__
 from doc_lattice.cli import app
+from doc_lattice.cli.errors import EXIT_TOOL_ERROR
 from doc_lattice.cli.runtime import default_runtime
 from doc_lattice.error_types import ConfigError
 from doc_lattice.path_utils import format_path_for_display
@@ -560,8 +562,8 @@ def test_main_exits_silently_with_141_on_a_broken_pipe(monkeypatch, capsys):
 )
 @pytest.mark.parametrize(
     "exc",
-    [ConfigError("cfg"), RuntimeError("loop")],
-    ids=["project-error", "internal-error"],
+    [ConfigError("cfg"), RuntimeError("loop"), UserWarning("advisory")],
+    ids=["project-error", "internal-error", "escalated-warning"],
 )
 def test_main_exits_cleanly_when_stderr_refuses_the_error_report(monkeypatch, exc, stream_error):
     # An exception raised inside an `except` clause is never retried against a sibling
@@ -584,6 +586,151 @@ def test_main_exits_cleanly_when_stderr_refuses_the_error_report(monkeypatch, ex
         cli_mod.main()
 
     assert info.value.code == 2
+
+
+class _DependencyWarning(Warning):
+    """Stands in for a category a dependency declares, such as ruamel's ``ReusedAnchorWarning``.
+
+    Declared here rather than imported so the case stays about the base class the boundary
+    catches: a dependency that renames or reparents its own category must not change what this
+    asserts.
+    """
+
+
+@pytest.mark.parametrize(
+    "exc",
+    [
+        UserWarning("skipping 'docs/x.md': its frontmatter declares no 'id'"),
+        DeprecationWarning("a dependency deprecated something"),
+        _DependencyWarning("found duplicate anchor 't'"),
+    ],
+    ids=["engine-category", "stdlib-category", "dependency-category"],
+)
+def test_main_renders_an_escalated_warning_as_a_coded_project_error(monkeypatch, capsys, exc):
+    # Three categories from three owners, because catching the base `Warning` is what makes the
+    # mapping complete: no shared engine category exists to keep in sync, and the two paths
+    # AD-29 leaves outside the strict frontmatter boundary raise a dependency's own class.
+    def boom():
+        raise exc
+
+    monkeypatch.setenv("NO_COLOR", "1")
+    monkeypatch.setattr(cli_mod, "app", boom)
+
+    with pytest.raises(SystemExit) as info:
+        cli_mod.main()
+
+    assert info.value.code == 2  # never 1, which check reserves for drift
+    assert capsys.readouterr().err == (
+        f"error (WARNING_AS_ERROR): {type(exc).__name__}: {exc}; a warning filter escalated "
+        "this advisory to an error, so the run stopped here instead of continuing past it\n"
+    )
+
+
+def test_main_maps_a_warning_escalated_while_loading_the_application(monkeypatch, capsys):
+    # `_load_app()` imports every engine module and their dependencies, so under an escalating
+    # filter a deprecation raised at import time is an escalated warning like any other. It sits
+    # inside the guarded block for that reason; run before it, this case is a bare traceback.
+    def boom():
+        raise DeprecationWarning("imported module is deprecated")
+
+    monkeypatch.setenv("NO_COLOR", "1")
+    monkeypatch.setattr(cli_mod, "_load_app", boom)
+
+    with pytest.raises(SystemExit) as info:
+        cli_mod.main()
+
+    assert info.value.code == 2
+    assert capsys.readouterr().err == (
+        "error (WARNING_AS_ERROR): DeprecationWarning: imported module is deprecated; a warning "
+        "filter escalated this advisory to an error, so the run stopped here instead of "
+        "continuing past it\n"
+    )
+
+
+def test_main_maps_a_warning_escalated_while_importing_the_boundarys_own_reporter():
+    """The support imports are guarded too, and report without the reporter that failed.
+
+    ``from .errors import ...`` reaches ``cli/runtime.py``, and through it ``config`` and
+    ``orchestrate`` -- 25 engine modules plus ruamel, markdown-it, rich, and typer. Under an
+    escalating filter an import-time deprecation among them raises *before* a renderer exists,
+    so the clause that handles it cannot use ``print_project_error``: that function is what
+    failed to import. It falls back to a plain ``sys.stderr`` write in the same grammar.
+
+    A subprocess with a patched ``__import__`` is what reaches this. In-process, the module is
+    already in ``sys.modules`` and the import statement never runs a finder at all.
+    """
+    project_root = Path(__file__).resolve().parents[2]
+    code = """
+import builtins
+
+real_import = builtins.__import__
+
+def guarded_import(name, globals=None, locals=None, fromlist=(), level=0):
+    if name == "errors" and level == 1:
+        raise DeprecationWarning("a dependency deprecated something at import time")
+    return real_import(name, globals, locals, fromlist, level)
+
+builtins.__import__ = guarded_import
+from doc_lattice.cli import main
+main()
+"""
+    env = os.environ.copy()
+    env["PYTHONPATH"] = str(project_root / "src")
+    env["NO_COLOR"] = "1"
+
+    completed = subprocess.run(  # noqa: S603 (fixed interpreter and static test program)
+        [sys.executable, "-c", code],
+        cwd=project_root,
+        env=env,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    assert completed.returncode == 2
+    assert completed.stderr == (
+        "error (WARNING_AS_ERROR): DeprecationWarning: a dependency deprecated something at "
+        "import time; a warning filter escalated this advisory to an error, so the run stopped "
+        "here instead of continuing past it\n"
+    )
+    assert "Traceback" not in completed.stderr
+
+
+def test_the_support_import_fallback_renders_without_the_reporter_it_lost(monkeypatch, capsys):
+    # The same clause as the subprocess case above, reached in-process so what it writes is
+    # asserted against a captured stream rather than against a process's bytes. A module object
+    # that raises on attribute access is what `from .errors import ...` meets once the real
+    # module is already cached, and `monkeypatch.setitem` puts the real one back afterwards.
+    class _WarnsOnAccess(ModuleType):
+        def __getattr__(self, name: str) -> object:
+            # Dunders are the import machinery's own probes -- it reads `__path__` before any
+            # name in the statement -- so they answer the way a plain module would and only the
+            # imported name raises.
+            if name.startswith("__"):
+                raise AttributeError(name)
+            raise DeprecationWarning(f"reading {name} is deprecated")
+
+    monkeypatch.setenv("NO_COLOR", "1")
+    monkeypatch.setitem(
+        sys.modules, "doc_lattice.cli.errors", _WarnsOnAccess("doc_lattice.cli.errors")
+    )
+
+    with pytest.raises(SystemExit) as info:
+        cli_mod.main()
+
+    assert info.value.code == 2
+    assert capsys.readouterr().err == (
+        "error (WARNING_AS_ERROR): DeprecationWarning: reading EXIT_PIPE_CLOSED is deprecated; "
+        "a warning filter escalated this advisory to an error, so the run stopped here instead "
+        "of continuing past it\n"
+    )
+
+
+def test_the_support_import_fallback_exit_code_matches_the_shared_tool_error_code():
+    # That fallback cannot import `EXIT_TOOL_ERROR` -- importing the module that defines it is
+    # exactly what failed -- so it raises the literal 2. This is the pin that keeps the literal
+    # and the constant from drifting apart in silence.
+    assert EXIT_TOOL_ERROR == 2
 
 
 def test_main_maps_non_callable_app_to_internal_error(monkeypatch, capsys):

@@ -9,6 +9,7 @@ from typing import get_args
 
 import pytest
 
+import doc_lattice.config as config_module
 from doc_lattice.cli import app
 from doc_lattice.cli.output import escape_github_property
 from doc_lattice.constants import EdgeState
@@ -537,17 +538,113 @@ def test_check_warning_stays_filterable_through_pythonwarnings(tmp_path: Path):
     assert prefixed.stderr == ""
 
 
-def test_check_warning_under_pythonwarnings_error_escapes_the_exit_code_contract(tmp_path: Path):
-    # The one presentation cost AD-29 still accepts: `error` is applied before the
-    # replaceable stage, so no hook can reach it and the entry point's ProjectError mapping
-    # never runs. Pinned because exit 1 collides with EXIT_FINDING, which check reserves for
-    # drift, and a change to main()'s mapping would otherwise make AD-29 stale in silence.
-    _frontmatter_tiers(tmp_path)
+def _escalating_project(tmp_path: Path, site: str) -> None:
+    """Write a project that reaches exactly one engine warning site through ``check``.
+
+    One helper rather than four fixtures because the assertion is identical for every site and
+    only the document that triggers it differs. Keeping them together is what makes a fifth
+    site added without a case visibly missing from the parametrize list below.
+    """
+    docs = tmp_path / "docs"
+    docs.mkdir()
+    if site == "id-less":
+        (docs / "skillish.md").write_text(
+            "---\nname: some-skill\ndescription: non-lattice frontmatter\n---\n# Skill\n",
+            encoding="utf-8",
+        )
+    elif site == "reused-anchor":
+        (docs / "anchored.md").write_text(
+            "---\nid: anchored\ntitle: &t Anchored\nlayer: &t design\n---\n# Anchored\n",
+            encoding="utf-8",
+        )
+    elif site == "symlink-escape":
+        outside = tmp_path.parent / "outside"
+        outside.mkdir(exist_ok=True)
+        (outside / "secret.md").write_text("secret content", encoding="utf-8")
+        (docs / "leak.md").symlink_to(outside / "secret.md")
+        (docs / "keep.md").write_text("---\nid: keep\n---\n# Keep\n", encoding="utf-8")
+    else:
+        (docs / "a.md").write_text("---\nid: a\n---\n# A\n", encoding="utf-8")
+        (docs / "b.md").write_text(
+            "---\nid: b\nderives_from:\n  - ref: a\n  - ref: a\n---\n# B\n",
+            encoding="utf-8",
+        )
+
+
+@pytest.mark.parametrize(
+    ("site", "opening"),
+    [
+        ("id-less", "UserWarning: skipping "),
+        ("reused-anchor", "UserWarning: reused anchor in "),
+        ("symlink-escape", "UserWarning: skipping "),
+        ("duplicate-derives-from", "UserWarning: node 'b' derives from 'a' more than once"),
+    ],
+)
+def test_check_lands_an_escalated_warning_on_the_coded_error_contract(
+    tmp_path: Path, site: str, opening: str
+):
+    # `error` is applied before the replaceable `showwarning` stage, so AD-29's renderer never
+    # sees the warning and no engine-side change could present it; only the entry point can.
+    # All four engine warning sites are exercised because the mapping is deliberately blind to
+    # which one raised, where a per-site translation would have to be extended for each.
+    _escalating_project(tmp_path, site)
 
     raised = _check_in(tmp_path, {"PYTHONWARNINGS": "error"})
 
-    assert raised.returncode == 1
-    assert "UserWarning" in raised.stderr  # a traceback, not the CLI's voice
+    assert raised.returncode == 2  # never 1, which check reserves for drift
+    assert raised.stderr.startswith(f"error (WARNING_AS_ERROR): {opening}")
+    assert "a warning filter escalated this advisory to an error" in raised.stderr
+    # The whole point: the CLI's voice, and no traceback naming this package's source.
+    assert "Traceback" not in raised.stderr
+    assert "orchestrate.py" not in raised.stderr
+    assert "discovery.py" not in raised.stderr
+    assert "loader.py" not in raised.stderr
+    assert "warnings.warn" not in raised.stderr
+
+
+def test_check_lands_an_escalated_dependency_warning_from_config_on_the_same_contract(
+    tmp_path: Path,
+):
+    """The first of the two dependency-raised paths AD-29 names.
+
+    ``config.py`` asks ruamel for the platform-default parser per AD-33, so it is not behind the
+    strict frontmatter boundary that captures ruamel's own warning, and what escalates here is a
+    ``ReusedAnchorWarning`` rather than this engine's ``UserWarning``. Whether a warning is
+    reached at all is a property of the environment, and the two cells of the
+    ``yaml-compatibility`` leg diverge before the filter ever applies: only ruamel's pure
+    composer treats a reused anchor as a warning, while the optional ``ruamel.yaml.clib``
+    accelerator refuses the document outright, so the config boundary raises ``ConfigError``
+    before anything is warned about.
+
+    Both cells therefore exit 2 with no traceback, which is why the branch below reads the
+    parser actually in hand rather than the exit code -- keying on the code would take the
+    accelerator's ``CONFIG_ERROR`` for the warning path and assert the wrong line against it.
+    ``config._LOADER.running_pure`` is the same signal ``tests/test_config.py`` uses to tell
+    the cells apart, and the subprocess loads this interpreter's own environment.
+    """
+    docs = tmp_path / "docs"
+    docs.mkdir()
+    (docs / "keep.md").write_text("---\nid: keep\n---\n# Keep\n", encoding="utf-8")
+    (tmp_path / ".doc-lattice.yml").write_text(
+        "roots: &t [docs]\nignore_globs: &t []\n", encoding="utf-8"
+    )
+
+    raised = _check_in(tmp_path, {"PYTHONWARNINGS": "error"})
+
+    assert raised.returncode == 2  # both cells; never 1, which check reserves for drift
+    assert "Traceback" not in raised.stderr
+    assert "site-packages" not in raised.stderr
+    if config_module._LOADER.running_pure:
+        assert raised.stderr.startswith(
+            "error (WARNING_AS_ERROR): ReusedAnchorWarning: found duplicate anchor 't'"
+        )
+        assert "a warning filter escalated this advisory to an error" in raised.stderr
+    else:
+        # The accelerator cell never reaches the escalation, so there is no WARNING_AS_ERROR to
+        # assert. Pinned rather than skipped: what this leg proves is that the config boundary
+        # still lands on the coded contract, by its own route.
+        assert raised.stderr.startswith("error (CONFIG_ERROR): cannot parse config ")
+        assert "WARNING_AS_ERROR" not in raised.stderr
 
 
 def test_check_reports_a_symlink_escape_in_the_same_stderr_voice(tmp_path: Path):
