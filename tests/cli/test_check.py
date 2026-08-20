@@ -9,6 +9,7 @@ from typing import get_args
 
 import pytest
 
+import doc_lattice.config as config_module
 from doc_lattice.cli import app
 from doc_lattice.cli.output import escape_github_property
 from doc_lattice.constants import EdgeState
@@ -606,15 +607,20 @@ def test_check_lands_an_escalated_dependency_warning_from_config_on_the_same_con
 ):
     """The first of the two dependency-raised paths AD-29 names.
 
-    ``config.py`` asks ruamel for the platform-default parser per AD-33, so it is not behind
-    the strict frontmatter boundary that captures ruamel's own warning, and what escalates is a
-    ``ReusedAnchorWarning`` rather than this engine's ``UserWarning``. Whether one is raised at
-    all is a property of the environment: only ruamel's pure composer reports a reused anchor,
-    so the optional ``ruamel.yaml.clib`` accelerator the ``yaml-compatibility`` leg installs
-    takes this document through C and warns about nothing. The negatives below therefore hold
-    on both cells while the coded line is asserted on the cell that produces one, which is the
-    shape ``test_reconcile_rewrite_warnings_use_the_same_stderr_voice_as_the_load`` already
-    uses for this same dependency.
+    ``config.py`` asks ruamel for the platform-default parser per AD-33, so it is not behind the
+    strict frontmatter boundary that captures ruamel's own warning, and what escalates here is a
+    ``ReusedAnchorWarning`` rather than this engine's ``UserWarning``. Whether a warning is
+    reached at all is a property of the environment, and the two cells of the
+    ``yaml-compatibility`` leg diverge before the filter ever applies: only ruamel's pure
+    composer treats a reused anchor as a warning, while the optional ``ruamel.yaml.clib``
+    accelerator refuses the document outright, so the config boundary raises ``ConfigError``
+    before anything is warned about.
+
+    Both cells therefore exit 2 with no traceback, which is why the branch below reads the
+    parser actually in hand rather than the exit code -- keying on the code would take the
+    accelerator's ``CONFIG_ERROR`` for the warning path and assert the wrong line against it.
+    ``config._LOADER.running_pure`` is the same signal ``tests/test_config.py`` uses to tell
+    the cells apart, and the subprocess loads this interpreter's own environment.
     """
     docs = tmp_path / "docs"
     docs.mkdir()
@@ -625,14 +631,20 @@ def test_check_lands_an_escalated_dependency_warning_from_config_on_the_same_con
 
     raised = _check_in(tmp_path, {"PYTHONWARNINGS": "error"})
 
-    assert raised.returncode != 1
+    assert raised.returncode == 2  # both cells; never 1, which check reserves for drift
     assert "Traceback" not in raised.stderr
     assert "site-packages" not in raised.stderr
-    if raised.returncode == 2:
+    if config_module._LOADER.running_pure:
         assert raised.stderr.startswith(
             "error (WARNING_AS_ERROR): ReusedAnchorWarning: found duplicate anchor 't'"
         )
         assert "a warning filter escalated this advisory to an error" in raised.stderr
+    else:
+        # The accelerator cell never reaches the escalation, so there is no WARNING_AS_ERROR to
+        # assert. Pinned rather than skipped: what this leg proves is that the config boundary
+        # still lands on the coded contract, by its own route.
+        assert raised.stderr.startswith("error (CONFIG_ERROR): cannot parse config ")
+        assert "WARNING_AS_ERROR" not in raised.stderr
 
 
 def test_check_reports_a_symlink_escape_in_the_same_stderr_voice(tmp_path: Path):

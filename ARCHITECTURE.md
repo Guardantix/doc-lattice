@@ -1741,11 +1741,17 @@ strict load, so reaching the reread's `ReusedAnchorWarning` at all takes a filte
 first and escalates the rest. The suite exercises exactly that pair rather than asserting the
 reread is reachable under a bare `error`, which it is not.
 
-The `config.py` path is covered by the same clause but is not asserted unconditionally, because
-whether it raises is a property of the environment rather than of this engine: only ruamel's pure
-composer reports a reused anchor, and the `platform-default` request AD-33 records takes the C
-accelerator wherever it is installed. The negatives hold on both cells of the
-`yaml-compatibility` leg and the coded line is asserted on the cell that produces one.
+The `config.py` path is covered by the same clause, but which diagnostic a reader sees there is a
+property of the environment rather than of this engine, because the `platform-default` request
+AD-33 records takes the C accelerator wherever it is installed. The two cells of the
+`yaml-compatibility` leg do not merely differ in whether a warning is shown; they diverge before
+any filter applies. Ruamel's pure composer treats a reused anchor as a warning, so an escalating
+filter reaches it and the run reports `WARNING_AS_ERROR`. The accelerator refuses the same
+document outright, so the config boundary raises `ConfigError` and no warning is ever reached.
+Both cells exit 2 with no traceback, which is exactly why the test branches on the parser in hand
+rather than on the exit code: keying on the code would take the accelerator's `CONFIG_ERROR` for
+the warning path. Each cell's line is pinned rather than one of them skipped, since what the
+accelerator leg proves is that this boundary still lands on the coded contract by its own route.
 
 The cost is that `main()` now maps a category of exception it does not own and cannot enumerate.
 A dependency that raises a warning during ordinary operation, under an escalating filter, is
