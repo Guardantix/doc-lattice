@@ -24,9 +24,9 @@ by choice and the next version is 6.0.0.
 
 Admission is unchanged and still narrow on purpose: an item belongs here only if it is breaking,
 or if it has to be true at the moment a major ships. Everything else waits for 6.x, which is what
-keeps this release from staying open indefinitely. Applying that rule on 2026-08-19 moved four
-output sinks back in from the minor train, so eight issues are open here rather than four. Start
-with the group below that GTX-113 waits on.
+keeps this release from staying open indefinitely. Applying that rule on 2026-08-19 moved six
+issues back in from the minor train, so ten are open here rather than four. Start with the two
+groups below that GTX-113 waits on.
 
 - Report a bad `--docs-root` or `--linear-team` from `init` as `VALIDATION_ERROR` rather than
   `CONFIG_ERROR` (GTX-216). It is the last raise site in that file naming a command-line value
@@ -44,9 +44,16 @@ with the group below that GTX-113 waits on.
   diagnostics interpolate the project root raw (GTX-238). None of the four sequences against
   another. Landing them here is also what keeps the promise GTX-214 just narrowed true at every
   sink the README pass is about to document.
-- Make README describe what 6.0 actually prints and enforces (GTX-113). This still lands last. Five
-  open issues now block it -- GTX-216 and the four above -- on the rule that the README pass cannot
-  land ahead of the behavior it documents; every other blocker either shipped in 5.0.0 or is
+- Settle the two edge cases where what breaks is the run's own contract rather than a spelling,
+  moved here on the same date and on a stricter reading of the same rule. A broken stderr pipe
+  redirects the run's stdout and exits 1, by way of Rich's `on_broken_pipe` (GTX-201), and
+  `PYTHONWARNINGS=error` turns an engine warning into an uncaught traceback instead of the CLI's
+  error contract (GTX-202). Neither changes how anything is spelled, and both change what a run
+  does, so an exit status is treated as the contract a printed string is. Neither sequences against
+  the other.
+- Make README describe what 6.0 actually prints and enforces (GTX-113). This still lands last.
+  Seven open issues now block it -- GTX-216 and the six above -- on the rule that the README pass
+  cannot land ahead of the behavior it documents; every other blocker either shipped in 5.0.0 or is
   already in `## [Unreleased]`.
 - Bring this document and the release dependency graph back into agreement with what is open
   (GTX-213), so the preamble's claim that every open issue sits in exactly one release project is
