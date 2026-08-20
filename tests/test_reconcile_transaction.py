@@ -48,8 +48,13 @@ from doc_lattice.reconcile_transaction import (
 from doc_lattice.reconcile_transaction import (
     recover_transaction as _recover_transaction_unlocked,
 )
+from doc_lattice.text_utils import first_control_index
 
 FIXTURES = Path(__file__).parent / "fixtures"
+
+# The journal path a unit-level parse reports against. _parse_journal carries it only for the
+# diagnostic a failing stage builds, so nothing has to exist at it.
+UNIT_JOURNAL = Path(RECONCILE_JOURNAL_NAME)
 
 # A fixed provenance, so a journal these tests write is byte-stable and no assertion depends
 # on the wall clock. Production captures its own through datetime_utils.utc_now().
@@ -2191,7 +2196,7 @@ def test_v2_journal_round_trips_through_the_canonical_serializer():
     )
 
     encoded = reconcile_transaction._serialize_journal(journal)
-    loaded = reconcile_transaction._parse_journal(encoded.decode("utf-8"))
+    loaded = reconcile_transaction._parse_journal(encoded.decode("utf-8"), UNIT_JOURNAL)
 
     assert loaded.version == RECONCILE_JOURNAL_VERSION
     assert loaded.state == "prepared"
@@ -2364,8 +2369,10 @@ def test_v2_journal_with_missing_or_malformed_provenance_is_rejected(corrupt):
     payload = _v2_payload()
     corrupt(payload)
 
-    with pytest.raises(ValidationError):
-        reconcile_transaction._parse_journal(json.dumps(payload))
+    # The typed error, not pydantic's: GTX-227 moved wire-model rendering into the parse stages,
+    # so a rejection arrives already spelled for an operator.
+    with pytest.raises(ReconcilePersistenceError):
+        reconcile_transaction._parse_journal(json.dumps(payload), UNIT_JOURNAL)
 
 
 def test_v2_provenance_is_never_filled_in_from_a_v1_shaped_journal():
@@ -2380,12 +2387,121 @@ def test_v2_provenance_is_never_filled_in_from_a_v1_shaped_journal():
 def test_v1_journal_still_parses_and_carries_no_provenance():
     text = (FIXTURES / "reconcile-journal-v1-prepared.json").read_text(encoding="utf-8")
 
-    loaded = reconcile_transaction._parse_journal(text)
+    loaded = reconcile_transaction._parse_journal(text, UNIT_JOURNAL)
 
     assert loaded.version == RECONCILE_JOURNAL_LEGACY_VERSION
     assert loaded.state == "prepared"
     assert loaded.provenance is None
     assert loaded.entries[0].destination == "docs/doc.md"
+
+
+# GTX-227. Every journal model forbids extra keys, so a hand-edited key is reported as the
+# pydantic error *location* -- the one half of a validation failure the renderer spells rather
+# than drops, since pydantic already repr's a rejected input value. The SGR recolors the line and
+# the cursor-up overwrites the line above it, which is what an unspelled location would let a
+# journal do to a terminal.
+_HOSTILE_JOURNAL_KEY = "bad\x1b[31m\x1b[Akey"
+
+
+def _journal_payload(version: int) -> dict:
+    """Return a minimal valid journal of either wire version, as plain data."""
+    if version == RECONCILE_JOURNAL_LEGACY_VERSION:
+        text = (FIXTURES / "reconcile-journal-v1-prepared.json").read_text(encoding="utf-8")
+        return json.loads(text)
+    return _v2_payload()
+
+
+def _assert_lines_carry_no_control_character(message: str) -> None:
+    """Assert no line of a diagnostic carries a control character this project recognizes."""
+    for line in message.split("\n"):
+        index = first_control_index(line)
+        assert index is None, f"line carries a control character at {index}: {line!r}"
+
+
+@pytest.mark.parametrize("version", [RECONCILE_JOURNAL_LEGACY_VERSION, RECONCILE_JOURNAL_VERSION])
+def test_journal_extra_key_is_named_without_its_control_bytes(version: int):
+    """Parametrized over both versions: each selects a different model to render against."""
+    payload = _journal_payload(version)
+    payload[_HOSTILE_JOURNAL_KEY] = 1
+
+    with pytest.raises(ReconcilePersistenceError) as caught:
+        reconcile_transaction._parse_journal(json.dumps(payload), UNIT_JOURNAL)
+
+    message = str(caught.value)
+    _assert_lines_carry_no_control_character(message)
+    assert repr(_HOSTILE_JOURNAL_KEY) in message
+    assert "Extra inputs are not permitted" in message
+    assert "errors.pydantic.dev" not in message
+    assert format_path_for_display(UNIT_JOURNAL) in message
+    assert "rerun 'doc-lattice reconcile --recover'" in message
+
+
+def test_journal_extra_key_help_answers_with_the_version_that_rejected_it():
+    """The v1 model must not offer v2's keys, which is what binding the model per stage buys."""
+    payload = _journal_payload(RECONCILE_JOURNAL_LEGACY_VERSION)
+    payload["unexpected"] = 1
+
+    with pytest.raises(ReconcilePersistenceError) as caught:
+        reconcile_transaction._parse_journal(json.dumps(payload), UNIT_JOURNAL)
+
+    message = str(caught.value)
+    assert "accepted keys: entries, state, version" in message
+    assert "provenance" not in message
+
+
+def test_journal_validation_error_keeps_the_remediation_on_its_own_line():
+    """The renderer owns the field lines, so the remediation cannot read as one of them."""
+    payload = _v2_payload()
+    payload["provenance"].pop("tool_version")
+
+    with pytest.raises(ReconcilePersistenceError) as caught:
+        reconcile_transaction._parse_journal(json.dumps(payload), UNIT_JOURNAL)
+
+    lines = str(caught.value).split("\n")
+    assert lines[0] == f"invalid reconcile journal {format_path_for_display(UNIT_JOURNAL)}:"
+    assert lines[1] == "  provenance.tool_version: Field required"
+    assert lines[-1].startswith(
+        f"inspect {format_path_for_display(UNIT_JOURNAL)}, its destinations"
+    )
+
+
+def test_ordinary_journal_location_reads_unquoted():
+    """An ordinary path keeps AD-35's selectivity: only a control-bearing part is spelled."""
+    payload = _v2_payload()
+    payload["provenance"]["tool_version"] = 4
+
+    with pytest.raises(ReconcilePersistenceError) as caught:
+        reconcile_transaction._parse_journal(json.dumps(payload), UNIT_JOURNAL)
+
+    message = str(caught.value)
+    assert "provenance.tool_version: " in message
+    assert "'provenance'" not in message
+    assert "'tool_version'" not in message
+
+
+def test_journal_version_probe_failure_is_rendered_by_this_project():
+    """The probe is a validation stage too, so its failure must not fall through to pydantic."""
+    payload = _v2_payload()
+    payload["version"] = "two"
+
+    with pytest.raises(ReconcilePersistenceError) as caught:
+        reconcile_transaction._parse_journal(json.dumps(payload), UNIT_JOURNAL)
+
+    message = str(caught.value)
+    assert message.startswith(f"invalid reconcile journal {format_path_for_display(UNIT_JOURNAL)}:")
+    assert "version: " in message
+    assert "errors.pydantic.dev" not in message
+    assert "input_value" not in message
+
+
+def test_journal_json_syntax_failure_names_the_file_rather_than_a_field():
+    """A syntax failure carries no location, so the root label stands in for a field path."""
+    with pytest.raises(ReconcilePersistenceError) as caught:
+        reconcile_transaction._parse_journal('{"version":', UNIT_JOURNAL)
+
+    message = str(caught.value)
+    assert "<journal>: Invalid JSON" in message
+    assert "errors.pydantic.dev" not in message
 
 
 def test_v1_journal_bytes_are_rejected_by_the_v2_model():
@@ -2501,7 +2617,7 @@ def test_created_at_accepts_the_forms_the_engine_actually_produces():
 
     payload = _v2_payload()
     payload["provenance"] = json.loads(direct.model_dump_json())
-    loaded = reconcile_transaction._parse_journal(json.dumps(payload))
+    loaded = reconcile_transaction._parse_journal(json.dumps(payload), UNIT_JOURNAL)
 
     assert payload["provenance"]["created_at"].endswith("Z")
     assert loaded.provenance == direct

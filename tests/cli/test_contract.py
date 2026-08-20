@@ -1295,6 +1295,72 @@ def test_journal_provenance_under_no_color_emits_no_escape_byte(tmp_path: Path):
     assert rb"downstream_id 'pc\x1b[Adesign'" in completed.stdout
 
 
+# GTX-227. The other journal-sourced string that reaches human output, and the one AD-36 left
+# open: every wire model forbids extra keys, so a hand-edited key is reported as the pydantic
+# error *location*, which the renderer spells rather than drops. Parametrized over both wire
+# versions because each selects a different model, and a v2-only case would pass even if v1 were
+# rendered against v2. Spelled as literal bytes for the reason the provenance case above is: the
+# engine cannot write this file.
+_HOSTILE_JOURNAL_KEY = "bad\x1b[31m\x1b[Akey"
+
+_HOSTILE_KEY_JOURNALS = {
+    1: {
+        "version": 1,
+        "state": "committed",
+        "entries": [],
+        _HOSTILE_JOURNAL_KEY: 1,
+    },
+    2: {
+        "version": 2,
+        "state": "committed",
+        "provenance": {
+            "created_at": "2026-08-17T12:00:00Z",
+            "tool_version": "5.0.0",
+            "selector": {"mode": "all", "downstream_id": None, "ref": None},
+        },
+        "entries": [],
+        _HOSTILE_JOURNAL_KEY: 1,
+    },
+}
+
+
+@pytest.mark.parametrize("version", [1, 2])
+def test_journal_extra_key_under_no_color_emits_no_escape_byte(tmp_path: Path, version: int):
+    # Asserted over raw stderr with the shared helper rather than a width restated beside it, so
+    # this case and its GTX-125 siblings cannot disagree about what a control character is.
+    (tmp_path / ".doc-lattice-reconcile.json").write_text(
+        json.dumps(_HOSTILE_KEY_JOURNALS[version]), encoding="utf-8"
+    )
+
+    completed = _run_bytes(["reconcile", "--recover"], tmp_path)
+
+    assert completed.returncode == EXIT_TOOL_ERROR
+    assert b"RECONCILE_PERSISTENCE" in completed.stderr
+    _assert_control_free(completed.stderr)
+    _assert_control_free(completed.stdout)
+    # The key is still named, spelled the way AD-35 spells a rejected frontmatter key.
+    assert rb"'bad\x1b[31m\x1b[Akey'" in completed.stderr
+    assert b"Extra inputs are not permitted" in completed.stderr
+    # The remediation stayed its own line instead of trailing the field line it would read as
+    # part of, and pydantic's own renderer never reached the user.
+    assert completed.stderr.splitlines()[-1].startswith(b"inspect ")
+    assert b"errors.pydantic.dev" not in completed.stderr
+
+
+def test_journal_extra_key_names_only_the_keys_its_own_version_accepts(tmp_path: Path):
+    # The invariant a single-version case cannot see: the accepted-key help comes from the model
+    # that actually rejected the text, so a v1 journal is never offered v2's provenance key.
+    (tmp_path / ".doc-lattice-reconcile.json").write_text(
+        json.dumps(_HOSTILE_KEY_JOURNALS[1]), encoding="utf-8"
+    )
+
+    completed = _run_bytes(["reconcile", "--recover"], tmp_path)
+
+    assert completed.returncode == EXIT_TOOL_ERROR
+    assert b"accepted keys: entries, state, version" in completed.stderr
+    assert b"provenance" not in completed.stderr
+
+
 def test_journal_provenance_json_under_no_color_keeps_the_recorded_value(tmp_path: Path):
     # The other half of the same run, and the reason AD-36 needs no refusal to keep this channel
     # safe: the machine payload carries the recorded value rather than a display spelling, and

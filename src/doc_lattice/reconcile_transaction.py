@@ -20,6 +20,7 @@ from pydantic import (
     ConfigDict,
     Field,
     StringConstraints,
+    ValidationError,
     model_validator,
 )
 
@@ -53,6 +54,7 @@ from .persistence import (
     sync_directory,
 )
 from .reconcile import Rewrite
+from .validation_render import format_validation_error
 
 JournalState = Literal["prepared", "committed"]
 RecoveryAction = Literal[
@@ -67,6 +69,10 @@ _JournalStatus = Literal["absent", "invalid", "exact"]
 _LOCK_FACTORY_TOKEN = object()
 _LOCKING_SUPPORTED = os.name != "nt"
 _JOURNAL_STAGE_PREFIX = f"{RECONCILE_JOURNAL_NAME}."
+# Rendered in place of a field path when pydantic reports no location, which is what an error
+# about the file as a whole carries: a payload that is not a JSON object at all, and a JSON
+# syntax failure, both of which reach the wire models because they validate from text.
+_JOURNAL_ROOT_LOCATION = "<journal>"
 _PREPARE_VALIDATING = "validating transaction destinations"
 _PREPARE_STAGING = "staging transaction image"
 _PREPARE_PUBLISHING_JOURNAL = "publishing prepared journal"
@@ -453,15 +459,73 @@ class _PendingRewrite:
     destination_relative: str
 
 
-def _invalid_journal_error(journal: Path, cause: object) -> ReconcilePersistenceError:
-    """Build the deliberate manual-remediation diagnostic for an invalid journal."""
-    message = (
-        f"invalid reconcile journal {format_path_for_display(journal)}: {cause}; inspect "
-        f"{format_path_for_display(journal)}, its destinations, "
+def _journal_remediation(displayed_journal: str) -> str:
+    """Render the manual-remediation sentence every invalid-journal diagnostic ends with.
+
+    Args:
+        displayed_journal: The journal path as ``format_path_for_display`` already spelled it.
+            The display form rather than the path, because both callers name the same journal
+            twice in one message and AD-34's rule is that a path is spelled once, where it first
+            enters text.
+
+    Returns:
+        The sentence, with no leading or trailing punctuation, so a caller can join it as a
+        clause or as its own line.
+    """
+    return (
+        f"inspect {displayed_journal}, its destinations, "
         "and staged files; move the invalid journal aside only after manual restoration or "
         "preservation; rerun 'doc-lattice reconcile --recover'"
     )
+
+
+def _invalid_journal_error(journal: Path, cause: object) -> ReconcilePersistenceError:
+    """Build the deliberate manual-remediation diagnostic for an invalid journal.
+
+    Every caller passes a project-constructed ``cause``: an ``OSError``, a containment or path
+    role refusal raised here, or the unsupported-version refusal ``_parse_journal`` raises. A
+    pydantic failure does not come through here; it is rendered by ``_journal_validation_error``
+    instead, because interpolating one into a single sentence is what put a rejected key on the
+    terminal unspelled (AD-35).
+
+    Args:
+        journal: The journal the diagnostic is about.
+        cause: The project-owned explanation, interpolated as one clause.
+
+    Returns:
+        The typed error, carrying the cause and the remediation as one line.
+    """
+    displayed = format_path_for_display(journal)
+    message = f"invalid reconcile journal {displayed}: {cause}; {_journal_remediation(displayed)}"
     return ReconcilePersistenceError(message)
+
+
+def _journal_validation_error(
+    journal: Path, exc: ValidationError, model: type[BaseModel]
+) -> ReconcilePersistenceError:
+    """Render one journal wire-model failure through the shared validation renderer.
+
+    The renderer owns the header and one indented line per error, so the remediation sentence is
+    appended as its own final line rather than interpolated as a clause. Attaching it to the last
+    field line instead would read as part of that field's message.
+
+    Args:
+        journal: The journal the diagnostic is about.
+        exc: The failure raised by one wire model's ``model_validate_json``.
+        model: The model that actually rejected the text, so a forbidden key is answered with the
+            keys that model accepts rather than another version's.
+
+    Returns:
+        The typed error, carrying the rendered block and the remediation as a trailing line.
+    """
+    displayed = format_path_for_display(journal)
+    rendered = format_validation_error(
+        exc,
+        header=f"invalid reconcile journal {displayed}:",
+        model=model,
+        root_label=_JOURNAL_ROOT_LOCATION,
+    )
+    return ReconcilePersistenceError(f"{rendered}\n{_journal_remediation(displayed)}")
 
 
 def _journal_already_exists_message(journal_path: Path) -> str:
@@ -624,23 +688,53 @@ def _serialize_journal(journal: JournalV2) -> bytes:
     return f"{journal.model_dump_json(indent=2)}\n".encode()
 
 
-def _parse_journal(decoded: str) -> _LoadedJournal:
+def _validate_journal_stage[ModelT: BaseModel](
+    model: type[ModelT], decoded: str, journal: Path
+) -> ModelT:
+    """Validate one dispatch stage, rendering a failure against the model that rejected it.
+
+    The model is bound here rather than recovered downstream because it is only knowable at the
+    call: the probe, v1, and v2 stages each validate the same text independently, and the
+    renderer answers a forbidden key from the rejecting model's own fields. Naming one model for
+    all three would offer a v1 journal the keys v2 accepts.
+
+    Args:
+        model: The wire model this stage validates against.
+        decoded: The journal's UTF-8 text.
+        journal: The journal path, for the diagnostic only.
+
+    Returns:
+        The validated model instance.
+
+    Raises:
+        ReconcilePersistenceError: If the text does not satisfy this stage's model.
+    """
+    try:
+        return model.model_validate_json(decoded)
+    except ValidationError as cause:
+        raise _journal_validation_error(journal, cause, model) from cause
+
+
+def _parse_journal(decoded: str, journal: Path) -> _LoadedJournal:
     """Dispatch on the declared version, then validate against that version's wire model.
 
     Args:
         decoded: The journal's UTF-8 text.
+        journal: The journal path, carried for the diagnostic a failing stage builds.
 
     Returns:
         The journal normalized to the shared recovery shape, whichever version wrote it.
 
     Raises:
-        ValueError: If the text is not valid JSON, declares no usable version, does not match
-            the model for the version it declares, or declares a version this release cannot
-            read. Pydantic's own validation error is a ValueError, so both arrive as one kind.
+        ReconcilePersistenceError: If the text is not valid JSON or does not match the model for
+            the version it declares. Each stage renders its own failure, so the diagnostic is
+            already complete and the caller does not wrap it again.
+        ValueError: If the text declares a version this release cannot read. That refusal is
+            written here rather than by pydantic, so it is the caller's to wrap.
     """
-    declared = _JournalVersionProbe.model_validate_json(decoded)
+    declared = _validate_journal_stage(_JournalVersionProbe, decoded, journal)
     if declared.version == RECONCILE_JOURNAL_LEGACY_VERSION:
-        legacy = JournalV1.model_validate_json(decoded)
+        legacy = _validate_journal_stage(JournalV1, decoded, journal)
         return _LoadedJournal(
             version=legacy.version,
             state=legacy.state,
@@ -648,7 +742,7 @@ def _parse_journal(decoded: str) -> _LoadedJournal:
             provenance=None,
         )
     if declared.version == RECONCILE_JOURNAL_VERSION:
-        current = JournalV2.model_validate_json(decoded)
+        current = _validate_journal_stage(JournalV2, decoded, journal)
         return _LoadedJournal(
             version=current.version,
             state=current.state,
@@ -672,11 +766,12 @@ def _load_journal(
     try:
         encoded = journal_path.read_bytes()
         decoded = encoded.decode("utf-8")
-        journal = _parse_journal(decoded)
-    # ValueError is the single kind every non-I/O failure here arrives as: the UTF-8 decode
-    # failure, pydantic's ValidationError, and the unsupported-version refusal _parse_journal
-    # raises itself all derive from it. Naming the subclasses too would suggest they are
-    # handled apart from it, which is exactly the confusion _parse_journal documents away.
+        journal = _parse_journal(decoded, journal_path)
+    # What reaches here is the read failure, the UTF-8 decode failure, and the
+    # unsupported-version refusal _parse_journal raises itself, all of which are a project-owned
+    # clause this diagnostic interpolates. A wire-model failure is not among them: _parse_journal
+    # renders each stage against the model that rejected it and raises the finished
+    # ReconcilePersistenceError, which is not a ValueError and passes through untouched.
     except (OSError, ValueError) as cause:
         raise _invalid_journal_error(journal_path, cause) from cause
     try:

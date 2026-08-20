@@ -87,6 +87,23 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   beyond these six. `requested_root` is recognized in the transaction module, where the only
   code that audits it lives.
 
+- A hand-edited reconcile journal whose rejected key carries a terminal control character no
+  longer puts that character on stderr through the message refusing it. Every journal wire model
+  forbids unknown keys, and a rejected key is reported as pydantic's error *location*, which the
+  invalid-journal diagnostic interpolated raw. A crafted key could therefore recolor the
+  diagnostic or overwrite the line above it under `NO_COLOR`, on any journal that failed
+  validation for any reason. Journal validation failures now render through the same module the
+  config and frontmatter boundaries have used since 5.0, which spells a control-bearing location
+  part and drops pydantic's URL and echoed input.
+
+  Output moves as a result: a journal that fails its wire model now reports as a header naming
+  the file, one indented line per error, and the manual-remediation sentence on its own final
+  line, rather than as one sentence carrying pydantic's whole rendering. A rejected key is also
+  answered with the keys the model that rejected it accepts, so a version 1 journal is never
+  offered version 2's `provenance`. Every other invalid-journal diagnostic is unchanged, and what
+  the journal format accepts is unchanged. AD-35 in ARCHITECTURE.md owns the extension to this
+  boundary and AD-36 records that its own provenance decision does not move.
+
 ## [5.0.0] - 2026-08-19
 
 ### Migration
