@@ -1239,23 +1239,30 @@ def _require_reconcile_lock(lock: object, project_root: Path) -> ReconcileLock:
     try:
         requested_root = project_root.resolve()
     except (OSError, RuntimeError) as cause:
-        message = f"cannot validate reconcile lock project root {project_root}: {cause}"
+        message = (
+            f"cannot validate reconcile lock project root "
+            f"{format_path_for_display(project_root)}: {cause}"
+        )
         raise ReconcileInProgressError(message) from cause
     if lock.project_root != requested_root:
         message = (
             f"reconcile lock capability protects a different project root: "
-            f"{lock.project_root}, not {requested_root}"
+            f"{format_path_for_display(lock.project_root)}, "
+            f"not {format_path_for_display(requested_root)}"
         )
         raise ReconcileInProgressError(message)
     try:
         directory_stat = requested_root.stat()
     except OSError as cause:
-        message = f"cannot validate reconcile lock project root directory {requested_root}: {cause}"
+        message = (
+            f"cannot validate reconcile lock project root directory "
+            f"{format_path_for_display(requested_root)}: {cause}"
+        )
         raise ReconcileInProgressError(message) from cause
     if not lock._protects_directory(directory_stat):
         message = (
             "reconcile lock capability protects a different project root directory "
-            f"than the directory currently at {requested_root}"
+            f"than the directory currently at {format_path_for_display(requested_root)}"
         )
         raise ReconcileInProgressError(message)
     return lock
@@ -1808,7 +1815,10 @@ def reconcile_lock(project_root: Path) -> Iterator[ReconcileLock]:
             if active_error is not None:
                 active_error.add_note(f"reconcile {details}")
             else:
-                message = f"reconcile {details} for project directory {project_root}"
+                message = (
+                    f"reconcile {details} for project directory "
+                    f"{format_path_for_display(project_root)}"
+                )
                 error = ReconcilePersistenceError(message)
                 raise error from cleanup_errors[0][1]
 
@@ -1827,7 +1837,8 @@ def _lock_setup_error(
 ) -> ReconcilePersistenceError:
     """Wrap one lock context-entry failure with its operation and project root."""
     error = ReconcilePersistenceError(
-        f"reconcile lock setup failed while {operation} for project root {project_root}: {cause}"
+        f"reconcile lock setup failed while {operation} for project root "
+        f"{format_path_for_display(project_root)}: {cause}"
     )
     copy_exception_notes(error, cause)
     return error
