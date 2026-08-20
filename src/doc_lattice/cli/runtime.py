@@ -15,28 +15,114 @@ from rich.markup import escape
 from ..config import ProjectConfig, load_config
 from ..model import Lattice
 from ..orchestrate import load_lattice
+from .pipe_policy import STDERR_FILENO, PipeClosed, file_descriptor, neutralize
+
+
+def apply_broken_pipe_policy(console: Console) -> None:
+    """Answer one console's failed write by channel rather than by process.
+
+    Rich's own ``Console.on_broken_pipe`` points ``sys.stdout`` at ``os.devnull`` and raises
+    ``SystemExit(1)``. Every part of that is wrong here. The redirect is aimed at file
+    descriptor 1 no matter which stream actually failed, so a dead *stderr* discards the stdout
+    a succeeding command is still computing; the ``SystemExit`` abandons that command from
+    inside whatever write happened to fail; and 1 is the code ``check`` and ``lint`` reserve for
+    drift, so a departed reader would be indistinguishable from a failed gate.
+
+    What replaces it is one policy with two answers, because the two channels carry different
+    things. **stdout** is the command's result: losing it truncates the answer, so there is
+    nothing left to finish and the write is escalated into ``PipeClosed`` for the entry point to
+    turn into a silent 141. **stderr** carries diagnostics *about* a result that is still being
+    computed, so losing it must not change what the run concludes: the console is silenced, the
+    segment buffer Rich only clears after a successful write is dropped so a later print cannot
+    resurface it, the descriptor is neutralized so the interpreter's shutdown flush cannot
+    override the exit code with 120, and this returns normally so the caller's own exit path
+    continues undisturbed.
+
+    The channel is read from the console rather than guessed. ``Console.stderr`` is the flag
+    Rich itself resolves ``Console.file`` through, and it is what both this module and
+    ``typer.rich_utils`` declare when they construct one. The resolved descriptor is consulted
+    as well, so a console handed an explicit ``file=sys.stderr`` without the flag is still
+    treated as the diagnostic channel.
+
+    Args:
+        console: The Rich console whose buffered write raised ``BrokenPipeError``.
+
+    Raises:
+        PipeClosed: When the failed console was writing to the command's stdout.
+    """
+    fd = file_descriptor(console.file)
+    if not console.stderr and fd != STDERR_FILENO:
+        raise PipeClosed
+    console.quiet = True
+    # Rich clears a console's segment buffer only after a write succeeds. Left queued, the
+    # refused diagnostic would be prepended to the next print this console accepts.
+    del console._buffer[:]
+    if fd is not None:
+        neutralize(fd)
 
 
 class CliConsole(Console):
     """A ``Console`` whose broken-pipe handling stays local to the failed write.
 
-    Rich's own ``Console.on_broken_pipe`` points ``sys.stdout`` at ``os.devnull`` and
-    raises ``SystemExit(1)``. Both halves are wrong for this CLI. The redirect is aimed
-    at file descriptor 1 no matter which stream actually failed, so a dead *stderr*
-    silently discards the report a succeeding command is still computing; and the
-    ``SystemExit`` abandons that command from inside whatever write happened to fail.
-    Raising the underlying ``BrokenPipeError`` instead makes a Rich console behave like
-    any other stream, so `main()`'s existing ``OSError`` handling governs a failed write
-    the way it already governs every other one.
+    The policy itself is ``apply_broken_pipe_policy``, shared with the base-class hook
+    ``broken_pipe_policy`` installs for the consoles Typer builds for help and usage rendering.
+    This subclass exists so the runtime's own two consoles carry it unconditionally, including
+    on the entry-point diagnostic paths that run outside that context manager.
     """
 
     def on_broken_pipe(self) -> None:
-        """Re-raise the broken pipe rather than redirecting the process's stdout.
+        """Apply this CLI's per-channel broken-pipe policy to this console.
 
         Raises:
-            BrokenPipeError: Always, in place of Rich's redirect-and-exit default.
+            PipeClosed: When this console was writing to the command's stdout.
         """
-        raise BrokenPipeError
+        apply_broken_pipe_policy(self)
+
+
+def _on_broken_pipe(console: Console) -> None:
+    """Stand in for ``Console.on_broken_pipe`` while the policy is installed.
+
+    Args:
+        console: The console Rich invoked the hook on, bound as ``self``.
+
+    Raises:
+        PipeClosed: When the failed console was writing to the command's stdout.
+    """
+    apply_broken_pipe_policy(console)
+
+
+@contextmanager
+def broken_pipe_policy() -> Iterator[None]:
+    """Extend this CLI's broken-pipe policy to every ``rich`` console for one invocation.
+
+    Help text and usage errors are rendered by ``typer.rich_utils``, which builds plain
+    ``rich.console.Console`` instances outside ``_create_runtime``. ``CliConsole`` cannot reach
+    them, so without this they keep Rich's default hook and ``doc-lattice --help`` piped into a
+    reader that departs exits 1 -- the drift code -- on a user-visible path.
+
+    Substituting the documented overridable hook on the base class is what reaches them. The
+    alternative is replacing ``typer.rich_utils``' private console factory, which would make the
+    declared ``typer`` span a second compatibility surface for the sake of a seam ``rich``
+    already offers; AD-27 records why one such surface is enough. The subclass keeps precedence
+    over the substitution, so the runtime's own consoles are unaffected by it either way.
+
+    The attribute is process-global, and it is restored on both the normal and the exception
+    path for the same reason ``rendered_warnings`` restores ``warnings.showwarning``. It carries
+    the same unrepaired concurrency cost, recorded in AD-29: the CLI creates no threads and one
+    invocation owns its process, and a caller driving this from several threads is the
+    unsupported case.
+
+    Yields:
+        Control to the wrapped application call.
+    """
+    previous = Console.on_broken_pipe
+    # Rich types the hook as an ordinary method, so ty reads the substitution as a redefinition
+    # rather than as the documented override it is.
+    Console.on_broken_pipe = _on_broken_pipe  # ty: ignore[invalid-assignment]
+    try:
+        yield
+    finally:
+        Console.on_broken_pipe = previous
 
 
 class LatticeLoader(Protocol):
@@ -233,14 +319,28 @@ class CliRuntime:
     def write_stdout(self, text: str, *, newline: bool = True) -> None:
         """Write exact text to the captured stdout stream.
 
+        This is the one output path that does not go through Rich, so no ``on_broken_pipe``
+        hook governs it and the ``BrokenPipeError`` a departed reader produces arrives with its
+        ``errno`` set to ``EPIPE``. Typer's ``_main`` converts exactly that into ``sys.exit(1)``,
+        which would put ``check --format json`` piped into ``head`` on the drift code -- and the
+        machine-readable formats are the ones most likely to be piped at all. Re-raising as
+        ``PipeClosed`` routes it to the same silent 141 the Rich-rendered paths reach; that
+        class documents why an absent ``errno`` is what makes the difference.
+
         Args:
             text: Text to write without Rich rendering.
             newline: Whether to append one newline after ``text``.
+
+        Raises:
+            PipeClosed: If the reader on stdout departed before the write completed.
         """
-        self.stdout.file.write(text)
-        if newline:
-            self.stdout.file.write("\n")
-        self.stdout.file.flush()
+        try:
+            self.stdout.file.write(text)
+            if newline:
+                self.stdout.file.write("\n")
+            self.stdout.file.flush()
+        except BrokenPipeError as exc:
+            raise PipeClosed from exc
 
 
 def _github_workspace() -> Path | None:

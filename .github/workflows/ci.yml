@@ -102,9 +102,33 @@ jobs:
         run: uv pip install ruamel.yaml.clib
       - run: uv run --no-sync pytest
 
+  rich-floor:
+    name: Rich floor compatibility
+    runs-on: ubuntu-latest
+    env:
+      # The `tests` job owns the coverage gate; this leg only asks whether the CLI's exit-code
+      # contract still holds against the oldest `rich` the project declares.
+      PYTEST_ADDOPTS: --no-cov
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
+        with:
+          enable-cache: true
+      - run: uv python install 3.14
+      - run: uv sync --locked --group dev
+      # AD-27 gives `rich` a bound and no compatibility leg, on the grounds that nothing here
+      # reads its internals. GTX-201 made that untrue: the per-channel broken-pipe policy is
+      # built on `Console.on_broken_pipe`, which does not exist before 13.8.0. Pinned to the
+      # exact floor `pyproject.toml` declares rather than to a `13.8.*` series, for the reason
+      # the ruamel leg pins its own: a series resolves to the newest release in it and leaves
+      # every earlier permitted one untested. `tests/test_package_metadata.py` holds the two
+      # values equal.
+      - run: uv pip install 'rich==13.8.0'
+      - run: uv run --no-sync pytest tests/cli/
+
   release:
     name: Release
-    needs: [code-quality, tests, security-scan, yaml-compatibility]
+    needs: [code-quality, tests, security-scan, yaml-compatibility, rich-floor]
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     outputs:

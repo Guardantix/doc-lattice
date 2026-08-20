@@ -50,7 +50,7 @@ classifiers = [
 dependencies = [
     "markdown-it-py==4.2.0",
     "typer>=0.12,<1",
-    "rich>=13,<16",
+    "rich>=13.8.0,<16",
     "pydantic>=2,<3",
     "ruamel.yaml>=0.18,<0.20",
 ]

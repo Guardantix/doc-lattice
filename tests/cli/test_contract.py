@@ -11,6 +11,7 @@ from pathlib import Path
 from types import ModuleType
 
 import pytest
+from rich.console import Console
 from rich.text import Text
 
 import doc_lattice.cli as cli_mod
@@ -1484,3 +1485,215 @@ def _control_characters(stream: bytes) -> list[str]:
     """
     text = stream.decode("utf-8", errors="surrogateescape")
     return sorted({char for char in text if ord(char) < 0x20 or 0x7F <= ord(char) <= 0x9F} - {"\n"})
+
+
+# GTX-201: the per-channel broken-pipe policy. Every case below needs a real subprocess with two
+# separate descriptors, because all of them live between the command adapter and the interpreter:
+# `CliRunner` and in-process monkeypatching of `app` reach neither typer's own consoles, nor
+# typer's `_main` EPIPE branch, nor the shutdown flush that turns a dead stream into exit 120.
+_RUN_MAIN = "from doc_lattice.cli import main; main()"
+
+# The pre-renderer fallback: an escalated warning raised while importing the reporter itself, so
+# the clause that handles it cannot use the reporter. Its stderr write is stdlib-only, and so is
+# the neutralization that has to follow a failed one.
+_SUPPORT_IMPORT_FAILURE = """
+import builtins
+
+real_import = builtins.__import__
+
+def guarded_import(name, globals=None, locals=None, fromlist=(), level=0):
+    if name == "errors" and level == 1:
+        raise DeprecationWarning("a dependency deprecated something at import time")
+    return real_import(name, globals, locals, fromlist, level)
+
+builtins.__import__ = guarded_import
+from doc_lattice.cli import main
+main()
+"""
+
+
+def _run_with_departed_reader(
+    argv: list[str],
+    cwd: Path,
+    *,
+    channel: str,
+    code: str = _RUN_MAIN,
+) -> tuple[int, str]:
+    """Run one command with exactly one of its two readers closed before it writes.
+
+    Closing one pipe while holding the other is what separates the two channels. A test that
+    closed both, or that redirected stderr onto stdout, could not tell "the diagnostic stream
+    died" from "the result stream died" -- which is the entire distinction under test.
+
+    Args:
+        argv: Command-line arguments after the interpreter program.
+        cwd: Working directory for the child.
+        channel: Which reader to close, ``"stdout"`` or ``"stderr"``.
+        code: Program text for ``python -c``.
+
+    Returns:
+        The child's exit status and whatever the still-open reader received.
+    """
+    proc = subprocess.Popen(  # noqa: S603 - fixed interpreter and static test program
+        [sys.executable, "-c", code, *argv],
+        cwd=cwd,
+        env={**os.environ, "NO_COLOR": "1", "PYTHONPATH": str(_SRC), "COLUMNS": "1000"},
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    assert proc.stdout is not None  # guaranteed by stdout=subprocess.PIPE
+    assert proc.stderr is not None  # guaranteed by stderr=subprocess.PIPE
+    # Closed before the child produces any output, the way `head -1` closes once it has what it
+    # wants: every later write from the child hits a dead pipe.
+    if channel == "stdout":
+        proc.stdout.close()
+        _, survivor = proc.communicate(timeout=60)
+    else:
+        proc.stderr.close()
+        survivor, _ = proc.communicate(timeout=60)
+    return proc.returncode, survivor
+
+
+def _duplicate_id_lattice(tmp_path: Path) -> None:
+    """Write the shortest lattice whose load raises an adapter-caught ``ProjectError``."""
+    docs = tmp_path / "docs"
+    docs.mkdir()
+    (tmp_path / ".doc-lattice.yml").write_text("cache_key: pipe-policy\n", encoding="utf-8")
+    for name in ("first.md", "second.md"):
+        (docs / name).write_text("---\nid: duplicated\n---\n# t\n", encoding="utf-8")
+
+
+def _advisory_then_stdout_lattice(tmp_path: Path) -> None:
+    """Write a lattice that warns on stderr and then does real stdout work that drifts."""
+    docs = tmp_path / "docs"
+    docs.mkdir()
+    (tmp_path / ".doc-lattice.yml").write_text("cache_key: pipe-policy\n", encoding="utf-8")
+    (docs / "no-id.md").write_text("---\ntitle: prose\n---\n# t\n", encoding="utf-8")
+    (docs / "tracked.md").write_text(
+        "---\nid: tracked\nderives_from:\n  - ref: ghost\n---\n# r\n", encoding="utf-8"
+    )
+
+
+@pytest.mark.skipif(os.name != "posix", reason="SIGPIPE/EPIPE semantics are POSIX-only")
+def test_a_dead_stderr_keeps_the_adapter_caught_tool_error_exit(tmp_path: Path):
+    # Every command wraps orchestration in `exit_on_project_error`, which reports before it
+    # raises `typer.Exit(2)`. A dead stderr used to raise out of that report first, so the entry
+    # point took its broken-pipe branch and the run exited 141 -- reporting "something
+    # downstream stopped reading" for a lattice that is genuinely broken.
+    _duplicate_id_lattice(tmp_path)
+
+    status, _ = _run_with_departed_reader(["check"], tmp_path, channel="stderr")
+
+    assert status == EXIT_TOOL_ERROR
+
+
+@pytest.mark.skipif(os.name != "posix", reason="SIGPIPE/EPIPE semantics are POSIX-only")
+def test_a_dead_stderr_leaves_an_advisory_run_on_its_ordinary_exit_code(tmp_path: Path):
+    # AD-29's phase guard already contained the BrokenPipeError, but not the bytes the failed
+    # write left buffered in sys.stderr: the interpreter's shutdown flush retried them, failed,
+    # and replaced the run's own exit code with CPython's 120.
+    _advisory_then_stdout_lattice(tmp_path)
+
+    dead_stderr, surviving_stdout = _run_with_departed_reader(["check"], tmp_path, channel="stderr")
+    dead_stdout, _ = _run_with_departed_reader(["check"], tmp_path, channel="stdout")
+
+    assert dead_stderr == 1  # the drift the corpus actually has, not 120 and not 141
+    assert "ghost" in surviving_stdout  # and the stdout work finished after the advisory was lost
+    # The same corpus with the other reader closed, so the contrast is the channel and nothing
+    # else: only the stream carrying the command's result decides 141.
+    assert dead_stdout == 141
+
+
+@pytest.mark.skipif(os.name != "posix", reason="SIGPIPE/EPIPE semantics are POSIX-only")
+def test_a_dead_stderr_does_not_truncate_the_stdout_report(tmp_path: Path):
+    # The half PR #267 fixed, held here against the channel policy that replaced it: whatever a
+    # succeeding command computes for stdout still arrives in full when only stderr died.
+    _advisory_then_stdout_lattice(tmp_path)
+
+    _, with_dead_stderr = _run_with_departed_reader(["check"], tmp_path, channel="stderr")
+    complete = _run_bytes(["check"], tmp_path, {"COLUMNS": "1000"}).stdout.decode()
+
+    assert with_dead_stderr == complete
+
+
+@pytest.mark.skipif(os.name != "posix", reason="SIGPIPE/EPIPE semantics are POSIX-only")
+def test_help_rendered_into_a_departed_reader_exits_141(tmp_path: Path):
+    # The original symptom, on the path that survived PR #267. Help is rendered by
+    # typer.rich_utils' plain consoles, built outside `_create_runtime`, so `CliConsole` never
+    # governed them and rich's default hook exited 1 -- the code check and lint reserve for
+    # drift, reached here by a user simply piping `--help` into `head`.
+    status, _ = _run_with_departed_reader(["--help"], tmp_path, channel="stdout")
+
+    assert status == 141
+
+
+@pytest.mark.skipif(os.name != "posix", reason="SIGPIPE/EPIPE semantics are POSIX-only")
+def test_a_usage_error_reported_to_a_dead_stderr_keeps_its_exit_code(tmp_path: Path):
+    # The other half of typer's rendering. A usage error is a real tool error whose report
+    # happens to be undeliverable, so it keeps exit 2 rather than becoming 120 at shutdown.
+    argv = ["check", "--format", "json", "--indent", "-1"]
+
+    status, _ = _run_with_departed_reader(argv, tmp_path, channel="stderr")
+
+    assert status == EXIT_TOOL_ERROR
+
+
+@pytest.mark.skipif(os.name != "posix", reason="SIGPIPE/EPIPE semantics are POSIX-only")
+def test_the_machine_readable_formats_exit_141_on_a_departed_reader(tmp_path: Path):
+    # `--format json` writes through `CliRuntime.write_stdout`, the one output path that does
+    # not go through rich. Its BrokenPipeError therefore arrives carrying errno EPIPE, which is
+    # exactly what typer's `_main` converts into sys.exit(1) -- and the machine-readable formats
+    # are the ones most likely to be piped into `head` or `jq` in the first place.
+    _duplicate_id_lattice(tmp_path)
+    (tmp_path / "docs" / "second.md").write_text("---\nid: second\n---\n# t\n", encoding="utf-8")
+
+    status, _ = _run_with_departed_reader(["check", "--format", "json"], tmp_path, channel="stdout")
+
+    assert status == 141
+
+
+@pytest.mark.skipif(os.name != "posix", reason="SIGPIPE/EPIPE semantics are POSIX-only")
+def test_the_support_import_fallback_keeps_its_exit_code_on_a_dead_stderr(tmp_path: Path):
+    # The one path that cannot use the policy, because the policy is part of what failed to
+    # import. It carries its own stdlib-only neutralization of file descriptor 2 for exactly
+    # that reason; without it the explicit SystemExit(2) below became CPython's 120 at shutdown,
+    # and an escalated warning read to a caller as an unrelated interpreter fault.
+    status, _ = _run_with_departed_reader(
+        [], tmp_path, channel="stderr", code=_SUPPORT_IMPORT_FAILURE
+    )
+
+    assert status == EXIT_TOOL_ERROR
+
+
+@pytest.mark.skipif(os.name != "posix", reason="SIGPIPE/EPIPE semantics are POSIX-only")
+@pytest.mark.parametrize(
+    "argv",
+    [
+        ["--help"],
+        ["check"],
+        ["check", "--format", "json"],
+        ["check", "--format", "json", "--indent", "-1"],
+    ],
+    ids=["help", "human", "json", "usage-error"],
+)
+def test_no_command_exits_1_because_a_reader_departed(argv: list[str], tmp_path: Path):
+    # The contract stated as one sweep rather than per path: 1 is the drift code, and a departed
+    # reader is never drift. Both channels, so a repair that fixed one by breaking the other
+    # cannot pass.
+    _duplicate_id_lattice(tmp_path)
+    (tmp_path / "docs" / "second.md").write_text("---\nid: second\n---\n# t\n", encoding="utf-8")
+
+    for channel in ("stdout", "stderr"):
+        status, _ = _run_with_departed_reader(argv, tmp_path, channel=channel)
+        assert status != 1, f"{argv} exited 1 with a dead {channel}"
+        assert status != 120, f"{argv} exited 120 with a dead {channel}"
+
+
+def test_rich_still_offers_the_hook_the_policy_is_built_on():
+    # `broken_pipe_policy` substitutes this documented method on rich's own Console so typer's
+    # consoles inherit the policy without this project reaching into typer's internals. AD-27
+    # now records rich's hook as a read compatibility surface for that reason, and this is the
+    # assertion that turns its removal in a future rich into a failure here rather than a
+    # silent return to exit 1 on `--help`.
+    assert callable(getattr(Console, "on_broken_pipe", None))

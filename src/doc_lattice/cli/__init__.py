@@ -58,13 +58,22 @@ def main() -> None:
         os.environ["_TYPER_FORCE_DISABLE_TERMINAL"] = "1"
 
     # Unguarded on purpose, and the only imports that are. `error_types` reaches `constants`
-    # and `typing` and nothing else -- no dependency, no engine module, nothing that warns at
-    # import time -- so it is the one chain the fallback below can rest on while reporting a
-    # failure of every other chain.
+    # and `typing` and nothing else, and `pipe_policy` reaches only `os` -- no dependency, no
+    # other engine module, nothing that warns at import time -- so these are the two chains the
+    # fallback below can rest on while reporting a failure of every other chain. `pipe_policy`
+    # earns its place there for the same reason `error_types` does: the fallback needs to
+    # neutralize file descriptor 2, and a neutralizer reached through `runtime` or `errors`
+    # would be unavailable in precisely the case that needs it.
     from ..error_types import (  # noqa: PLC0415
         ProjectError,
         escalated_warning_error,
         exception_details,
+    )
+    from .pipe_policy import (  # noqa: PLC0415
+        STDERR_FILENO,
+        STDOUT_FILENO,
+        file_descriptor,
+        neutralize,
     )
 
     try:
@@ -80,7 +89,7 @@ def main() -> None:
             print_internal_error,
             print_project_error,
         )
-        from .runtime import diagnostic_runtime  # noqa: PLC0415
+        from .runtime import broken_pipe_policy, diagnostic_runtime  # noqa: PLC0415
     except Warning as exc:
         # The reporter is precisely what failed to import, so this cannot use it. A plain write
         # is the whole fallback: same grammar, no Console, and no further import that could
@@ -88,8 +97,23 @@ def main() -> None:
         # neutralizes Rich markup that Rich then renders back, so the bytes a terminal receives
         # are the same either way, and nothing here goes through Rich.
         error = escalated_warning_error(exc)
-        with suppress(OSError, ValueError):
+        try:
             sys.stderr.write(f"error ({error.code}): {exception_details(error)}\n")
+            # Flushed here rather than left to the stream's own buffering policy, so that a
+            # dead reader is discovered while this clause can still answer for it. CPython
+            # line-buffers `sys.stderr`, which would usually surface it on the newline above,
+            # but that is a property of the interpreter's default streams rather than a
+            # guarantee about whatever an embedder or a redirect substituted.
+            sys.stderr.flush()
+        except (OSError, ValueError):
+            # The Rich policy is unreachable here for the same reason the reporter is, so this
+            # path carries its own stdlib-only equivalent of the stderr half: neutralize the
+            # descriptor and keep the semantic exit. Without it the bytes the failed write left
+            # buffered are flushed again during interpreter shutdown, that second failure
+            # replaces the `SystemExit(2)` below with CPython's 120, and an escalated warning
+            # reads to a caller as an unrelated interpreter fault.
+            fd = file_descriptor(sys.stderr)
+            neutralize(STDERR_FILENO if fd is None else fd)
         # `EXIT_TOOL_ERROR` lives in the module that just failed to import. The literal is
         # pinned equal to it by a test, so the two cannot drift apart unnoticed.
         raise SystemExit(2) from exc
@@ -103,27 +127,37 @@ def main() -> None:
         if not callable(application):
             msg = "CLI application is not callable"
             raise RuntimeError(msg)
-        application()
+        # Scoped to the call rather than installed at import, because the substitution is on a
+        # dependency's shared class: an embedder that imports this package must not find Rich's
+        # documented default quietly replaced for its own consoles.
+        with broken_pipe_policy():
+            application()
     except ProjectError as exc:
-        # A report to a stderr that refuses the write cannot be delivered: `CliConsole`
-        # raises `BrokenPipeError` for one, and a closed (rather than broken) stream raises
-        # `ValueError`. An exception raised inside an `except` clause is never retried
-        # against a sibling clause, so without this containment either would escape
-        # `main()` as an unhandled traceback instead of the clean tool-error exit.
+        # A report to a stderr that refuses the write cannot be delivered, and the tool-error
+        # exit is kept either way. A broken pipe is already answered in place by
+        # `apply_broken_pipe_policy` and never arrives here, but a closed (rather than broken)
+        # stream still raises `ValueError` past it, as does any other write failure. An
+        # exception raised inside an `except` clause is never retried against a sibling clause,
+        # so without this containment one would escape `main()` as an unhandled traceback
+        # instead of the clean tool-error exit.
         with suppress(OSError, ValueError):
             print_project_error(diagnostic_runtime(no_color=no_color), exc)
         raise SystemExit(EXIT_TOOL_ERROR) from exc
     except BrokenPipeError as exc:
-        # A departed reader is not a tool error: die the way SIGPIPE would have killed a
-        # native tool, silently and with its exit code. The devnull redirect keeps the
-        # interpreter's shutdown flush of the dead stream from printing an
-        # "Exception ignored" traceback after this handler has already exited cleanly.
+        # Only the stdout channel reaches here now: `apply_broken_pipe_policy` answers a dead
+        # stderr in place and returns, so a broken pipe that arrives as an exception is one
+        # that truncated the command's own result. A departed reader is not a tool error: die
+        # the way SIGPIPE would have killed a native tool, silently and with its exit code.
         with suppress(OSError, ValueError):
             sys.stdout.flush()
-        with suppress(OSError, ValueError):
-            devnull = os.open(os.devnull, os.O_WRONLY)
-            os.dup2(devnull, sys.stdout.fileno())
-            os.dup2(devnull, sys.stderr.fileno())
+        # Both descriptors, not just stdout's. The policy already neutralized whichever stream
+        # it handled, and this clause is also the backstop for a `BrokenPipeError` raised
+        # somewhere no console governs, where which stream died is not knowable from here.
+        # Redirecting an already-redirected or still-healthy descriptor costs nothing, because
+        # this handler prints nothing and the process exits immediately after it.
+        for stream, default in ((sys.stdout, STDOUT_FILENO), (sys.stderr, STDERR_FILENO)):
+            fd = file_descriptor(stream)
+            neutralize(default if fd is None else fd)
         raise SystemExit(EXIT_PIPE_CLOSED) from exc
     except Warning as exc:
         # `PYTHONWARNINGS=error` and `-W error` raise the warning instance rather than
