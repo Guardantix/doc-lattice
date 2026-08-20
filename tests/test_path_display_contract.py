@@ -306,6 +306,17 @@ class TestTransactionSinks:
         error = reconcile_transaction._invalid_journal_error(journal, "boom")
         _assert_displayed(str(error), journal)
 
+    def test_journal_validation_error_names_the_journal(self, tmp_path: Path):
+        # GTX-227's second journal sink, and one the static guard cannot reach: it binds the
+        # display spelling to a local and interpolates that, so no path-bearing name is ever
+        # inside an f-string there. Driven through `_parse_journal`, which is the only route
+        # production takes to it, and the message spans lines, which `_assert_displayed`
+        # tolerates because `CONTROLS` excludes the newline.
+        journal = tmp_path / HOSTILE
+        with pytest.raises(ReconcilePersistenceError) as exc:
+            reconcile_transaction._parse_journal('{"version": 1}', journal)
+        _assert_displayed(str(exc.value), journal)
+
     def test_journal_already_exists_message(self, tmp_path: Path):
         journal = tmp_path / HOSTILE
         _assert_displayed(reconcile_transaction._journal_already_exists_message(journal), journal)

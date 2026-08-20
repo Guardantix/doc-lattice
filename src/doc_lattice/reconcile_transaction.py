@@ -482,15 +482,17 @@ def _journal_remediation(displayed_journal: str) -> str:
 def _invalid_journal_error(journal: Path, cause: object) -> ReconcilePersistenceError:
     """Build the deliberate manual-remediation diagnostic for an invalid journal.
 
-    Every caller passes a project-constructed ``cause``: an ``OSError``, a containment or path
-    role refusal raised here, or the unsupported-version refusal ``_parse_journal`` raises. A
-    pydantic failure does not come through here; it is rendered by ``_journal_validation_error``
-    instead, because interpolating one into a single sentence is what put a rejected key on the
-    terminal unspelled (AD-35).
+    Every ``cause`` that reaches here carries no author text: an ``OSError``, the UTF-8
+    ``UnicodeDecodeError`` -- which reports a byte position and a hex code point, never the
+    bytes -- a containment or path role refusal raised here, the unsupported-version refusal
+    ``_parse_journal`` raises, and the provenance-preservation refusal ``_prepare_transaction``
+    raises over its own published journal. A pydantic failure does not come through here; it is
+    rendered by ``_journal_validation_error`` instead, because interpolating one into a single
+    sentence is what put a rejected key on the terminal unspelled (AD-35).
 
     Args:
         journal: The journal the diagnostic is about.
-        cause: The project-owned explanation, interpolated as one clause.
+        cause: The explanation, interpolated as one clause.
 
     Returns:
         The typed error, carrying the cause and the remediation as one line.
