@@ -62,8 +62,9 @@ group below, since the error codes and output spellings it settles are what GTX-
   reaches it through them.
 - Confirm on a published artifact that step 1 of [MANAGED_CI.md](MANAGED_CI.md) exits 0 against
   the 5.0 pin (GTX-169). GTX-164's walk found it exits 2 on every release available at the time,
-  and the recipe is the sole installation path, so a failure here is release-blocking rather than
-  a documentation nit.
+  and the recipe is the sole installation path. 5.0.0 is published, so a failure there is a defect
+  in a released artifact rather than something that can block it, and takes the recovery path
+  [RELEASING.md](RELEASING.md) owns.
 
 ## 5.x: make the honor-system rules mechanical
 
