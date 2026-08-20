@@ -59,6 +59,7 @@ from doc_lattice.error_types import (
     ProjectError,
     ReconcileInProgressError,
     ReconcilePersistenceError,
+    ValidationError,
     exception_details,
 )
 from doc_lattice.frontmatter_parser import parse_meta, split_frontmatter_parts
@@ -949,7 +950,7 @@ class TestInitSinks:
         # earlier rejection loop instead, so a hostile case here would assert an unreachable
         # branch. The spelling is what this pins.
         entry = "../outside/"
-        with pytest.raises(ConfigError) as exc:
+        with pytest.raises(ValidationError) as exc:
             _validate_init_flags((entry,), None)
 
         message = str(exc.value)
@@ -957,7 +958,7 @@ class TestInitSinks:
         assert format_path_for_display(entry) in message
 
     def test_a_control_bearing_docs_root_is_refused_before_that_branch(self):
-        with pytest.raises(ConfigError) as exc:
+        with pytest.raises(ValidationError) as exc:
             _validate_init_flags((f"../{HOSTILE}",), None)
 
         message = str(exc.value)

@@ -64,6 +64,20 @@ def _shared_guidance(version: str) -> str:
     )
 
 
+# GTX-216: every value `init` validates before it writes anything reports VALIDATION_ERROR.
+# Asserted structurally rather than by substring, so a code that merely contains the right word
+# somewhere in a longer diagnostic cannot pass: the code sits in the leading `error (CODE):`
+# field, and the old code must be absent from the whole stream. The scaffold check is the other
+# half of the contract -- rejection happens before any write, so the directory keeps only its
+# `.git` from the autouse repository fixture.
+def _assert_rejected_before_any_write(result, tmp_path: Path) -> None:
+    assert result.exit_code == 2
+    assert result.stdout == ""
+    assert result.stderr.startswith("error (VALIDATION_ERROR): ")
+    assert "CONFIG_ERROR" not in result.stderr
+    assert {path.name for path in tmp_path.iterdir()} == {".git"}
+
+
 def _legacy_stdout(version: str) -> str:
     return (
         _shared_guidance(version) + "# ===== .github/workflows/doc-lattice.yml (new file) =====\n"
@@ -227,9 +241,10 @@ def test_init_rejects_hostile_default_branch_before_any_write(
 
     result = runner.invoke(app, ["init", "--default-branch", branch])
 
-    assert result.exit_code == 2
     assert "must be an ASCII Git branch name" in result.stderr
-    assert {path.name for path in tmp_path.iterdir()} == {".git"}
+    # An explicit flag value is a command-line input, so the code names validation rather than a
+    # config file `init` has not written and never reads.
+    _assert_rejected_before_any_write(result, tmp_path)
 
 
 def test_init_rejects_a_probed_branch_outside_the_supported_domain(tmp_path: Path, monkeypatch):
@@ -240,9 +255,10 @@ def test_init_rejects_a_probed_branch_outside_the_supported_domain(tmp_path: Pat
 
     result = runner.invoke(app, ["init"])
 
-    assert result.exit_code == 2
     assert "must be an ASCII Git branch name" in result.stderr
-    assert {path.name for path in tmp_path.iterdir()} == {".git"}
+    # The probed candidate moves with the flag deliberately: it is not a command-line value, but
+    # it is still an input this run validated, and CONFIG_ERROR is exactly as wrong here.
+    _assert_rejected_before_any_write(result, tmp_path)
 
 
 def test_init_writes_config_and_prints_codegen(tmp_path: Path, monkeypatch):
@@ -433,15 +449,17 @@ def test_init_bakes_flag_values(tmp_path: Path, monkeypatch):
 def test_init_rejects_unsafe_docs_root(tmp_path: Path, monkeypatch, bad):
     monkeypatch.chdir(tmp_path)
     result = runner.invoke(app, ["init", "--docs-root", bad])
-    assert result.exit_code == 2
-    assert not (tmp_path / ".doc-lattice.yml").exists()
+    assert "must be a relative path inside the project" in result.stderr
+    _assert_rejected_before_any_write(result, tmp_path)
 
 
 def test_init_rejects_control_character_in_flag(tmp_path: Path, monkeypatch):
     monkeypatch.chdir(tmp_path)
+    # The shared empty-or-control-character site, which both flags reach. Kept as its own case so
+    # the value-specific rejections around it do not become its only coverage.
     result = runner.invoke(app, ["init", "--linear-team", "a\nb"])
-    assert result.exit_code == 2
-    assert not (tmp_path / ".doc-lattice.yml").exists()
+    assert "is empty or contains a control character" in result.stderr
+    _assert_rejected_before_any_write(result, tmp_path)
 
 
 def test_init_rejects_invalid_linear_team(tmp_path: Path, monkeypatch):
@@ -449,16 +467,15 @@ def test_init_rejects_invalid_linear_team(tmp_path: Path, monkeypatch):
     # A lowercase, hyphenated value is not a valid Linear team key, so init must
     # refuse it rather than scaffold a config that the linear command rejects.
     result = runner.invoke(app, ["init", "--linear-team", "my-team-slug"])
-    assert result.exit_code == 2
-    assert not (tmp_path / ".doc-lattice.yml").exists()
+    assert "must be a Linear team key" in result.stderr
+    _assert_rejected_before_any_write(result, tmp_path)
 
 
 def test_init_rejects_markup_metachar_in_docs_root(tmp_path: Path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     result = runner.invoke(app, ["init", "--docs-root", "../[/]"])
-    assert result.exit_code == 2
     assert result.exception is None or isinstance(result.exception, SystemExit)
-    assert not (tmp_path / ".doc-lattice.yml").exists()
+    _assert_rejected_before_any_write(result, tmp_path)
 
 
 def test_init_crash_during_link_leaves_clean_state(tmp_path: Path, monkeypatch):

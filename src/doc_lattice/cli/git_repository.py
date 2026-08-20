@@ -18,7 +18,7 @@ from pathlib import Path
 from shutil import which
 from subprocess import CompletedProcess, TimeoutExpired, run
 
-from ..error_types import ConfigError
+from ..error_types import ValidationError
 
 _GIT_TIMEOUT_SECONDS = 5
 _GIT_EXECUTABLE_NAME = "git"
@@ -61,8 +61,11 @@ def validate_default_branch(value: str) -> str:
         The same value, unchanged, once it is known to be safe to render.
 
     Raises:
-        ConfigError: If the name is outside the supported ASCII domain, or carries a glob or
-            pattern character that a GitHub branch filter would interpret rather than match.
+        ValidationError: If the name is outside the supported ASCII domain, or carries a glob or
+            pattern character that a GitHub branch filter would interpret rather than match. The
+            rejected name is an input, whether it arrived on the command line or from the probe,
+            so it is a validation failure in both cases; ``init`` writes no config file before
+            this runs and never reads one, so naming config would point at nothing.
     """
     if (
         not value
@@ -72,7 +75,7 @@ def validate_default_branch(value: str) -> str:
         or value == _RESERVED_BRANCH_NAME
         or any(component.endswith(".lock") for component in value.split("/"))
     ):
-        raise ConfigError(_default_branch_error(value))
+        raise ValidationError(_default_branch_error(value))
     return value
 
 
@@ -188,7 +191,7 @@ def _git_succeeded(git: str, cwd: Path, arguments: list[str]) -> bool:
 
 
 def _default_branch_error(value: str) -> str:
-    """Build the configuration error message for an unsupported default branch name."""
+    """Build the validation error message for an unsupported default branch name."""
     return (
         f"default branch {value!r} must be an ASCII Git branch name built from letters, digits, "
         "'.', '_', and '-', in '/'-separated parts, for example main or release/2.x. Glob and "

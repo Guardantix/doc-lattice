@@ -28,12 +28,13 @@ keeps this release from staying open indefinitely. Applying that rule admitted n
 than three, six of them moved back in from the minor train; seven are still open, since GTX-238
 and GTX-202 have landed. Start with the two groups below that GTX-113 waits on.
 
-- Report a bad `--docs-root` or `--linear-team` from `init` as `VALIDATION_ERROR` rather than
-  `CONFIG_ERROR` (GTX-216). It is the last raise site in that file naming a command-line value
-  with a code that sends the user to a config file `init` has not written yet and never reads,
-  and it is here for the reason GTX-112 and GTX-198 were: GTX-113 rewrites README against the
-  codes the release actually prints, and moving a documented code afterwards would be a break in
-  a minor.
+- Report every value `init` validates before it writes anything -- `--docs-root`,
+  `--linear-team`, `--default-branch`, and the `origin/HEAD` candidate the branch probe returns
+  -- as `VALIDATION_ERROR` rather than `CONFIG_ERROR` (GTX-216). They are the last raise sites
+  reachable from `init` naming a rejected value with a code that sends the user to a config file
+  it has not written yet and never reads, and they are here for the reason GTX-112 and GTX-198
+  were: GTX-113 rewrites README against the codes the release actually prints, and moving a
+  documented code afterwards would be a break in a minor.
 - Close the three output sinks still open of the four 5.0's group did not reach: reconcile's
   post-load re-parse warning (GTX-200), the load-cache write warning (GTX-221), and the journal's
   own validation diagnostic (GTX-227). Reconcile's lock diagnostics (GTX-238) were the fourth and

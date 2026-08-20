@@ -7,7 +7,7 @@ import pytest
 
 from doc_lattice.cli import git_repository
 from doc_lattice.cli.git_repository import probe_default_branch, validate_default_branch
-from doc_lattice.error_types import ConfigError
+from doc_lattice.error_types import ValidationError
 
 
 def _git(cwd: Path, *arguments: str) -> None:
@@ -296,7 +296,7 @@ def test_validate_default_branch_accepts_supported_names(branch: str):
     ],
 )
 def test_validate_default_branch_rejects_unsupported_names(branch: str):
-    with pytest.raises(ConfigError, match="must be an ASCII Git branch name"):
+    with pytest.raises(ValidationError, match="must be an ASCII Git branch name"):
         validate_default_branch(branch)
 
 
@@ -317,12 +317,12 @@ def test_structurally_rejected_names_are_ones_git_refuses(tmp_path: Path, branch
     with pytest.raises(subprocess.CalledProcessError):
         _git(tmp_path, "branch", branch)
 
-    with pytest.raises(ConfigError, match="must be an ASCII Git branch name"):
+    with pytest.raises(ValidationError, match="must be an ASCII Git branch name"):
         validate_default_branch(branch)
 
 
 def test_validate_default_branch_error_names_the_glob_hazard_and_the_override():
-    with pytest.raises(ConfigError) as excinfo:
+    with pytest.raises(ValidationError) as excinfo:
         validate_default_branch("release/*")
 
     message = str(excinfo.value)

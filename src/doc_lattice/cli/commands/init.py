@@ -10,7 +10,7 @@ from rich.markup import escape
 
 from ... import __version__
 from ...config import DEFAULT_CONFIG_NAME
-from ...error_types import ConfigError, InitPersistenceError, copy_exception_notes
+from ...error_types import InitPersistenceError, ValidationError, copy_exception_notes
 from ...linear_query import is_valid_team_key
 from ...path_utils import format_path_for_display
 from ...persistence import atomic_create_bytes
@@ -70,7 +70,10 @@ def _resolve_default_branch(default_branch: str | None, cwd: Path) -> tuple[str,
         The validated branch name and the source label to narrate.
 
     Raises:
-        ConfigError: If a supplied or discovered name is outside the supported domain.
+        ValidationError: If a supplied or discovered name is outside the supported domain. Both
+            sources report the same code deliberately: a rejected ``origin/HEAD`` target is not a
+            command-line value, but it is still an input this run validated, and ``init`` has no
+            config file to blame for either.
     """
     if default_branch is not None:
         return validate_default_branch(default_branch), _BRANCH_SOURCE_FLAG
@@ -87,7 +90,7 @@ def _validate_init_flags(docs_roots: tuple[str, ...], linear_team: str | None) -
     for value in values:
         if not value or strip_control_chars(value) != value:
             msg = f"flag value {value!r} is empty or contains a control character"
-            raise ConfigError(msg)
+            raise ValidationError(msg)
     for root in docs_roots:
         if Path(root).is_absolute() or ".." in Path(root).parts:
             # The recorded flag string is handed to the helper as text. Path(root) would
@@ -100,14 +103,14 @@ def _validate_init_flags(docs_roots: tuple[str, ...], linear_team: str | None) -
                 f"--docs-root {format_path_for_display(root)} must be a relative path inside "
                 "the project, without '..' or a leading slash"
             )
-            raise ConfigError(msg)
+            raise ValidationError(msg)
     if linear_team is not None and not is_valid_team_key(linear_team):
         msg = (
             f"--linear-team {linear_team!r} must be a Linear team key: uppercase letters "
             "and digits, starting with a letter, for example ENG. The linear command "
             "rejects any other value."
         )
-        raise ConfigError(msg)
+        raise ValidationError(msg)
 
 
 def _init_persistence_error(target_name: str, cause: OSError) -> InitPersistenceError:
