@@ -13,63 +13,57 @@ exactly one of them. The ordering within a section is a real dependency order, r
 relations on the issues themselves, so the tracker's unblocked queue and this document cannot
 drift apart. An item with no stated dependency has none.
 
-## 5.0: retire the managed CI product and close the behavior window
+## 6.0: close the behavior window 5.0 left open
 
-The release in flight. `## [Unreleased]` already carries breaking changes, so the next version is
-5.0.0. Admission is narrow on purpose: an item belongs here only if it is breaking, or if it has
-to be true at the moment a major ships. Everything else waits for 5.x, which is what keeps this
-release from staying open indefinitely.
+5.0.0 shipped ahead of this section rather than at the end of it: six admitted items were still
+open at the tag. Two of them, GTX-212 and GTX-214, have landed on main since and wait in
+`## [Unreleased]`, where [CHANGELOG.md](CHANGELOG.md) records what they changed. GTX-212 is
+breaking, so the window is open again as a fact rather than by choice, and the next version is
+6.0.0.
 
-Nothing in the release sequences behind a single item any more. GTX-163 has removed the managed
-GitHub and Linear CI code and repaired every document that described it, GTX-126 has moved the
-reconcile journal to v2, GTX-110 has retired the orphaned dirfd persistence family and recorded
-the filesystem threat model in AD-2, and GTX-148 has stopped a document's tracked status depending
-on whether the optional `ruamel.yaml.clib` accelerator is installed. Start with the diagnostics
-group below, since the error codes and output spellings it settles are what GTX-113 waits on.
+Admission is unchanged and still narrow on purpose: an item belongs here only if it is breaking,
+or if it has to be true at the moment a major ships. Everything else waits for 6.x, which is what
+keeps this release from staying open indefinitely. Applying that rule moved six issues back in
+from the minor train, so ten are open here rather than four. Start with the two groups below that
+GTX-113 waits on.
 
-- Bring the diagnostics an external user meets first up to the standard the transaction layer
-  already sets, then close the repo-controlled strings that can corrupt what they print. The load
-  boundary introduces a frontmatter-specific error code and so has to land in this window
-  (GTX-112). Warning presentation matters now that GTX-102 makes the id-less skip fire on every
-  adopter run rather than in an edge case (GTX-124). Where that code prints moves with them: it
-  was appended after the whole flattened message, so on a multi-line diagnostic it landed at the
-  end of the last detail line and read as that field's parenthetical rather than as the error's
-  code, and GTX-112 is what makes such diagnostics routine rather than rare; putting it beside the
-  severity changes the rendered shape of every error type, which is what admits it here rather
-  than a minor (GTX-203). Those three settle what the engine prints; the four after them settle
-  what a repository can make it print, and there are three such strings, not one. A document path
-  never passes the frontmatter parser at all, so control bytes in a filename reach output raw, and
-  the fix belongs at message construction so it survives whichever renderer prints it; that work
-  carries the display contract the other two reuse rather than restate (GTX-125). A typed
-  frontmatter value is the second string: the parser refuses a literal control byte in the source
-  stream but decodes a double-quoted escape into a real one, so `id`, `title`, `tickets`, `ref`,
-  and `seen` carry them through, and closing it turns on its own decision about rejecting at
-  validation, which is why it is not folded in (GTX-208). The reconcile transaction
-  and recovery layers interpolate destination, journal, and staged-artifact paths the same way,
-  and a stage name inherits its destination's, so a hostile filename propagates into them; they
-  apply GTX-125's contract instead of choosing one (GTX-209). A YAML load failure is the third
-  string, and it is the one neither of the first two reaches: it aborts before validation runs and
-  its message is built by `ruamel` rather than by this codebase, so four sites interpolate a
-  third-party diagnostic that echoes a duplicate key and both of its values back at the reader.
-  Closing it turns on its own decision about how to spell a message whose own line structure is
-  part of the diagnostic, which is why it is not folded into GTX-208 (GTX-219). What the four
-  enforce is the output promise [README.md](README.md) already makes, which is why the group is
-  not diagnostics-only.
-- Make README describe what 5.0 actually prints and enforces (GTX-113). This lands last because
-  every item above changes what there is to describe. The error codes and where they print settle
-  first, then the output group settles how a path and a typed value are spelled everywhere README
-  shows one, which is why GTX-203, GTX-208, GTX-209, and GTX-219 block it directly and GTX-125
-  reaches it through them.
+- Report a bad `--docs-root` or `--linear-team` from `init` as `VALIDATION_ERROR` rather than
+  `CONFIG_ERROR` (GTX-216). It is the last raise site in that file naming a command-line value
+  with a code that sends the user to a config file `init` has not written yet and never reads,
+  and it is here for the reason GTX-112 and GTX-198 were: GTX-113 rewrites README against the
+  codes the release actually prints, and moving a documented code afterwards would be a break in
+  a minor.
+- Close the four output sinks 5.0's group did not reach: reconcile's post-load re-parse warning
+  (GTX-200), the load-cache write warning (GTX-221), the journal's own validation diagnostic
+  (GTX-227), and reconcile's lock diagnostics (GTX-238). They moved here from the minor train
+  because each changes the spelling of something the engine prints, which is the ground that
+  admitted GTX-212. AD-36 leaves GTX-227's sink to that issue rather than widening its own scope,
+  so it is sequenced by a recorded decision rather than by preference. None of the four sequences
+  against another. Landing them here is what keeps the promise GTX-214 narrowed true at every sink
+  the README pass is about to document.
+- Settle the two edge cases where what breaks is the run's own contract rather than a spelling: a
+  broken stderr pipe (GTX-201), and `PYTHONWARNINGS=error` (GTX-202). They moved with the four
+  above, on a stricter reading of the same rule, since an exit status is as much a contract as a
+  printed string. Neither sequences against the other.
+- Make README describe what 6.0 actually prints and enforces (GTX-113). This still lands last.
+  Seven open issues now block it -- GTX-216 and the six above -- on the rule that the README pass
+  cannot land ahead of the behavior it documents; every other blocker either shipped in 5.0.0 or is
+  already in `## [Unreleased]`.
+- Bring this document and the release dependency graph back into agreement with what is open
+  (GTX-213), so the preamble's claim that every open issue sits in exactly one release project is
+  something a sweep confirms rather than something a hand pass asserted. The 5.0.0 boundary is
+  what showed the claim was unchecked: it moved without this section moving with it.
 - Confirm on a published artifact that step 1 of [MANAGED_CI.md](MANAGED_CI.md) exits 0 against
   the 5.0 pin (GTX-169). GTX-164's walk found it exits 2 on every release available at the time,
-  and the recipe is the sole installation path, so a failure here is release-blocking rather than
-  a documentation nit.
+  and the recipe is the sole installation path. 5.0.0 is published, so a failure there is a defect
+  in a released artifact rather than something that can block it, and takes the recovery path
+  [RELEASING.md](RELEASING.md) owns.
 
-## 5.x: make the honor-system rules mechanical
+## 6.x: make the honor-system rules mechanical
 
 A train of minors, not a single release, and deliberately empty of user-visible behavior change.
 Everything here is either a rule the project already asserts in prose and does not enforce, or a
-follow-on that 5.0 unblocks. Nothing in this section gates the next major, so these ship in
+follow-on that 5.0 unblocked. Nothing in this section gates the next major, so these ship in
 whatever order the blocker graph permits.
 
 Start at GTX-176. It is two points, and it is what makes every other CI change in this section
@@ -94,32 +88,25 @@ cheap.
 - Close the reconcile follow-ons the v2 journal unblocks: an operator remediation that works for
   the lost-journal double failure (GTX-146), and the provenance-guard simplification (GTX-127)
   with the sink-guard scope question sequenced behind it (GTX-128).
-- Close the journal's own load diagnostic, which is where the 5.0 output group stops one boundary
-  short (GTX-227). `_invalid_journal_error` interpolates a pydantic `ValidationError` that renders
-  a rejected input value through `repr` but its error *location* raw, so a control-bearing extra
-  key in a hand-edited journal still reaches stderr unspelled. AD-36 records the sink and routes
-  it here rather than widening its own scope; the fix is AD-35's `_format_location_part` shape
-  applied at a second boundary. It lands in a minor rather than in that group because a journal is
-  a local artifact an operator edits, not a string a repository's own documents carry.
 - Decide how a stale or deprecated action pin gets noticed at all (GTX-181) before building the
   narrower check that resolves each pinned SHA against its version comment (GTX-180), since the
   chosen mechanism may subsume it.
-- Simplify the recipe once 5.0 has rewritten it: a first-class Linear credential check, so an
-  installation stops reading that answer out of a feature meant for something else (GTX-172), and
-  step 6's run identification (GTX-171).
+- Simplify the recipe now that 5.0 has rewritten it: a first-class Linear credential check, so
+  an installation stops reading that answer out of a feature meant for something else (GTX-172),
+  and step 6's run identification (GTX-171).
 - Single-file work with no sequencing at all: reconcile's record lines (GTX-120), release-smoke
   contract coverage for `init` (GTX-142), fuzz-gate oracle precision (GTX-160), and confirming
   that an administrator receives security alerts (GTX-151).
 
-## 6.0: the next behavior window
+## 7.0: the next behavior window
 
 Opened when there is enough batched behavior change to justify a major, not on a schedule. Two
 items sit here today. Each is large, each carries an unresolved decision rather than a known fix,
-and neither should be allowed to hold 5.0 open.
+and neither should be allowed to hold 6.0 open.
 
 - Decouple fetching `init`'s printed snippets from its directory-sensitive config write, and stop
   it scaffolding a nested `.doc-lattice.yml` when run from a subdirectory (GTX-153). The
-  print-only half is additive and could be split forward into 5.x if adopters need it sooner;
+  print-only half is additive and could be split forward into 6.x if adopters need it sooner;
   resolving the Git root in the ordinary branch changes zero-config behavior and needs this
   window.
 - Decide whether doc-lattice tracks its own maintained documents as a lattice (GTX-168). The
@@ -144,6 +131,6 @@ and neither should be allowed to hold 5.0 open.
   accidents, symlink confusion, and concurrent runs; an adversarial co-tenant on the same
   filesystem is out of scope, recorded with the threat model in AD-2 of
   [ARCHITECTURE.md](ARCHITECTURE.md).
-- A productized managed CI offering. Superseded by the recipe GTX-109 wrote, which first ships
-  in 5.0 and which [MANAGED_CI.md](MANAGED_CI.md) owns; the earlier scanner half of that ambition
+- A productized managed CI offering. Superseded by the recipe GTX-109 wrote, which first shipped
+  in 5.0.0 and which [MANAGED_CI.md](MANAGED_CI.md) owns; the earlier scanner half of that ambition
   moved out in AD-25.
