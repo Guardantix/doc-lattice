@@ -24,8 +24,9 @@ by choice and the next version is 6.0.0.
 
 Admission is unchanged and still narrow on purpose: an item belongs here only if it is breaking,
 or if it has to be true at the moment a major ships. Everything else waits for 6.x, which is what
-keeps this release from staying open indefinitely. What follows is the four that are still open.
-Start with GTX-216, since it is the only open item GTX-113 waits on.
+keeps this release from staying open indefinitely. Applying that rule on 2026-08-19 moved four
+output sinks back in from the minor train, so eight issues are open here rather than four. Start
+with the group below that GTX-113 waits on.
 
 - Report a bad `--docs-root` or `--linear-team` from `init` as `VALIDATION_ERROR` rather than
   `CONFIG_ERROR` (GTX-216). It is the last raise site in that file naming a command-line value
@@ -33,9 +34,20 @@ Start with GTX-216, since it is the only open item GTX-113 waits on.
   and it is here for the reason GTX-112 and GTX-198 were: GTX-113 rewrites README against the
   codes the release actually prints, and moving a documented code afterwards would be a break in
   a minor.
-- Make README describe what 6.0 actually prints and enforces (GTX-113). This still lands last,
-  and GTX-216 is now the only open issue blocking it; every other blocker either shipped in 5.0.0
-  or is already in `## [Unreleased]`.
+- Close the four output sinks 5.0's group did not reach, moved here from the minor train on
+  2026-08-19 because each changes the spelling of something the engine prints, which is the ground
+  that admitted GTX-212. Reconcile's post-load re-parse still warns through Python's default
+  formatter rather than the CLI's stderr voice (GTX-200). The load-cache write warning promises one
+  line and interpolates `exception_details`, which is not bounded to one (GTX-221). Journal
+  validation reports a control-bearing error *location* raw, the shape AD-35 closed for frontmatter
+  and AD-36 leaves to this issue rather than widening its own scope (GTX-227). Reconcile's lock
+  diagnostics interpolate the project root raw (GTX-238). None of the four sequences against
+  another. Landing them here is also what keeps the promise GTX-214 just narrowed true at every
+  sink the README pass is about to document.
+- Make README describe what 6.0 actually prints and enforces (GTX-113). This still lands last. Five
+  open issues now block it -- GTX-216 and the four above -- on the rule that the README pass cannot
+  land ahead of the behavior it documents; every other blocker either shipped in 5.0.0 or is
+  already in `## [Unreleased]`.
 - Bring this document and the release dependency graph back into agreement with what is open
   (GTX-213), so the preamble's claim that every open issue sits in exactly one release project is
   something a sweep confirms rather than something a hand pass asserted. The 5.0.0 boundary is
@@ -75,13 +87,6 @@ cheap.
 - Close the reconcile follow-ons the v2 journal unblocks: an operator remediation that works for
   the lost-journal double failure (GTX-146), and the provenance-guard simplification (GTX-127)
   with the sink-guard scope question sequenced behind it (GTX-128).
-- Close the journal's own load diagnostic, which is where 5.0's output group stops one boundary
-  short (GTX-227). `_invalid_journal_error` interpolates a pydantic `ValidationError` that renders
-  a rejected input value through `repr` but its error *location* raw, so a control-bearing extra
-  key in a hand-edited journal still reaches stderr unspelled. AD-36 records the sink and routes
-  it here rather than widening its own scope; the fix is AD-35's `_format_location_part` shape
-  applied at a second boundary. It lands in a minor rather than in that group because a journal is
-  a local artifact an operator edits, not a string a repository's own documents carry.
 - Decide how a stale or deprecated action pin gets noticed at all (GTX-181) before building the
   narrower check that resolves each pinned SHA against its version comment (GTX-180), since the
   chosen mechanism may subsume it.
