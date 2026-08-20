@@ -1256,6 +1256,21 @@ whatever its own operands happen to be named. Widening a name globally is the fi
 is unambiguous, and it is a scope decision rather than a free one, because it reports every
 existing sink spelling that name at once.
 
+GTX-238 is the first widening taken under that reading, and the scope choice rather than the
+wrapping is what makes it worth recording. Six lock diagnostics in `reconcile_transaction.py`
+interpolated a project root raw in a module the scan already read, so vocabulary was the entire
+gap. `project_root` is a `Path` parameter or the path-typed `ProjectConfig.project_root` at
+every production spelling, so its meaning does not change by module and it belongs in the global
+set; the `config.py` entry that had scoped it is removed with the promotion, which leaves one
+statement of the decision rather than two that can drift apart. `requested_root` stays scoped to
+the transaction module, since the comparison that audits it as a path exists only there.
+`lock.project_root` needs no entry at all, because the detector tests every component of an
+attribute chain -- coverage the suite now asserts rather than inherits. The blast radius was
+measured before the promotion was taken rather than after: the widened detector reports exactly
+the seven operands at those six sites and nothing else, so a global name that could have
+reported sinks nobody had audited reported none. Output moves the way GTX-125's and GTX-212's
+did, and these lines quote the root they name.
+
 One classification is worth recording because it is not about safety. `init` names the config file
 it scaffolds by a compile-time constant, so wrapping it neutralizes nothing today, and quoting it
 moves three lines of visible output. It is classified and wrapped anyway, because the alternative

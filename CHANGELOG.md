@@ -40,6 +40,22 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   written changes -- the raw path is still what the engine opens, and the staged file `init`
   writes keeps its exact name.
 
+- A project root carrying a terminal control character no longer reaches human-facing output raw
+  through a `reconcile` lock failure. Six diagnostics in the transaction layer interpolated it
+  directly: the two that report an unresolvable or unreadable root, the two that report a lock
+  bound to a different root or a replaced root directory, the cleanup failure a clean exit
+  raises, and the lock setup failure. Running `reconcile` from a repository whose directory name
+  holds an escape sequence put those bytes on stderr, where a cursor-up could overwrite the
+  diagnostic printed above. All seven path operands at those six sites now build through the
+  same display spelling every other path has used since 5.0.
+
+  Output moves as a result: these lines quote the root they name. The static guard that enforces
+  the boundary gained the vocabulary to see them, which is why the sites went unreported while
+  the module was already scanned. `project_root` is now recognized in every module rather than
+  in `config.py` alone, since it is a path wherever it appears; that widening reports no sink
+  beyond these six. `requested_root` is recognized in the transaction module, where the only
+  code that audits it lives.
+
 ## [5.0.0] - 2026-08-19
 
 ### Migration

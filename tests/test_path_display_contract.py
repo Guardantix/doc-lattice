@@ -57,6 +57,7 @@ from doc_lattice.constants import (
 from doc_lattice.error_types import (
     ConfigError,
     ProjectError,
+    ReconcileInProgressError,
     ReconcilePersistenceError,
     exception_details,
 )
@@ -621,6 +622,107 @@ class TestTransactionSinks:
         with pytest.raises(ProjectError) as exc:
             reconcile_transaction.ensure_dry_run_safe(tmp_path)
         _assert_displayed(str(exc.value), journal)
+
+
+class TestTransactionLockSinks:
+    """Every ``reconcile_transaction.py`` lock diagnostic that names a project root.
+
+    GTX-238's own set, kept beside ``TestTransactionSinks`` rather than inside it because these
+    six sites share a cause: the root is a `Path` parameter named ``project_root`` or
+    ``requested_root``, and neither name was classified for this module, so the static guard
+    scanned the file and reported nothing while the sinks stayed raw.
+
+    Every injected cause is control-free on purpose. These assertions are about the path
+    operand; the exception text each message also interpolates is GTX-237's.
+    """
+
+    def test_unresolvable_project_root_names_the_requested_root(self, tmp_path: Path, monkeypatch):
+        root = tmp_path / HOSTILE
+        root.mkdir()
+
+        def blocked_resolve(_self, *_args, **_kwargs):
+            raise OSError("resolve blocked")
+
+        with reconcile_transaction.reconcile_lock(root) as lock:
+            monkeypatch.setattr(Path, "resolve", blocked_resolve)
+            with pytest.raises(ReconcileInProgressError, match="cannot validate") as exc:
+                reconcile_transaction._require_reconcile_lock(lock, root)
+            monkeypatch.undo()
+        _assert_displayed(str(exc.value), root)
+
+    def test_wrong_root_names_both_the_locked_and_the_requested_root(self, tmp_path: Path):
+        # The one diagnostic here with two independent path operands. Both roots carry the
+        # vector and they are distinct, so a patch that wrapped only one of them fails.
+        locked = tmp_path / f"locked-{HOSTILE}"
+        requested = tmp_path / f"requested-{HOSTILE}"
+        locked.mkdir()
+        requested.mkdir()
+        with (
+            reconcile_transaction.reconcile_lock(locked) as lock,
+            pytest.raises(ReconcileInProgressError, match="different project root") as exc,
+        ):
+            reconcile_transaction._require_reconcile_lock(lock, requested)
+        assert format_path_for_display(locked.resolve()) != format_path_for_display(
+            requested.resolve()
+        ), "the two operands must differ, or one wrapping would satisfy both assertions"
+        _assert_displayed(str(exc.value), locked.resolve())
+        _assert_displayed(str(exc.value), requested.resolve())
+
+    def test_unstattable_root_directory_names_the_requested_root(self, tmp_path: Path):
+        # The root resolves and matches the capability, and only the directory read fails.
+        root = tmp_path / HOSTILE
+        root.mkdir()
+        with reconcile_transaction.reconcile_lock(root) as lock:
+            root.rmdir()
+            with pytest.raises(ReconcileInProgressError, match="root directory") as exc:
+                reconcile_transaction._require_reconcile_lock(lock, root)
+        _assert_displayed(str(exc.value), root.resolve())
+
+    def test_replaced_root_directory_names_the_requested_root(self, tmp_path: Path):
+        # Same path, different inode: the capability protects the directory that was renamed
+        # away, not the one standing at the requested root now.
+        root = tmp_path / HOSTILE
+        moved = tmp_path / f"moved-{HOSTILE}"
+        root.mkdir()
+        with reconcile_transaction.reconcile_lock(root) as lock:
+            root.rename(moved)
+            root.mkdir()
+            with pytest.raises(ReconcileInProgressError, match="different project root") as exc:
+                reconcile_transaction._require_reconcile_lock(lock, root)
+        _assert_displayed(str(exc.value), root.resolve())
+
+    def test_cleanup_failure_on_a_clean_exit_names_the_project_directory(
+        self, tmp_path: Path, monkeypatch
+    ):
+        # The clean-exit branch is the sink. When an error is already propagating, the cleanup
+        # failure is attached as a cause-only note that names no root at all.
+        root = tmp_path / HOSTILE
+        root.mkdir()
+        real_flock = reconcile_transaction._flock
+
+        def blocked_release(fd: int, *, release: bool) -> None:
+            if release:
+                raise OSError("release blocked")
+            real_flock(fd, release=release)
+
+        monkeypatch.setattr(reconcile_transaction, "_flock", blocked_release)
+        with (
+            pytest.raises(ReconcilePersistenceError, match="project directory") as exc,
+            reconcile_transaction.reconcile_lock(root),
+        ):
+            pass
+        _assert_displayed(str(exc.value), root)
+
+    def test_lock_setup_failure_names_the_project_root(self, tmp_path: Path):
+        # Driven end to end through the context manager: opening a directory that is not there
+        # is the setup failure this message wraps.
+        missing = tmp_path / HOSTILE
+        with (
+            pytest.raises(ReconcilePersistenceError, match="lock setup failed") as exc,
+            reconcile_transaction.reconcile_lock(missing),
+        ):
+            pass
+        _assert_displayed(str(exc.value), missing)
 
 
 class TestPersistenceSinks:
