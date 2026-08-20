@@ -57,21 +57,48 @@ def main() -> None:
         os.environ["NO_COLOR"] = "1"
         os.environ["_TYPER_FORCE_DISABLE_TERMINAL"] = "1"
 
-    from ..error_types import ProjectError  # noqa: PLC0415
-    from .errors import (  # noqa: PLC0415
-        EXIT_PIPE_CLOSED,
-        EXIT_TOOL_ERROR,
+    # Unguarded on purpose, and the only imports that are. `error_types` reaches `constants`
+    # and `typing` and nothing else -- no dependency, no engine module, nothing that warns at
+    # import time -- so it is the one chain the fallback below can rest on while reporting a
+    # failure of every other chain.
+    from ..error_types import (  # noqa: PLC0415
+        ProjectError,
         escalated_warning_error,
-        print_internal_error,
-        print_project_error,
+        exception_details,
     )
-    from .runtime import diagnostic_runtime  # noqa: PLC0415
 
     try:
-        # Inside the guarded block, not before it: importing the application reaches every
-        # engine module and its dependencies, and under an escalating warning filter a
-        # deprecation raised at import time is exactly the traceback the `Warning` clause
-        # below exists to replace. Loading it here costs nothing, since the export is cached.
+        # Guarded separately from the application load, because these two imports are what the
+        # `Warning` clause of that block needs in order to report anything: `errors` reaches
+        # `runtime`, and `runtime` reaches `config` and `orchestrate`, so this single statement
+        # pulls in most of the engine, ruamel, markdown-it, rich, and typer. An escalating
+        # filter turns any import-time deprecation among them into an exception here, before a
+        # renderer exists to present it.
+        from .errors import (  # noqa: PLC0415
+            EXIT_PIPE_CLOSED,
+            EXIT_TOOL_ERROR,
+            print_internal_error,
+            print_project_error,
+        )
+        from .runtime import diagnostic_runtime  # noqa: PLC0415
+    except Warning as exc:
+        # The reporter is precisely what failed to import, so this cannot use it. A plain write
+        # is the whole fallback: same grammar, no Console, and no further import that could
+        # raise the same warning again. `escape` is not applied and does not need to be -- it
+        # neutralizes Rich markup that Rich then renders back, so the bytes a terminal receives
+        # are the same either way, and nothing here goes through Rich.
+        error = escalated_warning_error(exc)
+        with suppress(OSError, ValueError):
+            sys.stderr.write(f"error ({error.code}): {exception_details(error)}\n")
+        # `EXIT_TOOL_ERROR` lives in the module that just failed to import. The literal is
+        # pinned equal to it by a test, so the two cannot drift apart unnoticed.
+        raise SystemExit(2) from exc
+
+    try:
+        # Inside the guarded block, not before it: loading the application reaches the command
+        # adapters and everything they import that the boundary above did not, and under an
+        # escalating warning filter a deprecation raised at import time is exactly the traceback
+        # the `Warning` clause below exists to replace.
         application = _load_app()
         if not callable(application):
             msg = "CLI application is not callable"

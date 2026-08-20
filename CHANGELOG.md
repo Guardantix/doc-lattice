@@ -39,6 +39,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   this mapping. The category name leads the message because it is the handle an escalating filter
   is written against, and a note records that a filter rather than a document ended the run.
 
+  Import time is covered as well, in two regions. The application load is inside the guarded
+  block, and the boundary's own support imports -- which reach most of the engine plus ruamel,
+  markdown-it, rich, and typer before any renderer exists -- have a guard of their own that
+  writes the same line to stderr directly, since the renderer is what would have failed to
+  import.
+
   The repair is at the command-line boundary and touches no warning emission: every category,
   filter, and message is unchanged, ordinary runs are byte-identical, and a library consumer
   calling `load_lattice()` directly still receives the raised warning itself. Catching the base

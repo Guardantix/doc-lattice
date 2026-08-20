@@ -6,7 +6,7 @@ from contextlib import contextmanager
 import typer
 from rich.markup import escape
 
-from ..error_types import EscalatedWarningError, ProjectError, exception_details
+from ..error_types import ProjectError, exception_details
 from .runtime import CliRuntime
 
 EXIT_FINDING = 1
@@ -43,36 +43,6 @@ def print_project_error(runtime: CliRuntime, exc: ProjectError) -> None:
         soft_wrap=True,
         emoji=False,
     )
-
-
-def escalated_warning_error(exc: Warning) -> EscalatedWarningError:
-    """Restate a warning that a filter escalated to an exception as a coded project error.
-
-    ``PYTHONWARNINGS=error`` and ``-W error`` raise the warning instance itself, and CPython
-    does that before the replaceable ``showwarning`` stage, so AD-29's stderr renderer never
-    sees one and cannot present it. Without this, the escalated advisory leaves the entry point
-    as an unhandled traceback naming this package's own source and exits 1, the code ``check``
-    reserves for drift. Restating it here is what puts it back on the ``error (CODE)`` contract
-    the rest of the boundary prints.
-
-    The category name leads the message even though ``CliRuntime._render_warning`` deliberately
-    discards it for a displayed warning. The two diagnostics answer different questions: a
-    displayed advisory is addressed to someone reading about their documents, while this one is
-    addressed to someone who configured the filter that stopped the run, and the category is the
-    handle that configuration is written against.
-
-    Args:
-        exc: The warning instance a filter raised in place of displaying it.
-
-    Returns:
-        The coded project error to render and exit on.
-    """
-    error = EscalatedWarningError(f"{type(exc).__name__}: {exception_details(exc).strip()}")
-    error.add_note(
-        "a warning filter escalated this advisory to an error, so the run stopped here instead "
-        "of continuing past it"
-    )
-    return error
 
 
 @contextmanager

@@ -1726,10 +1726,28 @@ noise; this one is addressed to whoever configured the filter that stopped the r
 category is the handle that configuration is written against. The warning's own message follows,
 and a note records that a filter, not the document, ended the run.
 
-`_load_app()` moves inside the guarded block for the same reason. It imports every engine module
-and their dependencies, so under an escalating filter an import-time deprecation is an escalated
-warning like any other, and left outside the block it would be the one traceback this record
-failed to close.
+Import time is guarded too, and it takes two regions rather than one. `_load_app()` moves inside
+the main block, since an import-time deprecation from a command adapter is an escalated warning
+like any other. That alone is not enough, and the first draft of this record claimed otherwise:
+the boundary's own support imports run before that block, and `from .errors import ...` reaches
+`cli/runtime.py`, which reaches `config` and `orchestrate` -- 25 engine modules plus ruamel,
+markdown-it, rich, and typer, every one of them imported while still unguarded. Those imports
+therefore get a guard of their own.
+
+That second guard cannot report through `print_project_error`, because that function is exactly
+what failed to import. It writes the same `error (CODE): ...` line to `sys.stderr` directly and
+exits 2. `escape` is not applied and does not need to be: it neutralizes Rich markup that Rich
+then renders back, so a terminal receives the same bytes either way, and nothing on this path
+goes through Rich. `EXIT_TOOL_ERROR` is unavailable for the same reason, so the literal `2` is
+used and pinned equal to the constant by a test.
+
+Building that message needs a chain that cannot itself fail, which is why
+`escalated_warning_error` lives in `error_types.py` rather than beside the rest of the boundary's
+rendering in `cli/errors.py`. `error_types` imports `constants`, and `constants` imports
+`typing`. That two-module chain is the residual, and it is accepted rather than closed: a warning
+escalated while importing it would still be an unhandled traceback, but neither module imports a
+dependency or contains a `warnings.warn` site, so there is nothing there to raise one, and a
+guard for it would need a third chain with the same problem one level further down.
 
 **Consequences:** `PYTHONWARNINGS=error` is now a supported way to make any advisory fatal, and
 lands on the same contract as every other tool error: exit 2, one `error (CODE): ...` line, no
