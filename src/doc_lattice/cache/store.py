@@ -110,7 +110,9 @@ def _write(path: Path, cache_file: CacheFile) -> None:
     """Atomically replace the cache file, emitting one stderr diagnostic on failure.
 
     Any OSError is reported on stderr with a single line and swallowed, so a broken cache
-    never changes a command's result or exit code.
+    never changes a command's result or exit code. ``exception_details`` preserves the line
+    breaks inside an exception's message and notes, so this sink flattens the rendered detail
+    onto one line to keep that promise.
     """
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -120,7 +122,8 @@ def _write(path: Path, cache_file: CacheFile) -> None:
             prefix=f"{CACHE_FILE_NAME}.",
         )
     except OSError as exc:
+        details = " ".join(exception_details(exc).splitlines())
         sys.stderr.write(
             f"doc-lattice: could not write load cache at {format_path_for_display(path)}: "
-            f"{exception_details(exc)}\n"
+            f"{details}\n"
         )
