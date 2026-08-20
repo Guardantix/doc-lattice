@@ -78,6 +78,13 @@ def neutralize(fd: int) -> None:
     descriptor table or handing in a descriptor that is already closed must not raise a second
     exception over the first.
 
+    The duplicate is closed only when it is a *different* descriptor than the target. ``os.open``
+    returns the lowest unused descriptor, so when ``fd`` is not merely dead but closed -- which is
+    what a caller that could not read a ``fileno()`` passes the standard literal for -- the open
+    returns ``fd`` itself. ``dup2`` is then a documented no-op, and closing the duplicate would
+    close the very descriptor this was asked to make writable, leaving the stream worse off than
+    before and handing the run back exactly the 120 it exists to prevent.
+
     Args:
         fd: File descriptor of the stream whose write failed.
     """
@@ -90,5 +97,6 @@ def neutralize(fd: int) -> None:
     except (OSError, ValueError):
         pass
     finally:
-        with suppress(OSError):
-            os.close(devnull)
+        if devnull != fd:
+            with suppress(OSError):
+                os.close(devnull)

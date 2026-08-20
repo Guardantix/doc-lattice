@@ -121,8 +121,10 @@ jobs:
       # built on `Console.on_broken_pipe`, which does not exist before 13.8.0. Pinned to the
       # exact floor `pyproject.toml` declares rather than to a `13.8.*` series, for the reason
       # the ruamel leg pins its own: a series resolves to the newest release in it and leaves
-      # every earlier permitted one untested. `tests/test_package_metadata.py` holds the two
-      # values equal.
+      # every earlier permitted one untested. `tests/test_release_workflow.py` reads this line
+      # and fails when it stops matching the declared floor -- the correlation has to be checked
+      # from a repository-only test, since the module that pins the floor itself ships in the
+      # sdist and cannot read this file.
       - run: uv pip install 'rich==13.8.0'
       - run: uv run --no-sync pytest tests/cli/
 

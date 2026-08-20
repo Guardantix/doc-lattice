@@ -139,8 +139,12 @@ def test_the_rich_floor_carries_the_hook_the_broken_pipe_policy_needs():
     verified against the published wheels, where 13.7.1 lacks it and 13.8.0 has it -- so under
     any earlier release the override is inert, nothing catches the ``BrokenPipeError``, and
     every case the policy exists to fix returns. The lock only ever installs the ceiling, so a
-    floor that drifted below this would ship unseen; ``rich-floor`` in ``ci.yml`` runs the suite
-    against exactly this value, and this pins the value that leg installs.
+    floor that drifted below this would ship unseen.
+
+    This pins the declared floor and nothing else. Correlating it with the version the
+    ``rich-floor`` leg actually installs belongs to
+    ``tests/test_release_workflow.py::test_the_rich_floor_leg_installs_the_declared_floor``,
+    because this module ships in the sdist and so cannot read ``.github/``.
     """
     floors = [
         specifier.removeprefix(">=")

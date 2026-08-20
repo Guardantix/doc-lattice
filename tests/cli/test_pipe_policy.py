@@ -4,6 +4,7 @@ import ast
 import errno
 import io
 import os
+import subprocess
 import sys
 from pathlib import Path
 
@@ -123,16 +124,72 @@ def test_neutralize_leaks_no_descriptor(tmp_path: Path):
 
 def test_neutralize_survives_a_descriptor_that_is_already_closed(tmp_path: Path):
     # It runs while the process is already failing, so a second exception raised over the first
-    # is the one outcome it must never produce.
+    # is the one outcome it must never produce. Asserting the postcondition rather than only
+    # the absence of a raise is deliberate: an earlier version of this test checked just that
+    # `neutralize` returned, and passed while the call was leaving the descriptor closed.
     handle = (tmp_path / "out.txt").open("w", encoding="utf-8")
     fd = handle.fileno()
     handle.close()
 
     neutralize(fd)
 
+    assert _fd_is_open(fd), "neutralize left the descriptor closed instead of writable"
+    os.write(fd, b"discarded")
+
+
+@pytest.mark.skipif(os.name != "posix", reason="descriptor numbering is POSIX-only")
+def test_neutralize_keeps_the_target_open_when_devnull_reuses_it():
+    """The reuse case, on the exact descriptor the entry point's fallback passes.
+
+    ``os.open`` returns the lowest unused descriptor, so when the target is not merely dead but
+    *closed*, the open returns the target itself and ``dup2`` becomes a documented no-op. Closing
+    the duplicate would then close the descriptor the call was asked to make writable, and the
+    interpreter's shutdown flush would answer with the very 120 this exists to prevent.
+
+    A subprocess, because the scenario needs file descriptor 2 itself closed while 0 and 1 stay
+    open, which is what makes 2 the lowest unused one. In-process, whichever descriptors happen
+    to be free decides what ``os.open`` returns, so the reuse would be incidental rather than
+    forced and the test would pass without exercising anything.
+    """
+    program = """
+import os, sys
+sys.path.insert(0, sys.argv[1])
+from doc_lattice.cli.pipe_policy import STDERR_FILENO, neutralize
+
+os.close(STDERR_FILENO)
+neutralize(STDERR_FILENO)
+
+try:
+    os.fstat(STDERR_FILENO)
+except OSError:
+    os.write(1, b"CLOSED")
+else:
+    os.write(STDERR_FILENO, b"discarded by devnull")
+    os.write(1, b"OPEN")
+"""
+    completed = subprocess.run(  # noqa: S603 (fixed interpreter and static test program)
+        [sys.executable, "-c", program, str(_MODULE.parents[2])],
+        capture_output=True,
+        check=False,
+    )
+
+    assert completed.stdout == b"OPEN", (
+        "neutralize closed the descriptor it was asked to neutralize; "
+        f"child exited {completed.returncode}"
+    )
+
 
 def test_neutralize_survives_a_nonsense_descriptor():
     neutralize(-1)
+
+
+def _fd_is_open(fd: int) -> bool:
+    """Report whether one file descriptor is currently open in this process."""
+    try:
+        os.fstat(fd)
+    except OSError:
+        return False
+    return True
 
 
 def _open_descriptor_count() -> int:

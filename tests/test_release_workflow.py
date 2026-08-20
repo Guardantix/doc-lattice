@@ -393,3 +393,32 @@ def test_publish_job_only_downloads_and_publishes_pinned_artifact():
     assert _action(upload) == _PYPI_PUBLISH
     assert upload["with"]["skip-existing"] is True
     assert all("run" not in step for step in publish["steps"])
+
+
+def test_the_rich_floor_leg_installs_the_declared_floor():
+    """GTX-201: the leg is only a floor check if it installs the floor `pyproject.toml` declares.
+
+    `tests/test_package_metadata.py` pins the declared floor, but it ships in the sdist and so
+    cannot read `.github/`, which left the workflow's own `rich==` pin free to drift: raising the
+    floor would fail that test and force an edit there, while this leg went on installing an
+    undeclared version and reported green. Correlating the two is the whole point of the leg, so
+    it is asserted here, in the repository-only module that already parses this workflow.
+    """
+    declared = [
+        specifier.removeprefix(">=").strip()
+        for requirement in tomllib.loads((_ROOT / "pyproject.toml").read_text(encoding="utf-8"))[
+            "project"
+        ]["dependencies"]
+        if requirement.startswith("rich")
+        for specifier in requirement.removeprefix("rich").split(",")
+        if specifier.strip().startswith(">=")
+    ]
+    assert len(declared) == 1, f"expected exactly one rich floor, found {declared}"
+
+    runs = [step["run"] for step in _WORKFLOW["jobs"]["rich-floor"]["steps"] if "run" in step]
+    installs = [shlex.split(run)[-1] for run in runs if "uv pip install" in run and "rich==" in run]
+    assert installs == [f"rich=={declared[0]}"], (
+        f"the rich-floor leg installs {installs}, but pyproject.toml declares a floor of "
+        f"{declared[0]}. The leg exists to test the oldest supported rich, so the two move "
+        "together or it tests nothing."
+    )
