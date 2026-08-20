@@ -11,7 +11,7 @@ Three named commands cover it.
 `/linear-finalize` has no modes and is the one skill that auto-invokes, on an open `ABC-N` PR.
 For ad-hoc reads/writes outside a workflow, run the `colinear` CLI with `--help`.
 
-This orientation matches colinear 0.62.x — verify against the `version:` line in `doctor` output; on a major/minor mismatch STOP and tell the user to re-run `colinear orientation enable`.
+This orientation matches colinear 0.63.x — verify against the `version:` line in `doctor` output; on a major/minor mismatch STOP and tell the user to re-run `colinear orientation enable`.
 If `colinear` is not found at all, run `./install.sh` from the colinear repo checkout — that is the version-skew recovery path and does not depend on the new binary.
 
 ## The pipeline
@@ -34,7 +34,7 @@ promote   show       show                    finalize   promote
 - **Deferred review**: `/linear-promote --deferred` — batch-review Deferred issues and apply confirmed decisions.
 - **Backlog → Ready**: `/linear-show --next` to discover newly unblocked items, then `/linear-promote --ready ABC-N` to gate one through.
 - **Ready → In Progress**: `/linear-show --ready` to see the queue, then `/linear-promote --delegate ABC-N` to start work in an isolated worktree.
-- **UI issues routed design-first**: `/linear-promote --design ABC-N` drafts the Claude Design brief (human-gated).
+- **A UI issue that wants a design reference first**: `/linear-promote --design ABC-N` drafts the Claude Design brief (human-gated, and invoked directly — nothing routes an issue to it).
 - **An issue whose direction is not settled**: `/linear-promote --refine ABC-N` reviews it adversarially and returns the review in chat; add `--post` to file it as one advisory comment (human-gated).
 - **In Progress**: implementation work — done by a human, typically inside the worktree `--delegate` set up. Run the pipeline commands as you go; there is no autonomous driver. When you run the test suite during delegated work, record it: `colinear review record-test --issue ABC-N --command '<cmd>' --passed N --failed N`. Re-run after fixes — the report keeps the latest run per command.
 - **Open PR → reviewer handoff**: `/linear-finalize` — hand an issue with an open `ABC-N` PR back to the reviewer, including the non-delegated `ai:ready` path.
