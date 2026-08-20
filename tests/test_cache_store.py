@@ -229,3 +229,28 @@ def test_save_persistence_failure_flattens_cleanup_notes_into_warning(
         f"doc-lattice: could not write load cache at {format_path_for_display(path)}: "
         "disk full; exact helper-owned orphan remediation\n"
     )
+
+
+def test_save_persistence_failure_flattens_multiline_detail_onto_one_line(
+    tmp_path: Path, capsys, monkeypatch
+):
+    """A line break anywhere in the message or a note still yields one warning line."""
+    import doc_lattice.cache.store as store_module  # noqa: PLC0415
+
+    path = tmp_path / "failed" / CACHE_FILE_NAME
+    error = OSError("disk full\nwhile replacing the cache")
+    error.add_note("exact helper-owned\r\norphan remediation")
+
+    def _boom(*_args, **_kwargs):
+        raise error
+
+    monkeypatch.setattr(store_module, "atomic_replace_bytes", _boom)
+
+    result = save_if_changed(path, _sample_cache_file(), None)
+
+    captured = capsys.readouterr()
+    assert result is None
+    assert captured.err == (
+        f"doc-lattice: could not write load cache at {format_path_for_display(path)}: "
+        "disk full while replacing the cache; exact helper-owned orphan remediation\n"
+    )

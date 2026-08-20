@@ -27,6 +27,20 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Fixed
 
+- The load-cache write warning is now one physical stderr line for every failure it can report.
+  Both the module boundary and `_write` promise a single line, and the diagnostic built that line
+  by interpolating `exception_details`, which GTX-203 pinned as preserving the line breaks inside
+  an exception's message and inside each note. The two statements contradicted each other. The
+  call site now flattens the rendered detail onto one line, so a break reaching it from a failing
+  replacement -- or from the remediation note the persistence layer attaches when the stage
+  cleanup fails as well -- can no longer split the warning in two.
+
+  Nothing observably wrapped before this: an `OSError`'s text is single-line in practice, so the
+  contradiction was latent rather than live. `exception_details` is unchanged and stays multi-line
+  by design, because the shared project-error renderer builds its output from those breaks
+  deliberately. This is the one sink that promises a single physical line, so the flattening is
+  local to it and no architecture decision moves.
+
 - Running any command under `PYTHONWARNINGS=error` (or `-W error`) no longer ends in a Python
   traceback naming this package's own source and exiting 1, the code `check` and `lint` reserve
   for drift. That setting does not suppress or display a warning, it raises the warning instance
