@@ -15,18 +15,17 @@ drift apart. An item with no stated dependency has none.
 
 ## 6.0: close the behavior window 5.0 left open
 
-5.0.0 shipped on 2026-08-19, ahead of this section rather than at the end of it. Six admitted
-items were still open at the tag. Two of them landed on main afterwards and now sit in
-`## [Unreleased]`: GTX-212 routed the config, cache, and `init` path sinks through the display
-spelling, and GTX-214 narrowed README's escape-free promise to human-facing output. GTX-212 is
-breaking, because it moved what `init` prints, so the window is open again as a fact rather than
-by choice and the next version is 6.0.0.
+5.0.0 shipped ahead of this section rather than at the end of it: six admitted items were still
+open at the tag. Two of them, GTX-212 and GTX-214, have landed on main since and wait in
+`## [Unreleased]`, where [CHANGELOG.md](CHANGELOG.md) records what they changed. GTX-212 is
+breaking, so the window is open again as a fact rather than by choice, and the next version is
+6.0.0.
 
 Admission is unchanged and still narrow on purpose: an item belongs here only if it is breaking,
 or if it has to be true at the moment a major ships. Everything else waits for 6.x, which is what
-keeps this release from staying open indefinitely. Applying that rule on 2026-08-19 moved six
-issues back in from the minor train, so ten are open here rather than four. Start with the two
-groups below that GTX-113 waits on.
+keeps this release from staying open indefinitely. Applying that rule moved six issues back in
+from the minor train, so ten are open here rather than four. Start with the two groups below that
+GTX-113 waits on.
 
 - Report a bad `--docs-root` or `--linear-team` from `init` as `VALIDATION_ERROR` rather than
   `CONFIG_ERROR` (GTX-216). It is the last raise site in that file naming a command-line value
@@ -34,23 +33,18 @@ groups below that GTX-113 waits on.
   and it is here for the reason GTX-112 and GTX-198 were: GTX-113 rewrites README against the
   codes the release actually prints, and moving a documented code afterwards would be a break in
   a minor.
-- Close the four output sinks 5.0's group did not reach, moved here from the minor train on
-  2026-08-19 because each changes the spelling of something the engine prints, which is the ground
-  that admitted GTX-212. Reconcile's post-load re-parse still warns through Python's default
-  formatter rather than the CLI's stderr voice (GTX-200). The load-cache write warning promises one
-  line and interpolates `exception_details`, which is not bounded to one (GTX-221). Journal
-  validation reports a control-bearing error *location* raw, the shape AD-35 closed for frontmatter
-  and AD-36 leaves to this issue rather than widening its own scope (GTX-227). Reconcile's lock
-  diagnostics interpolate the project root raw (GTX-238). None of the four sequences against
-  another. Landing them here is also what keeps the promise GTX-214 just narrowed true at every
-  sink the README pass is about to document.
-- Settle the two edge cases where what breaks is the run's own contract rather than a spelling,
-  moved here on the same date and on a stricter reading of the same rule. A broken stderr pipe
-  redirects the run's stdout and exits 1, by way of Rich's `on_broken_pipe` (GTX-201), and
-  `PYTHONWARNINGS=error` turns an engine warning into an uncaught traceback instead of the CLI's
-  error contract (GTX-202). Neither changes how anything is spelled, and both change what a run
-  does, so an exit status is treated as the contract a printed string is. Neither sequences against
-  the other.
+- Close the four output sinks 5.0's group did not reach: reconcile's post-load re-parse warning
+  (GTX-200), the load-cache write warning (GTX-221), the journal's own validation diagnostic
+  (GTX-227), and reconcile's lock diagnostics (GTX-238). They moved here from the minor train
+  because each changes the spelling of something the engine prints, which is the ground that
+  admitted GTX-212. AD-36 leaves GTX-227's sink to that issue rather than widening its own scope,
+  so it is sequenced by a recorded decision rather than by preference. None of the four sequences
+  against another. Landing them here is what keeps the promise GTX-214 narrowed true at every sink
+  the README pass is about to document.
+- Settle the two edge cases where what breaks is the run's own contract rather than a spelling: a
+  broken stderr pipe (GTX-201), and `PYTHONWARNINGS=error` (GTX-202). They moved with the four
+  above, on a stricter reading of the same rule, since an exit status is as much a contract as a
+  printed string. Neither sequences against the other.
 - Make README describe what 6.0 actually prints and enforces (GTX-113). This still lands last.
   Seven open issues now block it -- GTX-216 and the six above -- on the rule that the README pass
   cannot land ahead of the behavior it documents; every other blocker either shipped in 5.0.0 or is
