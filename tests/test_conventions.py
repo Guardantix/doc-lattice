@@ -1701,8 +1701,15 @@ def test_provenance_guard_leaves_before_images_and_rollback_alone():
 # Every component of a dotted expression is tested, not only the last one, so `{path.name}` --
 # the exact shape the reconcile adapter's basename sink had before this change -- is caught
 # rather than read as an interpolation of something called `name`.
+#
+# GTX-238 promoted `project_root` here from the `config.py` entry below. AD-34 scopes a name to
+# one module when its meaning changes by module, and this one's does not: every production
+# spelling of it is a `Path` parameter or the path-typed `ProjectConfig.project_root`. Promoting
+# it is what makes the lock diagnostics in `reconcile_transaction.py` visible -- that module was
+# already scanned and reported nothing, because reach is bounded by this vocabulary rather than
+# by the module list. Component matching then covers `lock.project_root` with it.
 _PATH_BEARING_NAMES = frozenset(
-    {"path", "source", "destination", "journal", "link", "cwd", "staged"}
+    {"path", "source", "destination", "journal", "link", "cwd", "staged", "project_root"}
 )
 
 # GTX-209: names that are path-typed only inside one module. Scoping them is what lets the
@@ -1729,16 +1736,23 @@ _MODULE_PATH_BEARING_NAMES: dict[str, frozenset[str]] = {
             "current",
             "prefix",
             "filename",
+            # GTX-238: the root the caller asked a lock capability to protect, resolved. It is
+            # audited as a path only here, where `_require_reconcile_lock` compares it against
+            # the root the capability is bound to, so it stays scoped while `project_root`
+            # -- unambiguous everywhere -- went global.
+            "requested_root",
         }
     ),
     "cli/commands/reconcile.py": frozenset({"orphan", "filename"}),
-    # GTX-212: the config sinks. `config_path` is the `--config` argument, `project_root` and
-    # `safe` are resolved locations, and `entry` is one recorded `docs_roots` string. None of
-    # them reads as a path outside this module -- `entry` in particular is a journal or cache
-    # record elsewhere -- which is why they are scoped here rather than added globally.
+    # GTX-212: the config sinks. `config_path` is the `--config` argument, `safe` is a resolved
+    # location, and `entry` is one recorded `docs_roots` string. Neither reads as a path outside
+    # this module -- `entry` in particular is a journal or cache record elsewhere -- which is why
+    # they are scoped here rather than added globally.
     # `source` is deliberately absent: it is already global, and the validation header keeps it
     # inside the guarded expression rather than behind the `where` alias it used to bind.
-    "config.py": frozenset({"config_path", "entry", "project_root", "safe"}),
+    # `project_root` was scoped here too until GTX-238 promoted it to the global set above; it is
+    # not repeated here, so the global set stays the single record of that decision.
+    "config.py": frozenset({"config_path", "entry", "safe"}),
     # GTX-212: the `init` sinks. `root` is one `--docs-root` argument, and `target` plus
     # `target_name` are the config file being scaffolded.
     #
@@ -2072,7 +2086,6 @@ def _display_guard_scan(
     [
         ("config.py", "config_path"),
         ("config.py", "entry"),
-        ("config.py", "project_root"),
         ("config.py", "safe"),
         ("cli/commands/init.py", "root"),
         ("cli/commands/init.py", "target"),
@@ -2086,12 +2099,63 @@ def test_path_interpolation_detector_sees_each_alias_gtx_212_classified(module, 
     names they spell: an unwrapped reintroduction would pass silently, which is the state this
     issue found. Each entry is driven positively, negatively against the global vocabulary, and
     once more wrapped, so a typo in the set fails here rather than going quiet.
+
+    `config.py`'s `project_root` is deliberately not in this list any more. GTX-238 promoted it
+    to the global vocabulary, so the negative assertion below -- that the name did *not* leak
+    globally -- is exactly what it must now fail; the test beside this one drives it positively
+    as a global name instead.
     """
     bare = f'msg = f"at {{{alias}}}"'
     assert _path_interpolations(bare, module) == [(1, alias)]
     assert _path_interpolations(bare) == [], "the name leaked into the global vocabulary"
     wrapped = f'msg = f"at {{format_path_for_display({alias})}}"'
     assert _path_interpolations(wrapped, module) == []
+
+
+def test_path_interpolation_detector_sees_the_globally_promoted_project_root():
+    """GTX-238: `project_root` is classified everywhere, not in one module's entry.
+
+    Driven in a module with no scoped entry at all, so a regression that quietly re-scoped it
+    to `config.py` or `reconcile_transaction.py` fails here rather than passing on the two
+    modules that happen to spell it.
+    """
+    bare = 'msg = f"at {project_root}"'
+    assert _path_interpolations(bare) == [(1, "project_root")]
+    assert _path_interpolations(bare, "reconcile_transaction.py") == [(1, "project_root")]
+    assert _path_interpolations(bare, "config.py") == [(1, "project_root")]
+    wrapped = 'msg = f"at {format_path_for_display(project_root)}"'
+    assert _path_interpolations(wrapped) == []
+
+
+def test_path_interpolation_detector_sees_the_lock_capability_root_through_its_chain():
+    """The `lock.project_root` operand is covered by the global name, not by its own entry.
+
+    Component matching already reaches every part of an attribute chain, so promoting
+    `project_root` classifies this spelling too. That coverage is worth asserting rather than
+    inheriting silently: the lock-mismatch diagnostic names the capability's root this way, and
+    a detector narrowed to bare names would report the operand beside it and miss this one.
+    """
+    bare = 'msg = f"{lock.project_root}, not {requested_root}"'
+    assert _path_interpolations(bare, "reconcile_transaction.py") == [
+        (1, "lock.project_root"),
+        (1, "requested_root"),
+    ]
+    wrapped = (
+        'msg = f"{format_path_for_display(lock.project_root)}, '
+        'not {format_path_for_display(requested_root)}"'
+    )
+    assert _path_interpolations(wrapped, "reconcile_transaction.py") == []
+
+
+def test_path_interpolation_detector_scopes_the_requested_lock_root_to_the_transaction_module():
+    # `requested_root` is the root a caller asked a lock capability to protect, and it is
+    # audited as a path only where that comparison lives. Scoped for the reason `raw_path` is.
+    bare = 'msg = f"cannot validate {requested_root}"'
+    assert _path_interpolations(bare, "reconcile_transaction.py") == [(1, "requested_root")]
+    assert _path_interpolations(bare) == [], "the name leaked into the global vocabulary"
+    assert _path_interpolations(bare, "config.py") == []
+    wrapped = 'msg = f"cannot validate {format_path_for_display(requested_root)}"'
+    assert _path_interpolations(wrapped, "reconcile_transaction.py") == []
 
 
 def test_path_interpolation_detector_sees_the_scaffolded_config_basename():
