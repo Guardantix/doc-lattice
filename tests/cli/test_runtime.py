@@ -15,7 +15,7 @@ from typer.testing import CliRunner
 
 import doc_lattice.cli.runtime as runtime_module
 from doc_lattice.cli.application import create_app
-from doc_lattice.cli.pipe_policy import PipeClosed
+from doc_lattice.cli.pipe_policy import STDERR_FILENO, PipeClosed
 from doc_lattice.cli.runtime import (
     CliConsole,
     CliRuntime,
@@ -724,13 +724,24 @@ def test_the_stderr_channel_answers_a_broken_pipe_in_place():
 def test_the_stderr_channel_is_recognized_from_an_explicit_file(monkeypatch):
     # Typer declares the flag; an embedder may instead hand a console `file=sys.stderr` with the
     # flag left at its default. Both spellings name the diagnostic channel, so both are read.
-    monkeypatch.setattr(sys, "stderr", sys.__stderr__)
-    console = CliConsole(file=sys.stderr, no_color=True, color_system=None)
+    #
+    # The case only means anything with a console bound to the real file descriptor 2, which is
+    # what the recognition is read from -- and taking the stderr branch neutralizes it, pointing
+    # this process's own stderr at os.devnull. Saved and restored around the call for that
+    # reason: without it the test silences the test runner's stderr for the rest of the session,
+    # which pytest's per-test capture happens to paper over and `-s` does not.
+    saved = os.dup(STDERR_FILENO)
+    try:
+        monkeypatch.setattr(sys, "stderr", sys.__stderr__)
+        console = CliConsole(file=sys.stderr, no_color=True, color_system=None)
 
-    assert console.stderr is False
-    apply_broken_pipe_policy(console)  # returns rather than raising
+        assert console.stderr is False
+        apply_broken_pipe_policy(console)  # returns rather than raising
 
-    assert console.quiet is True
+        assert console.quiet is True
+    finally:
+        os.dup2(saved, STDERR_FILENO)
+        os.close(saved)
 
 
 def test_the_policy_reaches_a_console_this_package_did_not_build():

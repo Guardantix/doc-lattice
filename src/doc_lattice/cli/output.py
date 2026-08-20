@@ -67,6 +67,9 @@ def write_json(runtime: CliRuntime, payload: object, *, indent: int | None = Non
         runtime: Active invocation state.
         payload: JSON-serializable value.
         indent: Optional pretty-print indentation.
+
+    Raises:
+        PipeClosed: If the reader on stdout departed before the write completed.
     """
     runtime.write_stdout(json.dumps(payload, indent=indent))
 
@@ -78,6 +81,9 @@ def write_text(runtime: CliRuntime, text: str, *, newline: bool = True) -> None:
         runtime: Active invocation state.
         text: Text to write.
         newline: Whether to append one newline.
+
+    Raises:
+        PipeClosed: If the reader on stdout departed before the write completed.
     """
     runtime.write_stdout(text, newline=newline)
 

@@ -6,6 +6,7 @@ import io
 import os
 import subprocess
 import sys
+from contextlib import suppress
 from pathlib import Path
 
 import pytest
@@ -133,8 +134,15 @@ def test_neutralize_survives_a_descriptor_that_is_already_closed(tmp_path: Path)
 
     neutralize(fd)
 
-    assert _fd_is_open(fd), "neutralize left the descriptor closed instead of writable"
-    os.write(fd, b"discarded")
+    try:
+        assert _fd_is_open(fd), "neutralize left the descriptor closed instead of writable"
+        os.write(fd, b"discarded")
+    finally:
+        # The call reopened a descriptor this test closed, so this test owns closing it again.
+        # Left open it leaks one descriptor per session and holds a low number that the
+        # neighbouring leak assertion is otherwise free to reuse.
+        with suppress(OSError):
+            os.close(fd)
 
 
 @pytest.mark.skipif(os.name != "posix", reason="descriptor numbering is POSIX-only")

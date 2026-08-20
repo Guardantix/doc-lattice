@@ -58,12 +58,12 @@ def main() -> None:
         os.environ["_TYPER_FORCE_DISABLE_TERMINAL"] = "1"
 
     # Unguarded on purpose, and the only imports that are. `error_types` reaches `constants`
-    # and `typing` and nothing else, and `pipe_policy` reaches only `os` -- no dependency, no
-    # other engine module, nothing that warns at import time -- so these are the two chains the
-    # fallback below can rest on while reporting a failure of every other chain. `pipe_policy`
-    # earns its place there for the same reason `error_types` does: the fallback needs to
-    # neutralize file descriptor 2, and a neutralizer reached through `runtime` or `errors`
-    # would be unavailable in precisely the case that needs it.
+    # and `typing` and nothing else, and `pipe_policy` reaches only `os` and `contextlib` -- no
+    # dependency, no other engine module, nothing that warns at import time -- so these are the
+    # two chains the fallback below can rest on while reporting a failure of every other chain.
+    # `pipe_policy` earns its place there for the same reason `error_types` does: the fallback
+    # needs to neutralize file descriptor 2, and a neutralizer reached through `runtime` or
+    # `errors` would be unavailable in precisely the case that needs it.
     from ..error_types import (  # noqa: PLC0415
         ProjectError,
         escalated_warning_error,

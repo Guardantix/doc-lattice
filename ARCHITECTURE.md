@@ -1876,12 +1876,12 @@ never depends on whether its diagnostics could be delivered.
 - Neutralizing the descriptor, not merely dropping the diagnostic, is what answers the 120. Only
   the descriptor that actually failed is redirected, which is the precise fault in Rich's own
   hook: it redirects file descriptor 1 whichever stream broke.
-- The primitives live in `cli/pipe_policy.py`, which imports nothing but `os`. That is what lets
-  `cli/__init__.py` reach them from its *unguarded* import block, so the pre-renderer fallback --
-  which runs when `rich`, `typer`, and most of the engine failed to import -- can neutralize file
-  descriptor 2 without depending on any of what just failed. That path gets its own stdlib-only
-  equivalent of the stderr half rather than a share of the policy, because the policy is part of
-  what is unavailable there.
+- The primitives live in `cli/pipe_policy.py`, which imports nothing but `os` and `contextlib`.
+  That is what lets `cli/__init__.py` reach them from its *unguarded* import block, so the
+  pre-renderer fallback -- which runs when `rich`, `typer`, and most of the engine failed to
+  import -- can neutralize file descriptor 2 without depending on any of what just failed. That
+  path gets its own stdlib-only equivalent of the stderr half rather than a share of the policy,
+  because the policy is part of what is unavailable there.
 - The `rich` floor rises to `13.8.0` and gets a compatibility leg, amending AD-27. A
   write-boundary fallback covering the whole `>=13` range was the alternative; it was rejected
   because it means wrapping every stream this CLI writes through in order to reproduce a seam the
