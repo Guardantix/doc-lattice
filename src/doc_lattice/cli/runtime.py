@@ -296,7 +296,7 @@ class CliRuntime:
     def annotation_root(self, path: Path) -> Path:
         """Select the base one document's GitHub annotation path is rendered against.
 
-        The selection happens before rendering rather than inside ``output.github_annotation``
+        The selection happens before rendering rather than inside ``github.github_annotation``
         because that renderer falls back to an absolute path for a document outside the root it
         is handed: passing a set-but-non-containing workspace straight through would skip the
         cwd fallback entirely and emit a path GitHub cannot attach to a diff.

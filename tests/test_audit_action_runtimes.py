@@ -18,6 +18,7 @@ _SCRIPT_PATH = _ROOT / "scripts" / "audit_action_runtimes.py"
 _SCRIPT = run_path(str(_SCRIPT_PATH))
 
 Annotation = _SCRIPT["Annotation"]
+AuditError = _SCRIPT["AuditError"]
 Finding = _SCRIPT["Finding"]
 Job = _SCRIPT["Job"]
 Run = _SCRIPT["Run"]
@@ -80,7 +81,6 @@ def _job(job_id: int, name: str, status: str = "completed"):
         name=payload["name"],
         html_url=payload["html_url"],
         status=payload["status"],
-        conclusion=payload["conclusion"],
     )
 
 
@@ -344,19 +344,31 @@ def test_main_requires_a_repository_when_the_environment_names_none(monkeypatch)
     assert error.value.code == 2
 
 
-def test_fetch_json_exits_two_and_surfaces_gh_stderr_on_failure(monkeypatch, capsys):
-    # A 404, a missing token, or a rate limit must not look like a clean audit. Exit 2 with gh's
-    # own message is the only thing separating "no deprecations" from "never asked".
+def test_fetch_json_raises_the_audit_error_carrying_gh_stderr_on_failure(monkeypatch):
+    # A 404, a missing token, or a rate limit must not look like a clean audit. Raising rather
+    # than exiting is what routes gh's own message through `main`, which renders it as an
+    # `::error` annotation and returns 2; exiting here would skip that and print bare text.
     def fake_run(*_args, **_kwargs):
         return types.SimpleNamespace(returncode=1, stdout="", stderr="gh: Not Found (HTTP 404)\n")
 
     monkeypatch.setattr(subprocess, "run", fake_run)
 
-    with pytest.raises(SystemExit) as error:
+    with pytest.raises(AuditError, match="gh: Not Found"):
         fetch_json("/repos/o/r/actions/runs/1")
 
-    assert error.value.code == 2
-    assert "gh: Not Found (HTTP 404)" in capsys.readouterr().err
+
+def test_a_failing_transport_reaches_the_error_annotation_and_exit_two(monkeypatch, capsys):
+    # The end of the path the test above starts: `main` owns the single error channel, so the
+    # likeliest real failure renders exactly like every other one the audit cannot perform.
+    monkeypatch.delenv("GITHUB_STEP_SUMMARY", raising=False)
+
+    def refuse(_path: str) -> object:
+        raise AuditError("gh: Bad credentials (HTTP 401)")
+
+    code = main(["--repository", _REPOSITORY, "--run-id", str(_RUN_ID)], refuse)
+
+    assert code == 2
+    assert "::error::gh: Bad credentials (HTTP 401)" in capsys.readouterr().err
 
 
 def test_fetch_json_decodes_the_body_gh_prints(monkeypatch):

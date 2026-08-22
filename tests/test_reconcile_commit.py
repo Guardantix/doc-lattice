@@ -88,6 +88,40 @@ def _record_before_restores(monkeypatch, restores: list[Path]) -> None:
     monkeypatch.setattr(reconcile_transaction, "replace_staged", _watch_replacement)
 
 
+def _lose_journal_on_marker_replace(monkeypatch) -> None:
+    """Lose the visible journal on the committed-marker replace, then fail its restore.
+
+    The GTX-146 double failure: the marker replace unlinks the journal and raises, and the
+    reset's restoring create raises in turn, so nothing on disk describes the transaction while
+    every destination already holds its after image. Only the reset's restore fails, never the
+    preparation publication that precedes it, which is what the marker flag gates.
+
+    Args:
+        monkeypatch: The fixture the stubs are installed through.
+    """
+    real_create = reconcile_transaction.atomic_create_bytes
+    marker_failed = False
+
+    def _lose_journal_then_fail(
+        path: Path,
+        data: bytes,  # noqa: ARG001 (signature matches persistence primitive)
+        *,
+        prefix: str,  # noqa: ARG001 (signature matches persistence primitive)
+    ) -> None:
+        nonlocal marker_failed
+        marker_failed = True
+        path.unlink()
+        raise OSError("committed marker replace failed")
+
+    def _fail_journal_restore(path: Path, data: bytes, *, prefix: str) -> None:
+        if marker_failed:
+            raise OSError("prepared journal restore failed")
+        real_create(path, data, prefix=prefix)
+
+    monkeypatch.setattr(reconcile_transaction, "atomic_replace_bytes", _lose_journal_then_fail)
+    monkeypatch.setattr(reconcile_transaction, "atomic_create_bytes", _fail_journal_restore)
+
+
 def test_commit_requires_a_valid_active_lock_before_mutation(tmp_path: Path):
     destination = tmp_path / "doc.md"
     destination.write_bytes(b"old bytes")
@@ -1398,28 +1432,7 @@ def test_absent_journal_restore_failure_refuses_rollback_and_leaves_no_journal(
     rewrite = _rewrite(destination, b"old bytes", b"new bytes", "up#x")
     journal = tmp_path / RECONCILE_JOURNAL_NAME
     restores: list[Path] = []
-    real_create = reconcile_transaction.atomic_create_bytes
-    marker_failed = False
-
-    def _lose_journal_then_fail(
-        path: Path,
-        data: bytes,  # noqa: ARG001 (signature matches persistence primitive)
-        *,
-        prefix: str,  # noqa: ARG001 (signature matches persistence primitive)
-    ) -> None:
-        nonlocal marker_failed
-        marker_failed = True
-        path.unlink()
-        raise OSError("committed marker replace failed")
-
-    def _fail_journal_restore(path: Path, data: bytes, *, prefix: str) -> None:
-        # Only the reset's restore, never the preparation publication that precedes it.
-        if marker_failed:
-            raise OSError("prepared journal restore failed")
-        real_create(path, data, prefix=prefix)
-
-    monkeypatch.setattr(reconcile_transaction, "atomic_replace_bytes", _lose_journal_then_fail)
-    monkeypatch.setattr(reconcile_transaction, "atomic_create_bytes", _fail_journal_restore)
+    _lose_journal_on_marker_replace(monkeypatch)
     _record_before_restores(monkeypatch, restores)
 
     with pytest.raises(ReconcilePersistenceError) as caught:
@@ -1496,27 +1509,7 @@ def test_lost_journal_double_failure_maps_every_destination_in_recorded_order(
         _rewrite(second, b"old bytes", b"new bytes", "up#x"),
         _rewrite(first, b"old bytes", b"new bytes", "up#x"),
     ]
-    real_create = reconcile_transaction.atomic_create_bytes
-    marker_failed = False
-
-    def _lose_journal_then_fail(
-        path: Path,
-        data: bytes,  # noqa: ARG001 (signature matches persistence primitive)
-        *,
-        prefix: str,  # noqa: ARG001 (signature matches persistence primitive)
-    ) -> None:
-        nonlocal marker_failed
-        marker_failed = True
-        path.unlink()
-        raise OSError("committed marker replace failed")
-
-    def _fail_journal_restore(path: Path, data: bytes, *, prefix: str) -> None:
-        if marker_failed:
-            raise OSError("prepared journal restore failed")
-        real_create(path, data, prefix=prefix)
-
-    monkeypatch.setattr(reconcile_transaction, "atomic_replace_bytes", _lose_journal_then_fail)
-    monkeypatch.setattr(reconcile_transaction, "atomic_create_bytes", _fail_journal_restore)
+    _lose_journal_on_marker_replace(monkeypatch)
 
     with pytest.raises(ReconcilePersistenceError) as caught:
         _commit_rewrites(tmp_path, rewrites, {second: second, first: first})

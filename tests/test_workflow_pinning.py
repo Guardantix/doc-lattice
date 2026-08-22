@@ -1,47 +1,17 @@
 """Repository-wide supply-chain pinning contract for every GitHub Actions workflow."""
 
 import re
-from pathlib import Path
 from typing import Any
 
-from ruamel.yaml import YAML
+from workflow_helpers import _uses_fragments, _workflow_paths, _workflows
 
 from doc_lattice.constants import CHECKOUT_USES, SETUP_UV_USES
 
-_ROOT = Path(__file__).resolve().parents[1]
-_WORKFLOW_DIR = _ROOT / ".github/workflows"
 _SHA_PINNED_USES_RE = re.compile(r"^[^@]+@[0-9a-f]{40}$")
 # The composed fragments, not their SHA halves: the release tag is rendered as a trailing
 # `# vX.Y.Z` comment, which the safe loader discards, so comparing parsed refs would let a
 # bumped SHA keep a stale tag and mislabel the commit everywhere the pin ships.
 _SHIPPED_USES = {"actions/checkout": CHECKOUT_USES, "astral-sh/setup-uv": SETUP_UV_USES}
-
-
-def _workflow_paths() -> list[Path]:
-    return sorted(path for path in _WORKFLOW_DIR.iterdir() if path.suffix in {".yml", ".yaml"})
-
-
-def _workflows() -> dict[str, Any]:
-    loader = YAML(typ="safe")
-    return {path.name: loader.load(path.read_text(encoding="utf-8")) for path in _workflow_paths()}
-
-
-def _uses_fragments(path: Path) -> list[str]:
-    """Every `uses:` value as written, including the trailing version comment.
-
-    The value half is unquoted before reassembly: YAML allows `uses: "owner/action@sha"`, and
-    the quote would otherwise survive into the extracted action name, silently dropping that
-    reference out of the fragment parity check while the safe-loader pin test still passes.
-    """
-    fragments: list[str] = []
-    for line in path.read_text(encoding="utf-8").splitlines():
-        stripped = line.strip()
-        if not stripped.startswith(("uses:", "- uses:")):
-            continue
-        value, marker, comment = stripped.partition("uses:")[2].partition("#")
-        value = value.strip().strip("'\"")
-        fragments.append(f"{value} # {comment.strip()}" if marker else value)
-    return fragments
 
 
 def _action_references(workflow: Any) -> list[str]:

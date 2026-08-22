@@ -23,6 +23,7 @@ from pathlib import Path
 from typing import Any
 
 from ruamel.yaml import YAML
+from workflow_helpers import _triggers
 
 from doc_lattice import __version__
 from doc_lattice.constants import CHECKOUT_USES, SETUP_UV_USES
@@ -99,17 +100,6 @@ def _parsed_workflow() -> dict[Any, Any]:
     document = loader.load(_published_workflow_text())
     assert isinstance(document, dict)
     return document
-
-
-def _triggers(workflow: dict[Any, Any]) -> dict[str, Any]:
-    """Return the ``on:`` mapping under either YAML spelling.
-
-    A 1.1 resolver reads the bare key ``on`` as the boolean ``True``, so reading only the
-    string key would silently find nothing and pass every trigger assertion vacuously.
-    """
-    triggers = workflow["on"] if "on" in workflow else workflow[True]
-    assert isinstance(triggers, dict)
-    return triggers
 
 
 def _linear_job(workflow: dict[Any, Any]) -> dict[str, Any]:

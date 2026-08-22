@@ -76,6 +76,12 @@ _JOURNAL_ROOT_LOCATION = "<journal>"
 _PREPARE_VALIDATING = "validating transaction destinations"
 _PREPARE_STAGING = "staging transaction image"
 _PREPARE_PUBLISHING_JOURNAL = "publishing prepared journal"
+# The one instruction three of `_failed_reset_remediation`'s four branches open with. Spelled
+# once because `tests/test_reconcile_commit.py` matches on the sentence: three literals could
+# drift apart and leave the branches telling an operator different things.
+_PRESERVE_AND_RECOVER = (
+    "preserve the journal and staged evidence, then run 'doc-lattice reconcile --recover'"
+)
 
 
 class JournalEntry(BaseModel):
@@ -1739,15 +1745,12 @@ def _failed_reset_remediation(
     journal_path = prepared.journal_path
     prepared_status, prepared_detail = _exact_journal_status(journal_path, prepared.journal_bytes)
     if prepared_status == "exact":
-        return (
-            "preserve the journal and staged evidence, then run 'doc-lattice reconcile --recover'"
-        )
-    committed_status, _committed_detail = _exact_journal_status(journal_path, committed_bytes)
+        return _PRESERVE_AND_RECOVER
+    committed_status = _exact_journal_status(journal_path, committed_bytes)[0]
     if committed_status == "exact":
         return (
             "the visible journal is the committed marker, so the transaction is durable and "
-            "every destination holds its after image; preserve the journal and staged "
-            "evidence, then run 'doc-lattice reconcile --recover' to finish cleanup"
+            f"every destination holds its after image; {_PRESERVE_AND_RECOVER} to finish cleanup"
         )
     mappings = _lost_journal_entry_mappings(prepared)
     if prepared_status == "absent":
@@ -1760,7 +1763,7 @@ def _failed_reset_remediation(
             f"destination or stage that does not match rather than copying it: {mappings}"
         )
     return (
-        "preserve the journal and staged evidence, then run 'doc-lattice reconcile --recover'; "
+        f"{_PRESERVE_AND_RECOVER}; "
         f"{prepared_detail}, so recovery may refuse it, and this is the only remaining record "
         f"of what the transaction staged: {mappings}"
     )

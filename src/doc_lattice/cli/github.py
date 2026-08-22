@@ -67,6 +67,28 @@ def github_annotation(path: Path, root: Path, title: str, message: str) -> str:
     )
 
 
+def write_annotations(runtime: CliRuntime, items: Iterable[tuple[Path, str, str]]) -> None:
+    """Emit one ``::error`` annotation per item, then report the ones GitHub will not attach.
+
+    The two halves are one call because the warning is only correct over exactly the paths that
+    were annotated. Left to the caller, that pairing is a convention every annotating site has
+    to re-establish, and the site that forgets it fails its gate with nothing on the pull-request
+    diff and nothing in the log saying why -- which is the whole failure the warning exists for.
+
+    Args:
+        runtime: Active invocation state.
+        items: One ``(path, title, message)`` triple per annotation, in emission order.
+
+    Raises:
+        PipeClosed: If the reader on stdout departed before a write completed.
+    """
+    annotated: list[Path] = []
+    for path, title, message in items:
+        runtime.write_stdout(github_annotation(path, runtime.annotation_root(path), title, message))
+        annotated.append(path)
+    warn_unattachable_annotations(runtime, annotated)
+
+
 def write_document_annotation(runtime: CliRuntime, exc: DocumentError) -> None:
     """Emit the ``::error`` annotation for a document-scoped failure that ended the run.
 
@@ -87,13 +109,7 @@ def write_document_annotation(runtime: CliRuntime, exc: DocumentError) -> None:
             emits this before its stderr diagnostic precisely so that refusal reaches AD-40's
             silent 141 instead of being reported as a tool error with a truncated annotation.
     """
-    line = github_annotation(
-        exc.source,
-        runtime.annotation_root(exc.source),
-        f"doc-lattice {exc.code}",
-        exception_details(exc),
-    )
-    runtime.write_stdout(line)
+    write_annotations(runtime, [(exc.source, f"doc-lattice {exc.code}", exception_details(exc))])
 
 
 def warn_unattachable_annotations(runtime: CliRuntime, paths: Iterable[Path]) -> None:

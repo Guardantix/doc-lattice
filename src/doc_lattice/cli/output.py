@@ -23,6 +23,19 @@ class OutputSelection:
     format: str
     indent: int | None
 
+    @property
+    def annotates(self) -> bool:
+        """Report whether this selection renders findings as GitHub Actions annotations.
+
+        The one member of ``ReportFormat`` that changes how a command reports is spelled here
+        rather than at each site that branches on it: the error boundary and the finding
+        renderer have to agree, and four separate literals is how they stop agreeing.
+
+        Returns:
+            True when the selected format is the annotating one.
+        """
+        return self.format == "github"
+
 
 def _reject_bad_format(runtime: CliRuntime, fmt: str, valid: frozenset[str]) -> NoReturn:
     options = ", ".join(sorted(valid))

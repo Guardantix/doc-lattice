@@ -168,6 +168,22 @@ def _build_error(cls: type[error_types.ProjectError]) -> error_types.ProjectErro
     return cls("msg")
 
 
+def _intermediate_bases(declared: list[type[BaseException]]) -> set[type]:
+    """Return the declared types that appear only as a base of another declared type.
+
+    Both tests below turn on this set -- one to exempt it from the code rule, one to check the
+    exemption is not self-granting -- so it is derived once. Two inline walks could disagree
+    about what counts as a base and let the exemption and its check pass on different sets.
+
+    Args:
+        declared: Every exception type declared in ``error_types``.
+
+    Returns:
+        The subset of them reachable as some other declared type's ancestor.
+    """
+    return {base for cls in declared for base in cls.__mro__[1:]}
+
+
 def test_all_error_types_extend_project_error_with_code():
     """Every exception defined in error_types.py must extend ProjectError and set a real code.
 
@@ -176,7 +192,7 @@ def test_all_error_types_extend_project_error_with_code():
     concrete type a raise site names. It is still required to extend ``ProjectError``.
     """
     declared = _declared_error_types()
-    intermediate = {base for cls in declared for base in cls.__mro__[1:]}
+    intermediate = _intermediate_bases(declared)
     for cls in declared:
         assert issubclass(cls, ProjectError), f"{cls.__name__} does not extend ProjectError"
         if cls in intermediate:
@@ -191,7 +207,8 @@ def test_every_intermediate_error_base_still_has_a_concrete_subclass():
     in some other type's MRO, which is exactly what a future edit would get wrong.
     """
     declared = _declared_error_types()
-    exempt = {cls for cls in declared if cls in {base for c in declared for base in c.__mro__[1:]}}
+    intermediate = _intermediate_bases(declared)
+    exempt = {cls for cls in declared if cls in intermediate}
 
     assert {cls.__name__ for cls in exempt} == {"ProjectError", "DocumentError"}
     for base in exempt:

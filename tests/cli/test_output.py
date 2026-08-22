@@ -1,49 +1,21 @@
 """Tests for shared CLI output selection and exact writers."""
 
 import json
-from io import StringIO
 from pathlib import Path
 
 import pytest
 import typer
-from rich.console import Console
 
 from doc_lattice.cli.output import select_output, write_json
 from doc_lattice.cli.runtime import CliRuntime
-from doc_lattice.config import ProjectConfig
 from doc_lattice.constants import VALID_REPORT_FORMATS
-from doc_lattice.model import Lattice
 
-
-def _contents(console: Console) -> str:
-    stream = console.file
-    assert isinstance(stream, StringIO)
-    return stream.getvalue()
+from .helpers import _contents, _stub_runtime
 
 
 @pytest.fixture
 def runtime(tmp_path: Path) -> CliRuntime:
-    def unexpected_config(_config: Path | None, _cwd: Path) -> ProjectConfig:
-        raise AssertionError("output policy must not load config")
-
-    def unexpected_lattice(
-        project: ProjectConfig,
-        *,
-        require_verified: bool = False,
-        persist_cache: bool = True,
-    ) -> Lattice:
-        del project
-        raise AssertionError(
-            f"output policy must not load lattice {require_verified=} {persist_cache=}"
-        )
-
-    return CliRuntime(
-        stdout=Console(file=StringIO(), no_color=True),
-        stderr=Console(file=StringIO(), stderr=True, no_color=True),
-        cwd=tmp_path,
-        load_config=unexpected_config,
-        load_lattice=unexpected_lattice,
-    )
+    return _stub_runtime(tmp_path, "output policy")
 
 
 def test_explicit_json_format_resolves(runtime: CliRuntime):

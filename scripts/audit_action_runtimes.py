@@ -84,14 +84,12 @@ class Job:
         name: The job's display name.
         html_url: Web address of the job's log.
         status: Lifecycle state, such as ``completed``.
-        conclusion: Outcome once completed, or None while it is not.
     """
 
     id: int
     name: str
     html_url: str
     status: str
-    conclusion: str | None
 
 
 @dataclass(frozen=True)
@@ -138,12 +136,13 @@ def fetch_json(path: str) -> object:
         The decoded JSON body, which callers narrow at their own boundary.
 
     Raises:
-        AuditError: If ``gh`` succeeds but does not print decodable JSON.
+        AuditError: If ``gh`` fails, or succeeds but does not print decodable JSON. Exiting
+            here instead would bypass ``main``'s handler, which is what renders a failure as an
+            ``::error`` annotation -- and a bad token or a 404 is the likeliest failure there is.
     """
     result = subprocess.run(("gh", "api", path), check=False, capture_output=True, text=True)
     if result.returncode != 0:
-        print(result.stderr.strip() or f"gh api {path} failed", file=sys.stderr)
-        sys.exit(2)
+        raise AuditError(result.stderr.strip() or f"gh api {path} failed")
     try:
         return json.loads(result.stdout)
     except json.JSONDecodeError as error:
@@ -241,7 +240,6 @@ def parse_job(payload: object) -> Job:
         name=_require_str(job, "name", "job"),
         html_url=_require_str(job, "html_url", "job"),
         status=_require_str(job, "status", "job"),
-        conclusion=_optional_str(job, "conclusion", "job"),
     )
 
 
@@ -336,13 +334,22 @@ def collect_findings(
     ]
 
 
-def _cell(text: str) -> str:
-    """Return annotation text safe to place inside a Markdown table cell.
+def _flatten(text: str) -> str:
+    """Return upstream text collapsed onto one line.
 
-    A pipe would end the cell early and a newline would end the row, and annotation messages are
-    upstream text that may contain either.
+    Annotation messages are upstream text that may carry line breaks, and both renderings below
+    are line-oriented: a break would end a table row early and split a log line in two.
     """
-    return text.replace("|", r"\|").replace("\r\n", " ").replace("\n", " ").replace("\r", " ")
+    return text.replace("\r\n", " ").replace("\n", " ").replace("\r", " ")
+
+
+def _cell(text: str) -> str:
+    """Return text safe to place inside a Markdown table cell.
+
+    A pipe would end the cell early. This is the table's escaping alone, so a change to it
+    cannot reach the plain log line ``describe`` renders.
+    """
+    return _flatten(text).replace("|", r"\|")
 
 
 def describe(finding: Finding) -> str:
@@ -357,7 +364,7 @@ def describe(finding: Finding) -> str:
     location = f"{finding.annotation.path or '?'}:{finding.annotation.start_line or '?'}"
     return (
         f"{finding.job.name}: {finding.annotation.level}: "
-        f"{location}: {_cell(finding.annotation.message)}"
+        f"{location}: {_flatten(finding.annotation.message)}"
     )
 
 
@@ -388,7 +395,7 @@ def render_summary(run: Run, findings: Sequence[Finding], jobs_audited: int) -> 
         lines.extend(_TABLE_HEADER)
         lines.extend(
             f"| [{_cell(finding.job.name)}]({finding.job.html_url}) "
-            f"| {_cell(finding.annotation.level)} "
+            f"| {finding.annotation.level} "
             f"| {_cell(finding.annotation.message)} |"
             for finding in findings
         )

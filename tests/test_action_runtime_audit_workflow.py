@@ -7,11 +7,17 @@ These tests are that notice. `tests/test_workflow_pinning.py` still owns the sup
 that every `uses:` here resolves to a commit SHA, so no pin is restated in this module.
 """
 
-import re
-import shlex
 from pathlib import Path
 
-from ruamel.yaml import YAML
+from workflow_helpers import (
+    _invocations,
+    _invokes,
+    _load_workflow,
+    _named_step,
+    _triggers,
+    _uses_fragments,
+    _workflow_paths,
+)
 
 from doc_lattice.constants import CHECKOUT_USES, SETUP_UV_USES
 
@@ -34,81 +40,15 @@ _AUDIT_ENV = {
     "GH_TOKEN": "${{ github.token }}",
     "RUN_ID": "${{ github.event.workflow_run.id || inputs.run_id }}",
 }
-_USES_RE = re.compile(r"^\s*(?:-\s*)?uses:\s*(\S+)")
-
-
-def _load(path: Path) -> dict:
-    return YAML(typ="safe").load(path.read_text(encoding="utf-8"))
-
-
-def _triggers(workflow: dict) -> dict:
-    """Return a workflow's `on:` block.
-
-    YAML 1.1 resolves a bare `on` to the boolean true, and the safe loader keeps that resolution,
-    so the key is looked up both ways rather than assuming which spelling the file uses.
-    """
-    for key in ("on", True):
-        if key in workflow:
-            return workflow[key]
-    raise AssertionError(f"workflow declares no triggers: {sorted(workflow)}")
-
-
-def _uncommented(line: str) -> str:
-    """Return a command line with any shell comment removed, ignoring `#` inside quotes."""
-    quote = ""
-    for index, char in enumerate(line):
-        if quote:
-            quote = "" if char == quote else quote
-        elif char in "'\"":
-            quote = char
-        elif char == "#" and (index == 0 or line[index - 1].isspace()):
-            return line[:index].rstrip()
-    return line
-
-
-def _invocations(text: str) -> list[list[str]]:
-    """Return the argument list of every command in shell text."""
-    argvs = []
-    for line in text.splitlines():
-        lexer = shlex.shlex(_uncommented(line.strip()), posix=True, punctuation_chars=True)
-        lexer.whitespace_split = True
-        current: list[str] = []
-        for token in lexer:
-            if set(token) <= {"&", "|", ";"}:
-                argvs.append(current)
-                current = []
-            else:
-                current.append(token)
-        argvs.append(current)
-    return [argv for argv in argvs if argv]
-
-
-def _invokes(argv: list[str], script: str) -> bool:
-    """Report whether a command runs `script` rather than only naming it.
-
-    `-c` and `-m` make the interpreter execute inline code or a module instead, which demotes
-    any path on the line to an ordinary argument nothing ever runs.
-    """
-    if not argv or argv[0] not in {"uv", "uvx", "python", "python3"}:
-        return False
-    return script in argv[1:] and set(argv).isdisjoint({"-c", "-m"})
-
-
-def _named_step(job: dict, name: str) -> dict:
-    return next(step for step in job["steps"] if step.get("name") == name)
 
 
 def _referenced_actions() -> set[str]:
     """Return every distinct action name any workflow in this repository references."""
-    names = set()
-    for path in sorted(_WORKFLOW_DIR.iterdir()):
-        if path.suffix not in {".yml", ".yaml"}:
-            continue
-        for line in path.read_text(encoding="utf-8").splitlines():
-            match = _USES_RE.match(line)
-            if match:
-                names.add(match.group(1).strip("'\"").partition("@")[0])
-    return names
+    return {
+        fragment.partition("@")[0]
+        for path in _workflow_paths()
+        for fragment in _uses_fragments(path)
+    }
 
 
 def test_audit_watches_exactly_the_workflows_that_execute_actions():
@@ -118,8 +58,8 @@ def test_audit_watches_exactly_the_workflows_that_execute_actions():
     `CI` or `Claude Code` silently detaches the audit and leaves it reporting green forever.
     Deriving the expected list from those files is what turns that rename into a failure here.
     """
-    expected = sorted(_load(_WORKFLOW_DIR / name)["name"] for name in _SOURCE_WORKFLOWS)
-    workflow_run = _triggers(_load(_AUDIT_PATH))["workflow_run"]
+    expected = sorted(_load_workflow(_WORKFLOW_DIR / name)["name"] for name in _SOURCE_WORKFLOWS)
+    workflow_run = _triggers(_load_workflow(_AUDIT_PATH))["workflow_run"]
 
     assert sorted(workflow_run["workflows"]) == expected
     # Only a completed run has settled annotations; auditing `requested` would read a run that
@@ -133,7 +73,7 @@ def test_audit_can_be_replayed_against_a_named_run():
     The run id has to be required: defaulting it would let a dispatch audit nothing and still
     report success, which is indistinguishable from a run with no findings.
     """
-    dispatch = _triggers(_load(_AUDIT_PATH))["workflow_dispatch"]
+    dispatch = _triggers(_load_workflow(_AUDIT_PATH))["workflow_dispatch"]
 
     assert dispatch["inputs"]["run_id"]["required"] is True
 
@@ -146,7 +86,7 @@ def test_audit_job_reads_only_what_it_needs_and_skips_runs_that_executed_nothing
     as a subset. The condition is asserted alongside it because a skipped source run executed no
     action at all, and `claude.yml` skips on nearly every comment in the repository.
     """
-    job = _load(_AUDIT_PATH)["jobs"]["audit"]
+    job = _load_workflow(_AUDIT_PATH)["jobs"]["audit"]
 
     assert job["permissions"] == {"contents": "read", "actions": "read", "checks": "read"}
     assert job["if"] == _AUDIT_IF
@@ -159,7 +99,7 @@ def test_audit_step_runs_the_auditor_against_the_triggering_run():
     and a manual dispatch supplies `inputs.run_id`, and dropping either half leaves that trigger
     invoking the auditor with an empty argument.
     """
-    job = _load(_AUDIT_PATH)["jobs"]["audit"]
+    job = _load_workflow(_AUDIT_PATH)["jobs"]["audit"]
     step = _named_step(job, "Audit the completed run")
 
     assert step["env"] == _AUDIT_ENV
@@ -175,11 +115,7 @@ def test_audit_workflow_pins_the_same_action_fragments_this_repository_ships():
     the same rule read from the other side: it fails loudly here first if the new workflow ever
     picks up its own `actions/checkout` or `astral-sh/setup-uv` pin.
     """
-    fragments = {
-        line.strip().partition("uses:")[2].strip()
-        for line in _AUDIT_PATH.read_text(encoding="utf-8").splitlines()
-        if line.strip().startswith(("uses:", "- uses:"))
-    }
+    fragments = set(_uses_fragments(_AUDIT_PATH))
 
     assert {CHECKOUT_USES, SETUP_UV_USES} <= fragments
 
@@ -191,7 +127,7 @@ def test_dependabot_watches_the_actions_ecosystem_on_a_bounded_cadence():
     goes stale silently. The commit prefix keeps those pull requests inside the repository's
     own conventional-commit history rather than arriving as untyped subjects.
     """
-    config = _load(_DEPENDABOT_PATH)
+    config = _load_workflow(_DEPENDABOT_PATH)
 
     assert config["version"] == 2
     assert len(config["updates"]) == 1
@@ -211,7 +147,7 @@ def test_dependabot_groups_exactly_the_pins_this_project_ships_to_adopters():
     The expected set is derived from the shipped constants so adding a third shipped pin fails
     here instead of quietly updating on its own.
     """
-    groups = _load(_DEPENDABOT_PATH)["updates"][0]["groups"]
+    groups = _load_workflow(_DEPENDABOT_PATH)["updates"][0]["groups"]
 
     assert list(groups) == ["shipped-pins"]
     assert set(groups["shipped-pins"]["patterns"]) == _UPSTREAM_ACTIONS
@@ -224,7 +160,7 @@ def test_dependabot_can_open_a_pull_request_for_every_action_at_once():
     workflow that grows past the limit loses coverage for the actions it just added.
     """
     referenced = _referenced_actions()
-    limit = _load(_DEPENDABOT_PATH)["updates"][0]["open-pull-requests-limit"]
+    limit = _load_workflow(_DEPENDABOT_PATH)["updates"][0]["open-pull-requests-limit"]
 
     assert referenced
     assert limit >= len(referenced), (

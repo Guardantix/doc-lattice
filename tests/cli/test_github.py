@@ -4,7 +4,6 @@ from io import StringIO
 from pathlib import Path
 
 import pytest
-from rich.console import Console
 
 from doc_lattice.cli.github import (
     escape_github_message,
@@ -15,40 +14,14 @@ from doc_lattice.cli.github import (
 )
 from doc_lattice.cli.pipe_policy import PipeClosed
 from doc_lattice.cli.runtime import CliRuntime
-from doc_lattice.config import ProjectConfig
 from doc_lattice.error_types import FrontmatterError, UnreadableDocError
-from doc_lattice.model import Lattice
 
-
-def _contents(console: Console) -> str:
-    stream = console.file
-    assert isinstance(stream, StringIO)
-    return stream.getvalue()
+from .helpers import _contents, _stub_runtime
 
 
 @pytest.fixture
 def runtime(tmp_path: Path) -> CliRuntime:
-    def unexpected_config(_config: Path | None, _cwd: Path) -> ProjectConfig:
-        raise AssertionError("the annotation encoder must not load config")
-
-    def unexpected_lattice(
-        project: ProjectConfig,
-        *,
-        require_verified: bool = False,
-        persist_cache: bool = True,
-    ) -> Lattice:
-        del project
-        raise AssertionError(
-            f"the annotation encoder must not load lattice {require_verified=} {persist_cache=}"
-        )
-
-    return CliRuntime(
-        stdout=Console(file=StringIO(), no_color=True),
-        stderr=Console(file=StringIO(), stderr=True, no_color=True),
-        cwd=tmp_path,
-        load_config=unexpected_config,
-        load_lattice=unexpected_lattice,
-    )
+    return _stub_runtime(tmp_path, "the annotation encoder")
 
 
 def test_github_annotation_uses_escaped_absolute_path_outside_root(tmp_path: Path):
