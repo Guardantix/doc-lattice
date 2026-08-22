@@ -323,6 +323,37 @@ def test_main_writes_the_summary_to_the_step_summary_file(tmp_path, monkeypatch,
     assert "## Action pin correspondence" in summary_path.read_text(encoding="utf-8")
 
 
+def test_a_report_that_cannot_be_written_is_a_failure_not_a_finding(tmp_path, monkeypatch, capsys):
+    # An `OSError` here -- a full runner disk, an unwritable path -- used to escape and end the run
+    # on a traceback carrying the interpreter's exit 1, which is the *finding* code. A clean check
+    # would have reported as a mislabeled pin. The summary still reaches stdout, so nothing about
+    # the answer is lost; only the file write failed.
+    monkeypatch.setenv("GITHUB_STEP_SUMMARY", str(tmp_path / "absent" / "summary.md"))
+    fetch, _calls = _fake_api(_correspondent())
+
+    code = main(["--pin", CHECKOUT_USES], fetch)
+    captured = capsys.readouterr()
+
+    assert code == 2
+    assert "::error::infrastructure failure: the report could not be written" in captured.err
+    assert "Pins checked: 1." in captured.out
+
+
+def test_a_report_that_cannot_be_written_never_masks_a_finding(tmp_path, monkeypatch, capsys):
+    # Exit 1 is reserved for a correspondence finding, and one was established here. The annotation
+    # is written before the step-summary file for exactly this reason: the channels are ordered so
+    # a file that cannot be written costs only itself.
+    monkeypatch.setenv("GITHUB_STEP_SUMMARY", str(tmp_path / "absent" / "summary.md"))
+    fetch, _calls = _fake_api({_PROBE: Response(status=404, payload=None)})
+
+    code = main(["--pin", CHECKOUT_USES], fetch)
+    captured = capsys.readouterr()
+
+    assert code == 1
+    assert "::error::correspondence finding:" in captured.err
+    assert "the report could not be written" in captured.err
+
+
 def test_main_exits_one_on_a_correspondence_finding(monkeypatch, capsys):
     monkeypatch.delenv("GITHUB_STEP_SUMMARY", raising=False)
     fetch, _calls = _fake_api({_PROBE: Response(status=404, payload=None)})

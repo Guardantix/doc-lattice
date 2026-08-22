@@ -37,6 +37,7 @@ under ``uv run --no-project``; this one runs against a synced project for exactl
 from __future__ import annotations
 
 import argparse
+import contextlib
 import http.client
 import json
 import os
@@ -87,6 +88,10 @@ _POINTER = (
     "establish correspondence at all, and says nothing about the pins."
 )
 _TABLE_HEADER = ("| Pin | Result | Detail |", "| --- | --- | --- |")
+# How each non-clean outcome is named in the workflow log, and the one failure that is about the
+# report rather than about a pin.
+_LABELS = {FINDING: "correspondence finding", FAILURE: "infrastructure failure"}
+_REPORT_FAILED = "the report could not be written"
 
 
 class TransportError(RuntimeError):
@@ -370,6 +375,46 @@ def _parse_args(argv: Sequence[str] | None) -> argparse.Namespace:
     return parser.parse_args(argv)
 
 
+def emit(summary: str, outcomes: Sequence[Outcome]) -> bool:
+    """Write the run's report to every channel, and report whether all of them took it.
+
+    A write here can fail for the ordinary reasons any write can -- a full runner disk, a
+    `GITHUB_STEP_SUMMARY` path that is not writable -- and letting that `OSError` escape would end
+    the run on a traceback carrying the interpreter's exit 1, which is this script's *finding*
+    code. A clean check would then report as a mislabeled pin. So the report is guarded and its
+    failure is answered in the exit code instead, by the caller.
+
+    The channels are ordered by what a reader loses if a later one fails: the summary and the
+    per-outcome annotations first, and the step-summary file last, so a file that cannot be
+    written costs only itself.
+
+    Args:
+        summary: The rendered report.
+        outcomes: What the check established about each pin, for the annotation lines.
+
+    Returns:
+        True when every channel took the report, False when one of them failed.
+    """
+    try:
+        # Flushed before the per-outcome lines below, because a piped stdout is block-buffered and
+        # an unflushed summary would otherwise land after them in the workflow log.
+        print(summary, end="", flush=True)
+        for outcome in outcomes:
+            if outcome.kind != CLEAN:
+                print(f"::error::{_LABELS[outcome.kind]}: {outcome.detail}", file=sys.stderr)
+        summary_path = os.environ.get("GITHUB_STEP_SUMMARY")
+        if summary_path:
+            with Path(summary_path).open("a", encoding="utf-8") as handle:
+                handle.write(summary)
+    except OSError as error:
+        # Suppressed rather than raised: this is the report of a failed report, so the channel it
+        # would travel on is the one already known to be unreliable. The exit code carries it.
+        with contextlib.suppress(OSError):
+            print(f"::error::infrastructure failure: {_REPORT_FAILED}: {error}", file=sys.stderr)
+        return False
+    return True
+
+
 def main(argv: Sequence[str] | None = None, fetch: Callable[[str], Response] = fetch_json) -> int:
     """Check every pin and report what was established about each.
 
@@ -379,28 +424,18 @@ def main(argv: Sequence[str] | None = None, fetch: Callable[[str], Response] = f
 
     Returns:
         1 when any pin has a correspondence finding, 2 when none does but the check could not
-        establish one of them, and 0 otherwise. A finding outranks a failure: a mislabeled pin is
-        actionable now, and letting an unrelated outage on the other pin mask it would report the
-        weaker of the two answers.
+        establish one of them or could not report what it established, and 0 otherwise. A finding
+        outranks both: a mislabeled pin is actionable now, and letting an unrelated outage on the
+        other pin -- or a failed write of a report that already reached stdout -- mask it would
+        report the weaker of the two answers.
     """
     args = _parse_args(argv)
     outcomes = check(fetch, args.pin or SHIPPED_PINS)
-    summary = render_summary(outcomes)
-    # Flushed before the per-outcome lines below, because a piped stdout is block-buffered and an
-    # unflushed summary would otherwise land after them in the workflow log.
-    print(summary, end="", flush=True)
-    summary_path = os.environ.get("GITHUB_STEP_SUMMARY")
-    if summary_path:
-        with Path(summary_path).open("a", encoding="utf-8") as handle:
-            handle.write(summary)
-    labels = {FINDING: "correspondence finding", FAILURE: "infrastructure failure"}
-    for outcome in outcomes:
-        if outcome.kind != CLEAN:
-            print(f"::error::{labels[outcome.kind]}: {outcome.detail}", file=sys.stderr)
+    reported = emit(render_summary(outcomes), outcomes)
     kinds = {outcome.kind for outcome in outcomes}
     if FINDING in kinds:
         return 1
-    return 2 if FAILURE in kinds else 0
+    return 2 if FAILURE in kinds or not reported else 0
 
 
 if __name__ == "__main__":
