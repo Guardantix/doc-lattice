@@ -556,7 +556,7 @@ docs_roots:
 # ignore_globs:
 #   - "**/archive/**"
 # cache_key: my-project-docs   # opt-in load cache slot under your cache home
-# cache_trust_stat: false      # opt-in stat fast tier for read-only commands (needs cache_key)
+# cache_trust_stat: true       # opt-in stat fast tier for read-only commands (needs cache_key)
 # linear_team: ENG
 ```
 

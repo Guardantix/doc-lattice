@@ -38,14 +38,16 @@ _CONFIG_HEADER = f"# doc-lattice configuration. See {DOC_LATTICE_REPO_URL}\n"
 _COMMENTED_IGNORE = '# ignore_globs:\n#   - "**/archive/**"\n'
 _COMMENTED_CACHE = "# cache_key: my-project-docs   # opt-in load cache slot under your cache home\n"
 # The one commented key carrying a correctness caveat, so it is scaffolded rather than left for a
-# reader to discover in the docs. The trailing comment names the tier, the commands it applies to,
-# and the one dependency that a reader flipping the value to true would otherwise trip over,
-# since cache_trust_stat: true without cache_key is a config error. The scaffolded false is the
-# schema default, so uncommenting the line as written changes nothing. The caveats that make the
-# tier opt-in live in README's Load cache section, which has room to state them properly. They are
-# deliberately not restated here, since a copy would have to be re-synced with that prose.
+# reader to discover in the docs. The scaffolded value is true rather than the false default,
+# because every commented line here is written to do something when uncommented; a scaffolded
+# false would read as the opt-in the trailing comment calls it while actually being a no-op. The
+# trailing comment names the tier, the commands it applies to, and the dependency that makes
+# uncommenting this line by itself a config error, since cache_trust_stat: true without cache_key
+# is rejected. The caveats that make the tier opt-in live in README's Load cache section, which
+# has room to state them properly. They are deliberately not restated here, since a copy would
+# have to be re-synced with that prose.
 _COMMENTED_TRUST_STAT = (
-    "# cache_trust_stat: false      "
+    "# cache_trust_stat: true       "
     "# opt-in stat fast tier for read-only commands (needs cache_key)\n"
 )
 _COMMENTED_LINEAR = "# linear_team: ENG\n"

@@ -37,8 +37,9 @@ def test_render_config_includes_commented_cache_examples():
     text = render_config(("docs",), None)
     assert "# cache_key: my-project-docs" in text
     # cache_trust_stat is scaffolded because it is the one option whose fast path trades a read
-    # for trust, so a reader should meet it in the file rather than only in the docs.
-    assert "# cache_trust_stat: false" in text
+    # for trust, so a reader should meet it in the file rather than only in the docs. It is
+    # scaffolded at true so that uncommenting it opts in, which is what its comment claims.
+    assert "# cache_trust_stat: true" in text
 
 
 def test_render_gitignore_matches_reconcile_transaction_artifacts():
@@ -107,7 +108,7 @@ def test_commented_example_keys_stay_valid_against_config_schema():
     }
     assert cfg.ignore_globs == ["**/archive/**"]
     assert cfg.cache_key == "my-project-docs"
-    assert cfg.cache_trust_stat is False
+    assert cfg.cache_trust_stat is True
     # Config types linear_team as a bare str, so a placeholder example would load cleanly here
     # and only fail downstream in linear_query. Hold the example to the domain that owns it.
     assert cfg.linear_team is not None

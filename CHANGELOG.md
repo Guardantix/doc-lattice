@@ -58,12 +58,14 @@ moves. See **Changed** below.
   diagnostics keep the full guarantee. Tests now enforce the exclusion under both levers and pin
   the carriage-return and line-feed boundary rather than leaving either written down.
 
-- `init` now scaffolds a commented `cache_trust_stat: false` line into `.doc-lattice.yml`,
+- `init` now scaffolds a commented `cache_trust_stat: true` line into `.doc-lattice.yml`,
   alongside the `ignore_globs`, `cache_key`, and `linear_team` examples it already wrote. It is
   the one option whose fast path trades a read for trust, so a reader should meet it in the file
-  rather than only in the docs. Its comment names the `cache_key` dependency, because
-  `cache_trust_stat: true` without `cache_key` is a config error and the scaffolded line would
-  otherwise invite one. The written file is otherwise unchanged and still has exactly one active
+  rather than only in the docs. It is scaffolded at `true`, not at the `false` default, so that
+  uncommenting it opts in like every other commented line in that file; a scaffolded `false`
+  would be a no-op wearing an opt-in's comment. Its comment names the `cache_key` dependency,
+  because `cache_trust_stat: true` without `cache_key` is a config error and the scaffolded line
+  would otherwise invite one. The written file is otherwise unchanged and still has exactly one active
   key; nothing about config loading moves.
 
 - README.md documents the twelve printed error codes beside the exit-code table, names the
