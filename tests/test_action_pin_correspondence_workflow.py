@@ -115,9 +115,13 @@ def test_the_workflow_pins_the_same_action_fragments_this_repository_ships():
 def test_the_check_is_not_one_of_the_protected_contexts_releasing_records():
     """Making this merge-blocking is a branch-protection change, not a workflow edit.
 
-    RELEASING.md records exactly four required contexts and treats that list as the settings
-    contract. Adding a fifth by naming a job after it would leave the document describing a
-    protection rule the repository no longer has.
+    RELEASING.md records the required contexts and treats that list as the settings contract.
+    Joining it by naming a job after one of them would leave the document describing a protection
+    rule the repository does not have.
+
+    The assertion reads the row rather than counting it, deliberately: the list grows -- GTX-119
+    is adding `Runtime floor compatibility` to it now -- and a test that pinned the count would
+    fail on someone else's rollout while saying nothing about this workflow.
     """
     row = next(
         line

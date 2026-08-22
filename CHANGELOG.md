@@ -68,11 +68,11 @@ message text, and exit codes are unchanged. See **Fixed** below and AD-41 in ARC
   retagged upstream release, and a SHA advanced past every tag are all reported as correspondence
   findings, and are kept distinct from infrastructure failures such as a rate limit or an outage,
   which say nothing about the pins. The check runs monthly and on `workflow_dispatch`; it is a
-  notice rather than a gate and is not one of the four protected contexts, because the answer needs
-  network access and the pull-request suite stays offline. No pin moves in this change. AD-43 in
-  ARCHITECTURE.md records the decision and amends AD-42, whose conclusion that a wrong comment can
-  only enter by hand edit holds at authorship time alone: a Git tag is mutable, and the pinned
-  `actions/checkout` release reports `immutable: false`.
+  notice rather than a gate and does not join the protected contexts RELEASING.md records, because
+  the answer needs network access and the pull-request suite stays offline. No pin moves in this
+  change. AD-43 in ARCHITECTURE.md records the decision and amends AD-42, whose conclusion that a
+  wrong comment can only enter by hand edit holds at authorship time alone: a Git tag is mutable,
+  and the pinned `actions/checkout` release reports `immutable: false`.
 
 ### Changed
 

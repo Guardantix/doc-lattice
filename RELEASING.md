@@ -459,7 +459,7 @@ uv run python scripts/check_action_pin_correspondence.py \
 ```
 
 Like the runtime audit, this is a notice and not a pull-request check: it is scheduled and manual
-only, it is not one of the four protected contexts below, and nothing turns red until somebody
+only, it is not one of the protected contexts recorded below, and nothing turns red until somebody
 looks.
 
 ## Accounts and access

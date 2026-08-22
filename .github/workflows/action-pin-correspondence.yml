@@ -14,9 +14,9 @@ on:
 # runs alongside Dependabot and the `Action runtime audit` rather than replacing either.
 #
 # Scheduled and manual only, never a pull-request check: the answer needs network access, so it
-# cannot live in the offline suite that gates every pull request, and RELEASING.md records exactly
-# four protected contexts that this deliberately does not join. Like the runtime audit, it is a red
-# notice somebody has to look at.
+# cannot live in the offline suite that gates every pull request, and the protected contexts are a
+# settings contract RELEASING.md owns that this deliberately does not join. Like the runtime audit,
+# it is a red notice somebody has to look at.
 jobs:
   correspondence:
     name: Action pin correspondence

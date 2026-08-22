@@ -2137,9 +2137,12 @@ would run unrelated checks after every CI and Claude Code run and blur AD-42's t
 contracts. **Scanning the workflows** instead of reading the two constants would duplicate lookups
 the parity tests already make redundant and would sweep in the `v1` channel. **A required
 pull-request check** was rejected twice over: the answer needs network access, so it cannot live
-in the offline suite that gates every pull request, and RELEASING.md records exactly four
-protected contexts, so a fifth is a branch-protection and settings-contract change this does not
-carry. **Reusing `scripts/audit_action_runtimes.py`'s transport** was rejected because it
+in the offline suite that gates every pull request, and the protected contexts are a settings
+contract RELEASING.md owns, so joining that list is a branch-protection change this does not
+carry. The count is deliberately not restated here: GTX-119's rollout of
+`Runtime floor compatibility` is mid-flight, so the recorded list and the live rule differ by one
+until its readback, and a number written down here would be wrong for the duration.
+**Reusing `scripts/audit_action_runtimes.py`'s transport** was rejected because it
 deliberately collapses every nonzero `gh api` result into one error, which is right for its
 contract and cannot express the finding-versus-failure split this one turns on.
 **Consequences:** The `# vX.Y.Z` comment beside a shipped pin is now a checked claim rather than a
