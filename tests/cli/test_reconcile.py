@@ -832,6 +832,8 @@ def test_reconcile_lost_journal_double_failure_maps_orphans_and_recover_cannot_a
     # The prescription an operator cannot act on is gone from the operator-visible text.
     assert "run 'doc-lattice reconcile --recover'" not in failed.stderr
     assert "has no journal to read" in failed.stderr
+    assert "the retained stage against its before image" in failed.stderr
+    assert "preserve any destination or stage that does not match" in failed.stderr
     assert not journal.exists()
     stages = sorted(project.rglob("*.doc-lattice-before.*.tmp"))
     assert len(stages) == 2

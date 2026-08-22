@@ -1449,6 +1449,15 @@ def test_absent_journal_restore_failure_refuses_rollback_and_leaves_no_journal(
     assert "run 'doc-lattice reconcile --recover'" not in message
     assert f"journal {format_path_for_display(journal)} is not present" in message
     assert "has no journal to read" in message
+    # Both digests are preconditions, not decoration. Recovery refuses a stage that does not
+    # match its recorded digest; a manual restore has no such gate unless this text states
+    # one, so a truncated stage would otherwise be copied over a valid after image.
+    assert (
+        "restore each one by hand only after checking both digests recorded below, the "
+        "destination against its after image and the retained stage against its before "
+        "image, and preserve any destination or stage that does not match rather than "
+        "copying it"
+    ) in message
     assert (
         f"destination {format_path_for_display('doc.md')} holds after image "
         f"{persistence.sha256_bytes(b'new bytes')} and is restored from retained before "

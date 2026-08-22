@@ -239,8 +239,10 @@ classifies the canonical journal path first and names which of four states it fo
   is the last holder of: for each entry, the project-relative destination, the SHA-256 it should
   currently hold, the retained before stage, and that stage's SHA-256, ordered by destination so
   a batch over several documents always reads the same. Restore each destination from its stage
-  by hand, and only after confirming that the destination still matches the recorded after image,
-  since an unrelated editor may have changed it since the failure.
+  by hand only after checking both recorded digests: the destination against its after image,
+  since an unrelated editor may have changed it since the failure, and the stage against its
+  before image, since nothing authenticates the stage the way `--recover` would. Preserve
+  anything that does not match, for investigation, instead of copying it.
 - **Anything else at that path.** Foreign bytes, an unreadable file, a nonregular collision. The
   instruction stays, because recovery authenticates what it finds and refuses safely when it
   cannot, which is more than this commit can establish about a path it could not rewrite. The

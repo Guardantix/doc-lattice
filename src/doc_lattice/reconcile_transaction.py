@@ -1685,9 +1685,13 @@ def _lost_journal_entry_mappings(prepared: _PreparedTransaction) -> str:
     named after its destination but records nothing that binds it to one, and recovery
     authenticates a stage only after a journal supplies that binding, so a diagnostic that
     omitted the mapping would leave an operator with an opaque orphan and no way back.
-    Both recorded digests travel with it: the after digest is what an operator checks a
+    Both recorded digests travel with it, and the remediation requires both checks rather
+    than printing them as description. The after digest is what an operator checks a
     destination against before overwriting it, since an unrelated editor may have changed
-    it since the marker failed.
+    it since the marker failed. The before digest is what authenticates the stage itself:
+    recovery would refuse to act on a stage that did not match its recorded digest, and a
+    manual restore has no such gate unless the diagnostic states one, so a truncated or
+    substituted stage would otherwise be copied over a valid after image.
 
     Args:
         prepared: The transaction whose prepared journal could not be restored.
@@ -1750,9 +1754,10 @@ def _failed_reset_remediation(
         return (
             f"{prepared_detail}, so 'doc-lattice reconcile --recover' has no journal to read "
             "and can neither identify nor restore these destinations; every destination "
-            "reached its after image before the marker failed; restore each one by hand from "
-            "its retained before stage, and only after confirming the destination still "
-            f"matches the after image recorded here: {mappings}"
+            "reached its after image before the marker failed; restore each one by hand only "
+            "after checking both digests recorded below, the destination against its after "
+            "image and the retained stage against its before image, and preserve any "
+            f"destination or stage that does not match rather than copying it: {mappings}"
         )
     return (
         "preserve the journal and staged evidence, then run 'doc-lattice reconcile --recover'; "

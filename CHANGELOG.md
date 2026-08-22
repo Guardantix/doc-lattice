@@ -33,8 +33,11 @@ moves. See **Changed** below.
   destination it belongs to. The diagnostic now says the journal is absent, states that every
   destination reached its after image and that no rollback was attempted, and lists each
   destination with the digest it should currently hold, its retained before stage, and that
-  stage's digest, so the manual restore it prescribes is one you can actually carry out and
-  verify.
+  stage's digest. Both digests are checks it requires rather than facts it prints: recovery
+  would refuse to act on a stage that did not match its recorded digest, and a manual restore
+  has no such gate unless the diagnostic states one, so the message asks for the destination and
+  the stage to be verified and for anything that does not match to be preserved rather than
+  copied.
 
   A failed reset is not read as an absent journal on its own. The commit classifies the journal
   path before choosing what to say, and only a confirmed-absent journal drops the instruction: an
