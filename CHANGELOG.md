@@ -61,8 +61,10 @@ moves. See **Changed** below.
 - `init` now scaffolds a commented `cache_trust_stat: false` line into `.doc-lattice.yml`,
   alongside the `ignore_globs`, `cache_key`, and `linear_team` examples it already wrote. It is
   the one option whose fast path trades a read for trust, so a reader should meet it in the file
-  rather than only in the docs. The written file is otherwise unchanged and still has exactly one
-  active key; nothing about config loading moves.
+  rather than only in the docs. Its comment names the `cache_key` dependency, because
+  `cache_trust_stat: true` without `cache_key` is a config error and the scaffolded line would
+  otherwise invite one. The written file is otherwise unchanged and still has exactly one active
+  key; nothing about config loading moves.
 
 - README.md documents the twelve printed error codes beside the exit-code table, names the
   diagnostics that carry no code, documents the global `--version` option, and states that
@@ -1169,7 +1171,11 @@ GitHub Release notes, which are never rewritten.
   generated slug instead, so any `derives_from` ref pointing at the old `file#marker` target
   resolves to nothing and `check` reports it as BROKEN. Migration: move the marker to the
   supported trailing position to keep the old anchor, or repoint the ref at the heading's
-  generated slug.
+  generated slug. That slug is derived from the whole heading text with the marker still in it,
+  so `## Alpha {#mid} beta` becomes `alpha-mid-beta`, not the `alpha-beta` the token's removal
+  would suggest. Recorded retroactively: this note was added to `main` long after v1.0.1 was
+  published, so it is absent from the immutable v1.0.1 tag and from that release's GitHub
+  Release notes, which are never rewritten.
 
 ## [1.0.0] - 2026-07-12
 

@@ -76,6 +76,23 @@ def test_version_flag():
     assert __version__ in result.stdout
 
 
+def test_version_flag_is_eager_and_ignores_a_broken_config(tmp_path: Path, monkeypatch):
+    """--version answers before any command runs, so a config that would fail cannot stop it.
+
+    README publishes this as the check to run against a fresh install: no config file, no docs
+    root, no network. A config that any command would reject with CONFIG_ERROR is the sharpest
+    way to pin that, since it fails only if config loading moved ahead of the eager callback.
+    """
+    (tmp_path / ".doc-lattice.yml").write_text("bogus: 1\n", encoding="utf-8")
+    monkeypatch.chdir(tmp_path)
+
+    assert runner.invoke(app, ["check"]).exit_code == EXIT_TOOL_ERROR
+
+    result = runner.invoke(app, ["--version"])
+    assert result.exit_code == 0
+    assert __version__ in result.stdout
+
+
 def _run_cli_subprocess(argv: list[str], env: dict[str, str]) -> subprocess.CompletedProcess[str]:
     script = (
         "import sys\n"

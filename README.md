@@ -556,7 +556,7 @@ docs_roots:
 # ignore_globs:
 #   - "**/archive/**"
 # cache_key: my-project-docs   # opt-in load cache slot under your cache home
-# cache_trust_stat: false      # opt-in stat fast tier for read-only commands
+# cache_trust_stat: false      # opt-in stat fast tier for read-only commands (needs cache_key)
 # linear_team: ENG
 ```
 
@@ -564,8 +564,9 @@ That block is byte-for-byte what `init` writes with no flags, and a test holds t
 so what you read here is what you get rather than a paraphrase that drifts. The commented keys
 are the optional ones: `ignore_globs` lists paths to skip within the roots, `cache_key` and
 `cache_trust_stat` are the opt-in load cache described below, and `linear_team` names the team
-the `linear` query targets. Uncomment what you need; `docs_roots` is the only active key, and it
-defaults to `["docs"]` when the file is absent entirely.
+the `linear` query targets. Uncomment what you need; `docs_roots` is the only active key the
+generated file writes, and it defaults to `["docs"]` whenever it is unset -- in a config file that
+omits it just as in zero-config mode, so a file carrying only `linear_team: ENG` is valid.
 
 Configuration is strict in both directions. An unknown key is rejected rather than ignored, and
 after YAML parsing each value must already have the schema's exact type, because values are not
@@ -918,17 +919,23 @@ diagnostics and are free to change, while this domain is the documented migratio
 | Code | Raised when |
 |------|-------------|
 | `CONFIG_ERROR` | An explicit `--config PATH` names a file that does not exist, or the selected `.doc-lattice.yml` is unreadable, fails to parse as YAML, fails its schema, or names a `docs_roots` entry that escapes the project root or exists as something other than a directory or a regular `.md` file. A `linear_team` *in that file* that is not a valid team key lands here too; the same value passed to `init --linear-team` does not, because `init` writes a config and never reads one. An absent default config is not an error; it is zero-config mode. |
-| `VALIDATION_ERROR` | A value parsed cleanly but failed domain validation: an `impact` token that resolves to no id, a `reconcile --ref` matching no edge on the named node, or any input `init` checks before it writes anything. That last group is a `--docs-root` or `--linear-team` that is empty or carries a control character, a `--docs-root` that is absolute or contains `..`, a `--linear-team` that is not a Linear team key, and a `--default-branch` outside the supported branch-name domain, including a name the local `origin/HEAD` probe discovered. Command-shape and parser usage failures are *not* this; they stay uncoded. |
+| `VALIDATION_ERROR` | A value parsed cleanly but failed domain validation: an impact token that resolves to no id (from `impact` or from `linear`), a `reconcile` node id that names no node, a `reconcile --ref` matching no edge on the node it named, or any input `init` checks before it writes anything (enumerated below). Command-shape and parser usage failures are *not* this; they stay uncoded. |
 | `DUPLICATE_ID` | Two files claim the same `id`, or two headings within one file resolve to the same anchor id. The error names both registration sites. |
 | `BROKEN_REF` | An operation that requires a resolved edge was aimed at one that does not resolve, in practice a single-node `reconcile` whose `--ref` names the broken edge. This is *not* the ordinary unresolved ref: that is the coherent `BROKEN` finding `check` reports with exit 1, and a broad `reconcile` skips it rather than failing. |
-| `UNREADABLE_DOC` | A discovered document cannot be read or decoded as UTF-8, its frontmatter YAML cannot be parsed, or a reconcile finds the frontmatter structure it must rewrite malformed. |
-| `FRONTMATTER_ERROR` | Tracked lattice frontmatter failed schema validation (an unknown key, a wrong type, or a control character in a text value), or an id-less block declared `authority`, `derives_from`, or `tickets` and so named no owner for the edges it declares. |
-| `LINEAR_ERROR` | The `linear` command could not obtain a usable response: no `LINEAR_API_KEY`, a transport failure, a retry budget exhausted against HTTP 429 or 5xx, GraphQL errors, a missing, oversized, or malformed payload, or more distinct ticket refs than one run accepts. |
+| `UNREADABLE_DOC` | A discovered document cannot be read or decoded as UTF-8, it opens a `---` frontmatter fence it never closes, or its frontmatter YAML cannot be parsed. A reconcile also raises it when the structure it must rewrite is malformed, and when it refuses a rewrite it cannot verify, having found the result unparseable, self-referential, or not a faithful reproduction. |
+| `FRONTMATTER_ERROR` | Tracked lattice frontmatter failed schema validation: an unknown key, a wrong type, a control character in a text value, or a correctly typed value outside its own domain, such as an `id` containing `#` or a `layer` or `authority` that is not one of its supported words. It also covers an id-less block that declared `authority`, `derives_from`, or `tickets` and so named no owner for the edges it declares. |
+| `LINEAR_ERROR` | The `linear` command could not obtain a usable response: a missing or rejected `LINEAR_API_KEY`, a transport failure, any HTTP error status (429 and 5xx after the retry budget is exhausted, every other status refused on the first attempt), a refused redirect, GraphQL errors, a missing, oversized, or malformed payload, or more distinct ticket refs than one run accepts. |
 | `RECONCILE_IN_PROGRESS` | Another process already holds the project's reconcile lock, so the run refuses rather than writing alongside it. |
 | `RECONCILE_CONFLICT` | A reconcile destination's bytes changed between validation and the write, so the transaction was refused and rolled back rather than applied over an edit it never read. |
-| `RECONCILE_PERSISTENCE` | A reconcile transaction could not be durably written, its rollback could not be completed, or `--recover` could not safely finish an interrupted one. It also covers lock setup failing and a platform with no POSIX advisory locking. A journal or recovery failure names the recovery step to run; the rest describe the condition without one, because there is no transaction to recover. |
+| `RECONCILE_PERSISTENCE` | A reconcile transaction could not be durably written, its rollback could not be completed, or `--recover` could not safely finish an interrupted one. It also covers lock setup failing and a platform with no POSIX advisory locking. Wherever there is a transaction to recover, the message names the recovery step to run; the rest describe the condition without one. |
 | `INIT_PERSISTENCE` | `init` could not write `.doc-lattice.yml` into the working directory. |
 | `WARNING_AS_ERROR` | A warning filter (`PYTHONWARNINGS=error`, or `-W error`) turned an advisory into an exception, ending a run that would otherwise have continued past it. |
+
+The `init` inputs checked before anything is written, all of them `VALIDATION_ERROR`, are a
+`--docs-root` or `--linear-team` that is empty or carries a control character, a `--docs-root`
+that is absolute or contains `..`, a `--linear-team` that is not a Linear team key, and a
+`--default-branch` outside the supported branch-name domain, including a name the local
+`origin/HEAD` probe discovered rather than one you typed.
 
 `UNKNOWN` is deliberately absent. It is the base default that every typed error overrides, and no
 production path raises an error carrying it, so it is not a diagnostic you can receive.

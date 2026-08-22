@@ -136,7 +136,8 @@ def test_init_delegates_create_only_write_to_shared_persistence(tmp_path: Path, 
         b"# ignore_globs:\n"
         b'#   - "**/archive/**"\n'
         b"# cache_key: my-project-docs   # opt-in load cache slot under your cache home\n"
-        b"# cache_trust_stat: false      # opt-in stat fast tier for read-only commands\n"
+        b"# cache_trust_stat: false      "
+        b"# opt-in stat fast tier for read-only commands (needs cache_key)\n"
         b"# linear_team: ENG\n"
     )
     assert prefix == ".doc-lattice.yml."

@@ -38,11 +38,13 @@ _CONFIG_HEADER = f"# doc-lattice configuration. See {DOC_LATTICE_REPO_URL}\n"
 _COMMENTED_IGNORE = '# ignore_globs:\n#   - "**/archive/**"\n'
 _COMMENTED_CACHE = "# cache_key: my-project-docs   # opt-in load cache slot under your cache home\n"
 # The one commented key carrying a correctness caveat, so it is scaffolded rather than left for a
-# reader to discover in the docs. The trailing comment states only that the tier trades reads for
-# trust; the full caveat (a size- and mtime-preserving rewrite is served stale, and reconcile
-# ignores the setting) lives in README's Load cache section, which has room to say it properly.
+# reader to discover in the docs. The trailing comment names the tier, the commands it applies to,
+# and the one dependency that turns an uncommented line into a config error; the caveats that make
+# it opt-in live in README's Load cache section, which has room to state them properly. They are
+# deliberately not restated here, since a copy would have to be re-synced with that prose.
 _COMMENTED_TRUST_STAT = (
-    "# cache_trust_stat: false      # opt-in stat fast tier for read-only commands\n"
+    "# cache_trust_stat: false      "
+    "# opt-in stat fast tier for read-only commands (needs cache_key)\n"
 )
 _COMMENTED_LINEAR = "# linear_team: ENG\n"
 
