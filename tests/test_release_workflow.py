@@ -35,6 +35,13 @@ _COMMAND_SUBSTITUTION = re.compile(r"^\$\((.*)\)$")
 # The two operators that run what follows in the same shell and only on the left side
 # succeeding, which is what carries a `cd` to the commands after it.
 _SEQUENCING = frozenset({"&&", ";"})
+# Operators that keep the success path running once the `cd` has already reached. `||` drops
+# off it -- it runs its right side only when the left one failed -- and `&` backgrounds
+# everything to its left, the `cd` with it.
+_CONTINUES = frozenset({"&&", ";", "|"})
+# Redirections, which make a command's output go somewhere other than the substitution reading
+# it. `$(mktemp -d >/dev/null)` expands to nothing at all.
+_REDIRECTIONS = frozenset({">", ">>", "<", "<<"})
 # Programs that run another program rather than being the work themselves. A release step
 # reaches the packaged CLI through one of these, so the CLI's own name is not argv[0].
 _LAUNCHERS = frozenset({"uv", "uvx", "python", "python3"})
@@ -125,7 +132,29 @@ def _expands(word: str, name: str) -> bool:
     return word in {f"${name}", f"${{{name}}}"}
 
 
-def _retarget(words: list[str], workdirs: set[str]) -> None:
+def _makes_throwaway_dir(value: str) -> bool:
+    """Report whether an assigned value is the path `mktemp -d` printed.
+
+    The whole value has to be one `mktemp -d` and nothing else. What a substitution expands to
+    is what its *last* command printed, so finding a qualifying `mktemp` somewhere inside it
+    proves nothing: `$(mktemp -d >/dev/null; printf '%s' "${GITHUB_WORKSPACE}")` runs one and
+    still expands to the checkout. Rather than work out what a compound substitution evaluates
+    to, this recognizes the one shape it can vouch for and refuses every other -- a redirection
+    included, since `$(mktemp -d >/dev/null)` expands to nothing.
+    """
+    substitution = _COMMAND_SUBSTITUTION.match(value)
+    if substitution is None:
+        return False
+    inner = _invocations(substitution.group(1))
+    return (
+        len(inner) == 1
+        and inner[0][:1] == ["mktemp"]
+        and "-d" in inner[0]
+        and _REDIRECTIONS.isdisjoint(inner[0])
+    )
+
+
+def _retarget(words: list[str], workdirs: dict[str, int], shell: int) -> None:
     """Update, in place, which variables currently hold a freshly created temporary directory.
 
     Assignments are applied in command order rather than collected over the whole step, so a
@@ -143,9 +172,17 @@ def _retarget(words: list[str], workdirs: set[str]) -> None:
     prints text and assigns nothing, and `D=… cmd` sets `D` in that one command's environment.
     Reading every word would let either declare the checkout a throwaway directory.
 
+    Each name is recorded against the shell instance that assigned it, because an assignment
+    dies with the subshell that made it: `( D="$(mktemp -d)" )` leaves `D` untouched outside,
+    so the runner's own value -- the checkout, for a name like `GITHUB_WORKSPACE` -- is what a
+    later `cd` reads. A name assigned to anything else is dropped outright rather than scoped,
+    which can retire a binding that would really have survived; that direction is the safe one.
+
     Args:
         words: One command's words, with the parentheses around them already removed.
-        workdirs: The variables currently holding a throwaway directory, updated in place.
+        workdirs: Each throwaway-holding variable and the shell that assigned it, updated in
+            place.
+        shell: The shell instance this command runs in.
     """
     assignments = []
     for word in words:
@@ -154,14 +191,10 @@ def _retarget(words: list[str], workdirs: set[str]) -> None:
             return
         assignments.append(assignment.groups())
     for name, value in assignments:
-        substitution = _COMMAND_SUBSTITUTION.match(value)
-        if substitution is not None and any(
-            inner[:1] == ["mktemp"] and "-d" in inner
-            for inner in _invocations(substitution.group(1))
-        ):
-            workdirs.add(name)
+        if _makes_throwaway_dir(value):
+            workdirs[name] = shell
         else:
-            workdirs.discard(name)
+            workdirs.pop(name, None)
 
 
 def _separated_commands(line: str) -> list[tuple[str, list[str]]]:
@@ -252,9 +285,15 @@ def _throwaway_dir_runs(text: str, program: str, subcommand: str) -> list[list[s
     *Which operator joined them.* Only `&&` and `;` run the rest of the list in the shell that
     moved and on the `cd` succeeding. `||` runs it precisely when the `cd` failed; `|` and `&`
     run it in a sibling subshell that inherited the *original* directory, which is the checkout
-    root this assertion exists to exclude. Past that first operator the directory persists for
-    the rest of the line, `|` and `&` included -- their subshells inherit the directory the
-    `cd` reached -- so it is only the operator joining the `cd` to what follows that matters.
+    root this assertion exists to exclude.
+
+    *Whether the success path still reaches.* Every operator between the two matters, not only
+    the first: `cd "${d}" && true || x` leaves the directory changed and never runs `x`, since
+    a successful `true` skips the `||` branch. So `||` and `&` end the binding wherever they
+    appear -- `&` because it backgrounds everything to its left, the `cd` with it -- while `|`
+    is admitted after the first operator, where it only opens a subshell that inherits the
+    directory. This under-accepts on purpose: `cd "${d}" && a || b && x` does reach `x`, and is
+    rejected rather than reasoned about, because that direction fails closed.
 
     *Which subshell each ran in.* A `cd` inside a subshell is undone at the closing paren, so
     `( cd "${d}" ) && x` runs `x` in the checkout however the two are joined. The shell that
@@ -270,24 +309,30 @@ def _throwaway_dir_runs(text: str, program: str, subcommand: str) -> list[list[s
     it. That bounds the hole rather than closing it: a launcher pointed at another program
     still satisfies it, and no argv-shaped check can tell that from the real thing.
     """
-    workdirs: set[str] = set()
+    workdirs: dict[str, int] = {}
     opened = itertools.count(1)
     matched = []
     for line in text.splitlines():
-        shells, moved = [0], None
+        shells, moved, moved_at = [0], None, -1
         commands = _separated_commands(line)
-        for index, (_, argv) in enumerate(commands):
+        for index, (joined_by, argv) in enumerate(commands):
             words, enclosing = _unnested(argv, shells, opened)
-            _retarget(words, workdirs)
+            _retarget(words, workdirs, enclosing[-1])
+            if moved is not None and index > moved_at + 1 and joined_by not in _CONTINUES:
+                # The success path out of the `cd` does not reach this command.
+                moved = None
             if moved is not None and moved not in enclosing:
                 # The shell that moved has exited, taking its directory with it.
                 moved = None
             if words[:1] == ["cd"]:
                 joins = commands[index + 1][0] if index + 1 < len(commands) else ""
                 reaches = joins in _SEQUENCING and any(
-                    _expands(word, name) for word in words[1:] for name in workdirs
+                    _expands(word, name)
+                    for word in words[1:]
+                    for name, assigned_in in workdirs.items()
+                    if assigned_in in enclosing
                 )
-                moved = enclosing[-1] if reaches else None
+                moved, moved_at = (enclosing[-1], index) if reaches else (None, -1)
             elif moved is not None and _launches(words, program, subcommand):
                 matched.append(words)
     return matched
