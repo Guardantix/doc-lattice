@@ -2062,10 +2062,99 @@ pull-request check, because a `workflow_run` workflow does not attach to the run
 it: an action only the release path uses is therefore noticed on the release run, after publish,
 which is a notice and not a block. Runtime deprecation is detected only for action paths that
 actually execute, so a dormant conditional branch is never reported, the deliberate trade for
-reading a verdict instead of reconstructing one. Two documented Dependabot limits stay GTX-180's
-territory: an already-wrong `# vX.Y.Z` comment beside a SHA is not corrected, and a SHA with no
-direct tag is advanced to branch HEAD. GTX-180 narrows because Dependabot now authors the
-SHA-and-comment pair and the parity tests force every copy to equal it, so a wrong comment can
-only enter by hand edit. The standing cost is at most one Dependabot pull request per action per
+reading a verdict instead of reconstructing one. Two documented Dependabot limits were left open
+here: an already-wrong `# vX.Y.Z` comment beside a SHA is not corrected, and a SHA with no direct
+tag is advanced to branch HEAD. **AD-43 closes both**, and corrects this record's account of the
+first one. Where this record concluded that a wrong comment "can only enter by hand edit" because
+Dependabot authors the pair and the parity tests force every copy to equal it, that holds at
+authorship time alone: a Git tag is mutable, GitHub exposes reference update and deletion, and
+the pinned `actions/checkout` release reports `immutable: false`, so a pair authored correctly can
+stop being true afterwards with no local edit at all. What survives unchanged is the narrowing
+itself, which is what keeps the answer to that a monthly read of two pins rather than a
+manifest-fetching auditor. The standing cost is at most one Dependabot pull request per action per
 month, and one small API-only job per completed CI or Claude Code run, with skipped-conclusion
 runs filtered out.
+
+### AD-43: A pin's version comment is checked against the release it names, on a schedule
+
+**Date:** 2026-08-22
+**Status:** Accepted
+**Context:** AD-42 answers "has this pin fallen behind" and "does an executed action run on a
+dying runtime". It does not answer "is this pin the release its comment claims", and nothing else
+does either: `tests/test_workflow_pinning.py`, `tests/test_managed_ci_recipe.py`, and
+`tests/cli/test_init.py` all compare this repository's text against other copies of this
+repository's text, so a SHA paired with the wrong `# vX.Y.Z` comment is self-consistent in every
+file and passes green everywhere. The comment is not decoration: it is what a reader and an
+adopter use to judge what the pin is, and MANAGED_CI.md ships it as literal copyable text.
+GTX-170 carried that correspondence as a hand-checked acceptance criterion, verified once and
+then not verifiable again without repeating it by hand.
+**Decision:** One repository-owned check, scheduled monthly and dispatchable,
+`.github/workflows/action-pin-correspondence.yml` over `scripts/check_action_pin_correspondence.py`.
+It reads `CHECKOUT_USES` and `SETUP_UV_USES` from `constants.py`, which are composed from the four
+values a bump edits, so the pairs are never restated and the parity tests already force every
+shipped copy to equal them. The moving `anthropics/claude-code-action@... # v1` channel is out of
+scope by construction rather than by exclusion: it is not one of the two pins `constants.py` owns,
+and a non-exact comment is refused rather than resolved, because a channel names whatever it was
+last pointed at and no commit can be compared against it.
+
+Each pin costs two reads and neither is redundant. `GET /git/ref/tags/{tag}` is documented to
+answer 404 for a reference that does not exist, which gives the missing-tag case a status to key
+on; the commits endpoint answers 422 there, and GitHub documents that status as either a
+validation failure or abuse protection, so it cannot carry that meaning alone. The SHA the ref
+endpoint returns is then discarded, because for an annotated tag it is the tag object rather than
+the commit. Only `GET /repos/{owner}/{repo}/commits/tags/{tag}` peels both tag kinds to the value
+a pin is comparable against.
+
+The transport is a stdlib `http.client.HTTPSConnection` rather than a URL opened by `urllib`, and
+that is a security choice before it is a style one. The host and TLS are fixed in the constructor,
+so no path composed from a pin -- including one an operator passes to `--pin` -- can move the
+request onto another host or reach a `file://` scheme, which is exactly the hazard semgrep's
+`dynamic-urllib-use-detected` names for the URL-composing spelling. Nothing is followed either: a
+redirect is returned as its own status and classified as an infrastructure failure, which is right
+here, because a 3xx on these two endpoints means the action's repository moved rather than that the
+pin is wrong. That spelling carries this repository's **one** semgrep suppression, by rule id and
+one line wide: `httpsconnection-detected` warns that Python before 3.4.3 does not verify
+certificates by default, and AD-24's 3.13 floor excludes every interpreter that behaves that way.
+A suppression is worth a record because there were none before it; the alternative was to suppress
+the urllib rule instead, which would have silenced a hazard that is real rather than one the floor
+already answers.
+
+A *correspondence finding* and an *infrastructure failure* are separate outcomes and separate
+exit codes. A finding is a claim about the pin -- a non-exact comment, a tag that does not exist,
+or a tag naming a different commit. A failure is the check establishing nothing -- authentication,
+rate limiting, transport, an unexpected status, or a payload that is not shaped as documented.
+Both fail the run, because an unverified pin is not a verified one, but an outage must never be
+reported as a mislabeled release. A finding outranks a concurrent failure in the exit code, since
+the actionable answer must not be masked by an unrelated outage on the other pin.
+
+Alternatives were rejected. **Declining outright** was the other legitimate outcome ROADMAP named,
+and it fails on the mutability above: the case that survives AD-42's narrowing is real for at
+least one currently pinned release, and no local discipline covers it. **A one-time check after a
+bump** covers only authorship, which is the half AD-42 already covers. **Folding it into
+`Action runtime audit`** was rejected because that workflow is deliberately coupled to a completed
+run id and its check-run annotations; tag correspondence has no run dependency, and merging them
+would run unrelated checks after every CI and Claude Code run and blur AD-42's two signal
+contracts. **Scanning the workflows** instead of reading the two constants would duplicate lookups
+the parity tests already make redundant and would sweep in the `v1` channel. **A required
+pull-request check** was rejected twice over: the answer needs network access, so it cannot live
+in the offline suite that gates every pull request, and the protected contexts are a settings
+contract RELEASING.md owns, so joining that list is a branch-protection change this does not
+carry. The count is deliberately not restated here: GTX-119's rollout of
+`Runtime floor compatibility` is mid-flight, so the recorded list and the live rule differ by one
+until its readback, and a number written down here would be wrong for the duration.
+**Reusing `scripts/audit_action_runtimes.py`'s transport** was rejected because it
+deliberately collapses every nonzero `gh api` result into one error, which is right for its
+contract and cannot express the finding-versus-failure split this one turns on.
+**Consequences:** The `# vX.Y.Z` comment beside a shipped pin is now a checked claim rather than a
+convention. A wrong comment, a deleted or retagged upstream release, and a SHA advanced past every
+tag all reach a red monthly run; [RELEASING.md](RELEASING.md) owns reading it. Like the runtime
+audit it is a notice rather than a block, so somebody has to look, and a month is the worst-case
+latency. The
+check is offline-testable in full -- the transport is a parameter, so parsing, classification, and
+both findings are exercised by the default suite against an injected fake -- but the live answer
+is only ever observed on a dispatch or the schedule, and `--pin` exists so a maintainer can prove
+a failure mode live without editing constants the parity tests hold every copy to. Because
+`workflow_dispatch` only reaches a workflow on the default branch, the first real dispatch is
+necessarily after merge. The standing cost is four API reads a month, and one more workflow whose
+own wiring is asserted by `tests/test_action_pin_correspondence_workflow.py`, since a scheduled
+notice that quietly stops running looks exactly like a repository whose pins are all correct.
