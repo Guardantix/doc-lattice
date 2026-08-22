@@ -14,7 +14,7 @@ the document-order id GitHub gives it rather than collapsing onto one base slug.
 
 import sys
 from dataclasses import dataclass
-from pathlib import Path, PurePosixPath
+from pathlib import Path, PurePosixPath, PureWindowsPath
 from urllib.parse import SplitResult, parse_qs, unquote, urlsplit
 
 from markdown_it import MarkdownIt
@@ -24,6 +24,11 @@ from doc_lattice.markdown_compat import extract_headings, github_heading_ids
 _REPO_ROOT = Path(__file__).resolve().parent.parent
 _PARSER = MarkdownIt("commonmark")
 _MARKDOWN_SUFFIX = ".md"
+# The WHATWG URL Standard's dot-segment spellings, matched ASCII case-insensitively in its
+# path state. A browser normalizes the encoded forms exactly as it does the bare ones, so a
+# link written with them resolves and this checker has to agree.
+_SINGLE_DOT_SEGMENTS = frozenset({".", "%2e"})
+_DOUBLE_DOT_SEGMENTS = frozenset({"..", ".%2e", "%2e.", "%2e%2e"})
 
 
 @dataclass(frozen=True, slots=True)
@@ -74,13 +79,38 @@ def maintained_documents(repo_root: Path) -> list[Path]:
     return sorted(path for path in repo_root.glob(f"*{_MARKDOWN_SUFFIX}") if path.is_file())
 
 
+def _is_single_name(segment: str) -> bool:
+    """Report whether a decoded segment is one plain filename and not path structure.
+
+    Judged with ``PureWindowsPath`` on every platform, deliberately. Windows reads a backslash
+    as a separator and ``C:`` as a drive where POSIX reads both as ordinary characters, so
+    judging by the running platform would let one shared gate accept a destination on CI and
+    reject it on a contributor's machine. Taking the stricter grammar everywhere costs only
+    filenames nobody writes and makes the verdict the same wherever it runs.
+
+    Args:
+        segment: One decoded path segment.
+
+    Returns:
+        True when the segment names a single file or directory, with no separator of either
+        flavour, no drive, and no root.
+    """
+    windows = PureWindowsPath(segment)
+    return not windows.drive and not windows.root and windows.parts == (segment,)
+
+
 def _contained_parts(base: PurePosixPath, raw_path: str) -> tuple[str, ...] | None:
     """Join a relative destination onto a base directory without leaving the repository.
 
-    Structure is read off the *encoded* path and each surviving segment is decoded after,
-    because a percent-encoded separator is a literal character inside one segment rather than
-    a separator (RFC 3986). Decoding the whole path first would let ``%2Fetc%2Fpasswd`` become
-    an absolute path, and joining an absolute component discards the repository root outright.
+    Structure is settled on the *encoded* path and each surviving segment is decoded after,
+    which is the order a browser uses and the one containment depends on. Decoding first would
+    let ``%2Fetc%2Fpasswd`` become an absolute path, and joining an absolute component discards
+    the repository root outright.
+
+    Dot segments are resolved before decoding, in their encoded spellings too, because that is
+    what the WHATWG path state does: ``docs/%2e%2e/GUIDE.md`` is a working link and normalizes
+    to ``GUIDE.md`` rather than naming a directory called ``..``. Containment is unaffected --
+    an encoded double-dot pops exactly like a bare one, and popping past the root refuses.
 
     The join is lexical on purpose: resolving through the filesystem would follow symlinks and
     report a link that GitHub renders perfectly well as leaving the repository.
@@ -96,15 +126,16 @@ def _contained_parts(base: PurePosixPath, raw_path: str) -> tuple[str, ...] | No
     """
     parts = list(base.parts)
     for raw_segment in raw_path.split("/"):
-        if raw_segment in ("", "."):
+        folded = raw_segment.lower()
+        if raw_segment == "" or folded in _SINGLE_DOT_SEGMENTS:
             continue
-        if raw_segment == "..":
+        if folded in _DOUBLE_DOT_SEGMENTS:
             if not parts:
                 return None
             parts.pop()
             continue
         segment = unquote(raw_segment)
-        if "/" in segment or segment in (".", ".."):
+        if not _is_single_name(segment) or segment in (".", ".."):
             return None
         parts.append(segment)
     return tuple(parts)

@@ -217,6 +217,53 @@ def test_percent_encoded_dot_segment_does_not_climb_out(tmp_path):
     assert "outside.md" in messages[0]
 
 
+def test_encoded_single_dot_segment_normalizes(tmp_path):
+    # WHATWG URL, path state: '%2e' is a single-dot path segment, so a browser drops it
+    # rather than looking for a file named '.'.
+    _write(tmp_path, "README.md", "# Readme\n\n[x](%2E/GUIDE.md)\n")
+    _write(tmp_path, "GUIDE.md", "# Guide\n")
+
+    assert check_repository_links(tmp_path) == []
+
+
+def test_encoded_double_dot_segment_normalizes_within_the_repository(tmp_path):
+    # '%2e%2e' is a double-dot path segment, so this resolves back to the root and is a
+    # working link rather than one that climbs out.
+    _write(tmp_path, "README.md", "# Readme\n\n[x](docs/%2E%2E/GUIDE.md)\n")
+    _write(tmp_path, "GUIDE.md", "# Guide\n")
+
+    assert check_repository_links(tmp_path) == []
+
+
+def test_mixed_encoding_dot_segment_normalizes(tmp_path):
+    # '.%2e' is the third spelling WHATWG lists, and it is matched case-insensitively.
+    _write(tmp_path, "README.md", "# Readme\n\n[x](docs/.%2E/GUIDE.md)\n")
+    _write(tmp_path, "GUIDE.md", "# Guide\n")
+
+    assert check_repository_links(tmp_path) == []
+
+
+def test_encoded_backslash_does_not_create_path_structure(tmp_path):
+    # A decoded backslash is a separator on Windows and an ordinary character on POSIX. The
+    # segment check is deterministic across platforms so one shared gate cannot pass here and
+    # fail on a contributor's machine.
+    _write(tmp_path, "README.md", "# Readme\n\n[x](%2E%2E%5Coutside.md)\n")
+
+    messages = check_repository_links(tmp_path)
+
+    assert len(messages) == 1
+    assert "does not resolve inside the repository" in messages[0]
+
+
+def test_encoded_drive_letter_does_not_create_path_structure(tmp_path):
+    _write(tmp_path, "README.md", "# Readme\n\n[x](%43%3A%5CWindows%5Csystem.ini)\n")
+
+    messages = check_repository_links(tmp_path)
+
+    assert len(messages) == 1
+    assert "does not resolve inside the repository" in messages[0]
+
+
 def test_same_document_plain_view_link_is_not_heading_checked(tmp_path):
     # A query-only destination resolves against the current document, so this is the
     # same-document form of the plain-source view.
