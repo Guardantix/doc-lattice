@@ -42,6 +42,15 @@ repos:
         language: system
         always_run: true
         pass_filenames: false
+      # always_run rather than types: [markdown], because the break this catches is
+      # cross-document: renaming a heading in one file invalidates a link written in another,
+      # and the file that changed is not the file that ends up wrong.
+      - id: check-doc-links
+        name: check doc links
+        entry: uv run --locked --group dev python scripts/check_doc_links.py
+        language: system
+        always_run: true
+        pass_filenames: false
 
   - repo: https://github.com/Yelp/detect-secrets
     rev: v1.5.0
