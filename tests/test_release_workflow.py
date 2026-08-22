@@ -6,9 +6,11 @@ workflow resolves to a 40-character commit SHA, so restating individual pins her
 only force a lockstep edit on every routine pin refresh.
 """
 
+import itertools
 import re
 import shlex
 import tomllib
+from collections.abc import Iterator
 from pathlib import Path
 
 from ruamel.yaml import YAML
@@ -136,15 +138,22 @@ def _retarget(words: list[str], workdirs: set[str]) -> None:
     a literal path would name somewhere in the checkout, which is the thing a throwaway workdir
     exists not to be -- so any other assignment drops the name.
 
+    Only a command that is *nothing but* assignments counts, which is the form whose effect
+    outlives the command. A word that merely looks like one is not one: `echo 'D=$(mktemp -d)'`
+    prints text and assigns nothing, and `D=… cmd` sets `D` in that one command's environment.
+    Reading every word would let either declare the checkout a throwaway directory.
+
     Args:
         words: One command's words, with the parentheses around them already removed.
         workdirs: The variables currently holding a throwaway directory, updated in place.
     """
+    assignments = []
     for word in words:
         assignment = _ASSIGNMENT.match(word)
         if assignment is None:
-            continue
-        name, value = assignment.groups()
+            return
+        assignments.append(assignment.groups())
+    for name, value in assignments:
         substitution = _COMMAND_SUBSTITUTION.match(value)
         if substitution is not None and any(
             inner[:1] == ["mktemp"] and "-d" in inner
@@ -179,28 +188,37 @@ def _separated_commands(line: str) -> list[tuple[str, list[str]]]:
     return [(operator, argv) for operator, argv in separated if argv]
 
 
-def _unnested(argv: list[str], depth: int) -> tuple[list[str], int, int]:
+def _unnested(
+    argv: list[str], shells: list[int], opened: Iterator[int]
+) -> tuple[list[str], tuple[int, ...]]:
     """Separate a command's own words from the subshell parentheses around them.
+
+    Each `(` is a distinct shell instance rather than one more level, because a count cannot
+    say *which* shell a command ran in: `( cd "${d}" ) && ( x )` closes the one that moved and
+    opens a sibling at the same nesting, so a depth comparison reads them as the same shell and
+    accepts an `x` that bash runs in the checkout. Numbering the instances keeps them apart.
 
     Args:
         argv: One command's tokens, parentheses included.
-        depth: The subshell nesting the previous command on this line left behind.
+        shells: The shell instances currently open, outermost first, updated in place.
+        opened: Source of instance numbers, one per subshell this script opens.
 
     Returns:
-        The command's words, the nesting it runs at, and the nesting left for the next command.
+        The command's words, and the shell instances open when it ran.
     """
     words: list[str] = []
-    command_depth = depth
+    enclosing = tuple(shells)
     for word in argv:
         if word == "(":
-            depth += 1
+            shells.append(next(opened))
         elif word == ")":
-            depth -= 1
+            if len(shells) > 1:
+                shells.pop()
         else:
             if not words:
-                command_depth = depth
+                enclosing = tuple(shells)
             words.append(word)
-    return words, command_depth, depth
+    return words, enclosing
 
 
 def _launches(argv: list[str], program: str, subcommand: str) -> bool:
@@ -239,10 +257,11 @@ def _throwaway_dir_runs(text: str, program: str, subcommand: str) -> list[list[s
     `cd` reached -- so it is only the operator joining the `cd` to what follows that matters.
 
     *Which subshell each ran in.* A `cd` inside a subshell is undone at the closing paren, so
-    `( cd "${d}" ) && x` runs `x` in the checkout however the two are joined. Depth is tracked
-    rather than the parentheses being discarded: the command has to run at or below the `cd`'s
-    own nesting, which keeps `cd "${d}" && ( x )` matching, since a subshell opened afterwards
-    inherits the directory.
+    `( cd "${d}" ) && x` runs `x` in the checkout however the two are joined. The shell that
+    moved has to still be open when the command runs, and it is identified rather than counted:
+    `( cd "${d}" ) && ( x )` opens a sibling at the same nesting, which a depth comparison
+    cannot tell from the shell that moved. `cd "${d}" && ( x )` still matches, since a subshell
+    opened afterwards inherits the directory.
 
     The match itself has to be an invocation and not a mention. `_runs_subcommand` finds the
     two words anywhere in an argv, which is what lets a runner's own flags precede the CLI, but
@@ -252,23 +271,24 @@ def _throwaway_dir_runs(text: str, program: str, subcommand: str) -> list[list[s
     still satisfies it, and no argv-shaped check can tell that from the real thing.
     """
     workdirs: set[str] = set()
+    opened = itertools.count(1)
     matched = []
     for line in text.splitlines():
-        depth, entered_depth = 0, None
+        shells, moved = [0], None
         commands = _separated_commands(line)
         for index, (_, argv) in enumerate(commands):
-            words, command_depth, depth = _unnested(argv, depth)
+            words, enclosing = _unnested(argv, shells, opened)
             _retarget(words, workdirs)
-            if entered_depth is not None and command_depth < entered_depth:
-                # The subshell that moved has exited, taking its directory with it.
-                entered_depth = None
+            if moved is not None and moved not in enclosing:
+                # The shell that moved has exited, taking its directory with it.
+                moved = None
             if words[:1] == ["cd"]:
                 joins = commands[index + 1][0] if index + 1 < len(commands) else ""
                 reaches = joins in _SEQUENCING and any(
                     _expands(word, name) for word in words[1:] for name in workdirs
                 )
-                entered_depth = command_depth if reaches else None
-            elif entered_depth is not None and _launches(words, program, subcommand):
+                moved = enclosing[-1] if reaches else None
+            elif moved is not None and _launches(words, program, subcommand):
                 matched.append(words)
     return matched
 
