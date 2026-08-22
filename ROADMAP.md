@@ -82,9 +82,10 @@ cheap.
   ordered upgrade tracks into AD-13 against the resulting reality (GTX-107). Arming first is what
   makes the procedure short: folding the compat constants into the cache staleness check removes a
   caveat the written procedure would otherwise have to teach.
-- Verify or raise the declared floors for `typer`, `rich`, and `pydantic` (GTX-119). This is the
-  one dependency posture AD-27 accepts unverified while AD-26 refuses to accept it for
-  `ruamel.yaml`, and the two records should agree or say why they differ.
+- Make the `Runtime floor compatibility` context required on `main` (GTX-119). The matrix that
+  verifies every declared dependency floor now runs on every pull request, but branch protection
+  is a separate control plane, so until that rule is updated a red floor cell can still merge.
+  RELEASING.md owns the rollout and the readback that proves it landed.
 - Ship the relative-link and anchor check CLAUDE.md already requires (GTX-130), so a renamed
   heading breaks CI instead of silently breaking the deep anchor links the maintained documents
   now carry.

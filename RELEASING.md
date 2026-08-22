@@ -487,23 +487,38 @@ Read every answer against what this document claims rather than against the abse
 | `rules` | A `required_reviewers` entry naming the one administrator, `prevent_self_review` false. A second `branch_policy` entry with no reviewers is normal and carries nothing |
 | `branch_policy` | `custom_branch_policies` true, `protected_branches` false, and the policy list exactly one entry, name `main` and type `branch` |
 | `can_admins_bypass` | `true`, the administrator bypass described under "Who can release" |
-| `checks` and `strict` | `strict` true, and `checks` exactly four entries: `Security scan` with `app_id` null, and `Code quality`, `Tests`, and `YAML parser compatibility` each with `app_id` 15368 |
+| `checks` and `strict` | `strict` true, and `checks` exactly five entries: `Security scan` with `app_id` null, and `Code quality`, `Runtime floor compatibility`, `Tests`, and `YAML parser compatibility` each with `app_id` 15368 |
 | `reviews` and `admins` | `0` and `false`, the state described under "Who can release" |
 
 The `checks` row names its contexts because "every required check is present" is not a testable
 claim: any non-empty list satisfies it, including one a dropped context has already shortened.
 Compare the names.
 
-All four are fixed names rather than generated ones, and that is the whole reason this rule and
+`Runtime floor compatibility` is the newest of them, and adding it to this rule is a deliberate
+step rather than a consequence of merging the workflow that emits it. Branch protection is a
+separate control plane from [.github/workflows/ci.yml](.github/workflows/ci.yml): a name required
+but not yet emitted leaves every open pull request waiting on a report that never arrives, so the
+order is fixed. Land the workflow first, under the existing required list. Wait for `main` to
+report the new context green at least once. Then apply one `PATCH` adding it, and read the rule
+back with the query above before trusting it. Until that readback shows five entries, this table
+describes the intended state and the live rule still has four -- and a red floor matrix can merge.
+GTX-119 owns that rollout; GTX-255, which asked the same question for the `rich` floor leg
+separately, is absorbed by it, since that leg is now one cell of this matrix rather than its own
+context.
+
+All five are fixed names rather than generated ones, and that is the whole reason this rule and
 the matrices in [.github/workflows/ci.yml](.github/workflows/ci.yml) no longer have to move
 together. GitHub builds a matrix job's context name from its matrix values, so requiring
-`code-quality`, `tests`, and `yaml-compatibility` by their per-leg names put the supported Python
-versions and the ends of the `ruamel.yaml` range AD-26 in [ARCHITECTURE.md](ARCHITECTURE.md)
-bounds into this rule as well. Each of those matrices is now summarized by an aggregator job --
-`code-quality-result`, `tests-result`, and `yaml-compatibility-result` -- that depends on its
-matrix and reports the bare display name; the bare name is free because a leg always renders with
-its values appended. Changing a matrix value therefore requires no edit here, and a leftover
-context naming a value the matrix no longer builds can no longer arise.
+`code-quality`, `runtime-floor`, `tests`, and `yaml-compatibility` by their per-leg names put the
+supported Python versions, the declared dependency floors AD-27 in
+[ARCHITECTURE.md](ARCHITECTURE.md) records, and the ends of the `ruamel.yaml` range AD-26 bounds
+into this rule as well. Each of those matrices is now summarized by an aggregator job --
+`code-quality-result`, `runtime-floor-result`, `tests-result`, and `yaml-compatibility-result` --
+that depends on its matrix and reports the bare display name; the bare name is free because a leg
+always renders with its values appended. Changing a matrix value therefore requires no edit here,
+and a leftover context naming a value the matrix no longer builds can no longer arise. Raising a
+dependency floor is exactly such a change, which is why the floor matrix earns a fixed context
+rather than one generated context per floor and interpreter.
 
 The direction that still bites is the other one. A name required but not emitted is not a check
 that goes red, it is every pull request waiting on a report that never arrives, so renaming an
@@ -515,7 +530,7 @@ step -- is pinned by `tests/test_release_workflow.py` rather than by this table.
 
 Read the required list as `checks` and not as `.contexts`. `.contexts` flattens `app_id` away, so
 a loosening of the check-provider policy would read as green there. `Security scan` keeps the
-any-app policy it has today; the three aggregators are bound to GitHub Actions. Write the list
+any-app policy it has today; the four aggregators are bound to GitHub Actions. Write the list
 back through `PATCH repos/Guardantix/doc-lattice/branches/main/protection/required_status_checks`
 with its `checks` objects, so those bindings are set deliberately rather than reset as a side
 effect of writing a bare `contexts` list. The write encoding is not the read representation: any

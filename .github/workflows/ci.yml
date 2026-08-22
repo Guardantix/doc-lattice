@@ -179,37 +179,64 @@ jobs:
           echo "yaml-compatibility matrix reported: ${RESULT}"
           test "${RESULT}" = success
 
-  rich-floor:
-    name: Rich floor compatibility
+  runtime-floor:
+    name: Runtime floor compatibility
     runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        # Every runtime dependency AD-27 declares by floor and this engine reads rather than
+        # merely calls, at the exact version `pyproject.toml` declares. Exact rather than a
+        # `2.12.*` series, for the reason the ruamel leg pins its own: a series resolves to the
+        # newest release in it and leaves every earlier permitted one untested. The lock only
+        # ever installs the ceiling, so without these cells the whole span beneath each floor is
+        # an asserted claim. `tests/test_release_workflow.py` derives this list from
+        # `pyproject.toml` and fails when the two stop agreeing -- the correlation has to be
+        # checked from a repository-only test, since the module that pins the floors themselves
+        # ships in the sdist and cannot read this file.
+        floor:
+          - 'pydantic==2.12.0'
+          - 'rich==13.8.0'
+          - 'typer==0.26.0'
+        # Both supported interpreters, crossed with each floor rather than sampled. `pydantic`
+        # resolves through interpreter-specific `pydantic-core` wheels, so one interpreter's
+        # answer is not the other's; 2.12.0 is the floor precisely because it is the earliest
+        # release with a 3.14 wheel. Each cell holds exactly one dependency at its minimum and
+        # takes the rest from the lock, because a constrained resolver may do the same and a
+        # cell holding all three at once would not distinguish which one broke.
+        python: ['3.13', '3.14']
     env:
-      # The `tests` job owns the coverage gate; this leg only asks whether the CLI's exit-code
-      # contract still holds against the oldest `rich` the project declares. It carries the same
-      # worker settings, and the `tests` job records why `--dist loadfile` is load-bearing rather
-      # than tuning.
+      UV_PYTHON: ${{ matrix.python }}
+      # The `tests` job owns the coverage gate; these legs only ask whether the suite still
+      # passes against the oldest version of one dependency the project declares. They carry the
+      # same worker settings, and the `tests` job records why `--dist loadfile` is load-bearing
+      # rather than tuning.
       PYTEST_ADDOPTS: --no-cov -n auto --dist loadfile
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
         with:
           enable-cache: true
-      - run: uv python install 3.14
+      - run: uv python install ${{ matrix.python }}
       - run: uv sync --locked --group dev
-      # AD-27 gives `rich` a bound and no compatibility leg, on the grounds that nothing here
-      # reads its internals. GTX-201 made that untrue: the per-channel broken-pipe policy is
-      # built on `Console.on_broken_pipe`, which does not exist before 13.8.0. Pinned to the
-      # exact floor `pyproject.toml` declares rather than to a `13.8.*` series, for the reason
-      # the ruamel leg pins its own: a series resolves to the newest release in it and leaves
-      # every earlier permitted one untested. `tests/test_release_workflow.py` reads this line
-      # and fails when it stops matching the declared floor -- the correlation has to be checked
-      # from a repository-only test, since the module that pins the floor itself ships in the
-      # sdist and cannot read this file.
-      - run: uv pip install 'rich==13.8.0'
-      - run: uv run --no-sync pytest tests/cli/
+      - run: uv pip install '${{ matrix.floor }}'
+      - run: uv run --no-sync pytest
+
+  runtime-floor-result:
+    name: Runtime floor compatibility
+    needs: runtime-floor
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - name: Require every matrix leg to have succeeded
+        env:
+          RESULT: ${{ needs.runtime-floor.result }}
+        run: |
+          echo "runtime-floor matrix reported: ${RESULT}"
+          test "${RESULT}" = success
 
   release:
     name: Release
-    needs: [code-quality, tests, security-scan, yaml-compatibility, rich-floor]
+    needs: [code-quality, tests, security-scan, yaml-compatibility, runtime-floor]
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     runs-on: ubuntu-latest
     outputs:
