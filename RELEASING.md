@@ -403,7 +403,7 @@ gh api repos/Guardantix/doc-lattice/environments/pypi/deployment-branch-policies
   --jq '[.branch_policies[] | {name, type}]'
 gh api repos/Guardantix/doc-lattice/branches/main/protection --jq \
   '{admins: .enforce_admins.enabled, strict: .required_status_checks.strict,
-    checks: .required_status_checks.contexts,
+    checks: .required_status_checks.checks,
     reviews: .required_pull_request_reviews.required_approving_review_count}'
 gh api repos/Guardantix/doc-lattice/private-vulnerability-reporting --jq .enabled
 ```
@@ -422,28 +422,40 @@ Read every answer against what this document claims rather than against the abse
 | `rules` | A `required_reviewers` entry naming the one administrator, `prevent_self_review` false. A second `branch_policy` entry with no reviewers is normal and carries nothing |
 | `branch_policy` | `custom_branch_policies` true, `protected_branches` false, and the policy list exactly one entry, name `main` and type `branch` |
 | `can_admins_bypass` | `true`, the administrator bypass described under "Who can release" |
-| `checks` and `strict` | `strict` true, and `checks` exactly `Security scan`, `Tests (3.13)`, `Tests (3.14)`, `Code quality (3.13)`, `Code quality (3.14)`, `YAML parser compatibility (0.18.0, false)`, `YAML parser compatibility (0.18.0, true)`, `YAML parser compatibility (0.19.*, false)`, `YAML parser compatibility (0.19.*, true)` |
+| `checks` and `strict` | `strict` true, and `checks` exactly four entries: `Security scan` with `app_id` null, and `Code quality`, `Tests`, and `YAML parser compatibility` each with `app_id` 15368 |
 | `reviews` and `admins` | `0` and `false`, the state described under "Who can release" |
 
 The `checks` row names its contexts because "every required check is present" is not a testable
 claim: any non-empty list satisfies it, including one a dropped context has already shortened.
 Compare the names.
 
-Eight of the nine are generated rather than written. GitHub builds a matrix job's context name from
-its matrix values, so `Tests` and `Code quality` carry the supported Python versions, and
-`yaml-compatibility` carries the ends of the `ruamel.yaml` range that AD-26 in
-[ARCHITECTURE.md](ARCHITECTURE.md) bounds, spelled `0.18.0` and `0.19.*`. Only `Security scan` is a
-fixed name. Each of those matrices is a second place a required-check name lives, so a matrix change
-in [.github/workflows/ci.yml](.github/workflows/ci.yml) and this rule have to move together. The
-invariant is set equality: the required list names exactly the contexts that `code-quality`,
-`security-scan`, `tests`, and `yaml-compatibility` emit. Both directions bite. A name required but
-not emitted is not a check that goes red, it is every pull request waiting on a report which never
-arrives; a name emitted but not required is the gap this issue closed. A change that renames a
-context therefore has to land on both sides, and dropping one from the list is a loosening even
-when the job it came from still runs. The remaining constraint is that `pyproject.toml` must never
-admit a version before a required context covers it, which is what decides the order the edits land
-in. Re-read the `checks` answer against this table after any matrix change, and treat a leftover
-context naming a value the matrix no longer builds as the same defect rather than as clutter.
+All four are fixed names rather than generated ones, and that is the whole reason this rule and
+the matrices in [.github/workflows/ci.yml](.github/workflows/ci.yml) no longer have to move
+together. GitHub builds a matrix job's context name from its matrix values, so requiring
+`code-quality`, `tests`, and `yaml-compatibility` by their per-leg names put the supported Python
+versions and the ends of the `ruamel.yaml` range AD-26 in [ARCHITECTURE.md](ARCHITECTURE.md)
+bounds into this rule as well. Each of those matrices is now summarized by an aggregator job --
+`code-quality-result`, `tests-result`, and `yaml-compatibility-result` -- that depends on its
+matrix and reports the bare display name; the bare name is free because a leg always renders with
+its values appended. Changing a matrix value therefore requires no edit here, and a leftover
+context naming a value the matrix no longer builds can no longer arise.
+
+The direction that still bites is the other one. A name required but not emitted is not a check
+that goes red, it is every pull request waiting on a report that never arrives, so renaming an
+aggregator's `name:` is a change that has to land on both sides. The aggregators are also what
+keeps a red matrix from reading as mergeable, since a `needs:` job skipped by a failed dependency
+reports as skipped and GitHub does not treat that as failing. That fail-closed shape -- the fixed
+display name, the exact `needs` target, the job-level `always()`, and the success-only assertion
+step -- is pinned by `tests/test_release_workflow.py` rather than by this table.
+
+Read the required list as `checks` and not as `.contexts`. `.contexts` flattens `app_id` away, so
+a loosening of the check-provider policy would read as green there. `Security scan` keeps the
+any-app policy it has today; the three aggregators are bound to GitHub Actions. Write the list
+back through `PATCH repos/Guardantix/doc-lattice/branches/main/protection/required_status_checks`
+with its `checks` objects, so those bindings are set deliberately rather than reset as a side
+effect of writing a bare `contexts` list. The write encoding is not the read representation: any
+app is `app_id: -1` going in and reads back as `null`, and omitting the field lets GitHub pick a
+provider for you.
 
 `can_admins_bypass`, `reviews`, and `admins` are the rows whose expected values are the weaker
 settings. They record what is true today, not what is desirable. If any of them ever reads the

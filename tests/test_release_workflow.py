@@ -30,6 +30,14 @@ _PACKAGE_URL = "git+https://github.com/Guardantix/doc-lattice"
 _PROTECTED_STEPS = frozenset(
     {"Re-assert version sync", "Smoke-test the commit", "Confirm pinned ref resolves"}
 )
+# GTX-176: the jobs `main` requires in place of the per-leg contexts GitHub generates from a
+# matrix. Each maps its job id to the fixed context name it reports and the matrix job it
+# summarizes. Branch protection names the middle value, so it is the one that cannot drift.
+_AGGREGATORS = {
+    "code-quality-result": ("Code quality", "code-quality"),
+    "tests-result": ("Tests", "tests"),
+    "yaml-compatibility-result": ("YAML parser compatibility", "yaml-compatibility"),
+}
 
 
 def _named_step(job: dict, name: str) -> dict:
@@ -174,6 +182,46 @@ def _invokes(argv: list[str], script: str) -> bool:
     if not argv or argv[0] not in {"uv", "uvx", "python", "python3"}:
         return False
     return script in argv[1:] and set(argv).isdisjoint({"-c", "-m"})
+
+
+def _needs(job: dict) -> list[str]:
+    """Return a job's declared dependencies; GitHub accepts a bare string for a single one."""
+    needs = job.get("needs", [])
+    return [needs] if isinstance(needs, str) else list(needs)
+
+
+def _always(job: dict) -> bool:
+    """Report whether a job's condition is a bare `always()` and nothing else.
+
+    `always()` and `${{ always() }}` are the same condition to the runner, so both spellings
+    count. Anything else does not: the point of the condition is that no result of the job's
+    dependencies can skip it, and any additional term reintroduces a way for it to be skipped.
+    """
+    condition = str(job.get("if", "")).strip()
+    if condition.startswith("${{") and condition.endswith("}}"):
+        condition = condition[3:-2].strip()
+    return condition == "always()"
+
+
+def _result_gate(job: dict, matrix_job: str) -> tuple[list[str], str]:
+    """Return the last command of the step gating on `matrix_job`, and the variable it reads.
+
+    The result has to reach the step through `env` rather than be interpolated into the run body,
+    which is what lets this return the variable name the assertion is then required to compare.
+    Exactly one step may read it, so a second step cannot quietly become the real gate.
+    """
+    expression = f"${{{{ needs.{matrix_job}.result }}}}"
+    gates = [
+        (step, name)
+        for step in job["steps"]
+        for name, value in (step.get("env") or {}).items()
+        if value == expression
+    ]
+    assert len(gates) == 1, f"expected one step reading {expression}, found {len(gates)}"
+    step, variable = gates[0]
+    invocations = _invocations(_commands(step))
+    assert invocations, f"the step reading {expression} runs no commands"
+    return invocations[-1], variable
 
 
 def _dev_dependencies() -> str:
@@ -422,3 +470,37 @@ def test_the_rich_floor_leg_installs_the_declared_floor():
         f"{declared[0]}. The leg exists to test the oldest supported rich, so the two move "
         "together or it tests nothing."
     )
+
+
+def test_matrix_aggregators_pin_a_fixed_context_that_fails_closed():
+    """GTX-176: branch protection requires these names instead of the generated per-leg ones.
+
+    A matrix leg's context name carries its matrix values, so requiring the legs themselves puts
+    every value in `ci.yml`'s matrices into the branch rule as well. Each aggregator reports one
+    fixed context for its whole matrix instead, which is what decouples the two settings.
+
+    The shape asserted here is security-sensitive rather than cosmetic. A `needs:` job left with
+    the default `if:` is *skipped* when its dependency fails, and GitHub does not treat a skipped
+    check as failing, so a naive aggregator turns a red matrix into a mergeable pull request. The
+    job-level `always()` plus a success-only comparison in a runner step is what makes it fail
+    closed, and the comparison has to stay out of the `if:`, where it would skip the job and
+    restore exactly that bypass.
+    """
+    for job_id, (display, matrix_job) in sorted(_AGGREGATORS.items()):
+        job = _WORKFLOW["jobs"][job_id]
+        assert job["name"] == display
+        assert _needs(job) == [matrix_job]
+        assert _always(job), f"{job_id} must carry a job-level always(), found {job.get('if')!r}"
+        # The bare name is only free because GitHub renders every leg of the matrix job with its
+        # values appended, so the aggregator and the job it summarizes have to keep agreeing.
+        matrix = _WORKFLOW["jobs"][matrix_job]
+        assert matrix["name"] == display
+        assert matrix["strategy"]["matrix"]
+        # Trivial by construction: no checkout and no network, so the aggregator has no way to
+        # fail for reasons of its own and report a green matrix as red.
+        assert all("uses" not in step for step in job["steps"])
+        gate, variable = _result_gate(job, matrix_job)
+        # `test X = success` exits nonzero for `failure`, `cancelled`, `skipped`, and for any
+        # result GitHub adds later. Requiring it to be the step's last command is what stops a
+        # trailing `|| true`, or any other recovery, from swallowing that exit status.
+        assert gate == ["test", f"${{{variable}}}", "=", "success"]
