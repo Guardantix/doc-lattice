@@ -10,13 +10,14 @@ that every `uses:` here resolves to a commit SHA, so no pin is restated in this 
 from pathlib import Path
 
 from workflow_helpers import (
+    _action_references,
     _invocations,
     _invokes,
     _load_workflow,
     _named_step,
     _triggers,
     _uses_fragments,
-    _workflow_paths,
+    _workflows,
 )
 
 from doc_lattice.constants import CHECKOUT_USES, SETUP_UV_USES
@@ -43,11 +44,16 @@ _AUDIT_ENV = {
 
 
 def _referenced_actions() -> set[str]:
-    """Return every distinct action name any workflow in this repository references."""
+    """Return every distinct action name any workflow in this repository references.
+
+    Read from the parsed documents rather than the raw ``uses:`` lines: the version comment
+    those carry is discarded here anyway, and an undercount is invisible to the assertion
+    below, which compares a limit against the size of whatever this happens to find.
+    """
     return {
-        fragment.partition("@")[0]
-        for path in _workflow_paths()
-        for fragment in _uses_fragments(path)
+        reference.partition("@")[0]
+        for workflow in _workflows().values()
+        for reference in _action_references(workflow)
     }
 
 

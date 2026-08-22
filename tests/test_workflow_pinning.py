@@ -3,7 +3,12 @@
 import re
 from typing import Any
 
-from workflow_helpers import _uses_fragments, _workflow_paths, _workflows
+from workflow_helpers import (
+    _action_references,
+    _uses_fragments,
+    _workflow_paths,
+    _workflows,
+)
 
 from doc_lattice.constants import CHECKOUT_USES, SETUP_UV_USES
 
@@ -12,17 +17,6 @@ _SHA_PINNED_USES_RE = re.compile(r"^[^@]+@[0-9a-f]{40}$")
 # `# vX.Y.Z` comment, which the safe loader discards, so comparing parsed refs would let a
 # bumped SHA keep a stale tag and mislabel the commit everywhere the pin ships.
 _SHIPPED_USES = {"actions/checkout": CHECKOUT_USES, "astral-sh/setup-uv": SETUP_UV_USES}
-
-
-def _action_references(workflow: Any) -> list[str]:
-    references: list[str] = []
-    for job in workflow["jobs"].values():
-        if "uses" in job:
-            references.append(job["uses"])
-        for step in job.get("steps", []):
-            if "uses" in step:
-                references.append(step["uses"])
-    return references
 
 
 def _image_of(container: Any) -> str | None:

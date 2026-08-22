@@ -10,6 +10,7 @@ leaving the others reading the old semantics.
 The names keep their leading underscore across the move, matching ``tests/cli/helpers.py``.
 """
 
+import re
 import shlex
 from pathlib import Path
 from typing import Any
@@ -18,6 +19,9 @@ from ruamel.yaml import YAML
 
 _ROOT = Path(__file__).resolve().parents[1]
 _WORKFLOW_DIR = _ROOT / ".github/workflows"
+# One whitespace run after the list marker, not the single space the workflows happen to
+# be formatted with: `-  uses:` is the same step to the runner.
+_USES_RE = re.compile(r"^(?:-\s+)?uses:(.*)$")
 
 
 def _workflow_paths() -> list[Path]:
@@ -56,8 +60,40 @@ def _triggers(workflow: dict[Any, Any]) -> dict[str, Any]:
     raise AssertionError(f"workflow declares no triggers: {sorted(map(str, workflow))}")
 
 
+def _action_references(workflow: Any) -> list[str]:
+    """Return every ``uses:`` reference a parsed workflow declares, job-level ones included.
+
+    Prefer this over `_uses_fragments` wherever the trailing version comment does not matter:
+    the loader has already resolved the layout, so no spelling of a step can hide a reference
+    from a caller counting them.
+
+    Args:
+        workflow: A parsed workflow document.
+
+    Returns:
+        Each reference as the loader read it, in document order.
+    """
+    references: list[str] = []
+    for job in workflow["jobs"].values():
+        if "uses" in job:
+            references.append(job["uses"])
+        for step in job.get("steps", []):
+            if "uses" in step:
+                references.append(step["uses"])
+    return references
+
+
 def _uses_fragments(path: Path) -> list[str]:
     """Every ``uses:`` value as written, including the trailing version comment.
+
+    Read line by line rather than from the parsed document because the ``# vX.Y.Z`` label is a
+    comment the loader discards, and pinning parity is asserted over the label and the SHA as
+    one fragment. Only that parity needs the raw text; a caller after the action names alone
+    should walk `_action_references`, which no layout can hide a reference from.
+
+    The list marker carries its own whitespace run rather than being matched as the literal
+    ``- uses:``: ``-  uses: owner/action@sha`` is an equally valid step, and a fragment dropped
+    here would go missing from a set an assertion then reads as complete.
 
     The value half is unquoted before reassembly: YAML allows ``uses: "owner/action@sha"``, and
     the quote would otherwise survive into the extracted action name, silently dropping that
@@ -71,10 +107,10 @@ def _uses_fragments(path: Path) -> list[str]:
     """
     fragments: list[str] = []
     for line in path.read_text(encoding="utf-8").splitlines():
-        stripped = line.strip()
-        if not stripped.startswith(("uses:", "- uses:")):
+        match = _USES_RE.match(line.strip())
+        if match is None:
             continue
-        value, marker, comment = stripped.partition("uses:")[2].partition("#")
+        value, marker, comment = match.group(1).partition("#")
         value = value.strip().strip("'\"")
         fragments.append(f"{value} # {comment.strip()}" if marker else value)
     return fragments
