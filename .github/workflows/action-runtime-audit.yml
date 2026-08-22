@@ -1,0 +1,39 @@
+name: Action runtime audit
+
+on:
+  workflow_run:
+    workflows: [CI, Claude Code]
+    types: [completed]
+  workflow_dispatch:
+    inputs:
+      run_id:
+        description: Id of the completed run to audit
+        required: true
+        type: string
+
+# Reads the deprecation annotations the runner attached to a completed run of CI or Claude Code,
+# which is the only signal that names an action still executing on a deprecated runtime. It is a
+# notice rather than a pull-request check, because a `workflow_run` workflow runs on the default
+# branch and never attaches its result to the run that triggered it. Dependabot covers the other
+# half, a pin that has fallen behind its upstream releases. AD-42 in ARCHITECTURE.md records why
+# both mechanisms run and why neither replaces the other.
+jobs:
+  audit:
+    name: Action runtime audit
+    # A skipped source run executed no action, so there is nothing to read; claude.yml skips
+    # on every comment that does not mention it, which would otherwise be most of these runs.
+    if: github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion != 'skipped'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      actions: read
+      checks: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
+      - run: uv python install 3.14
+      - name: Audit the completed run
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RUN_ID: ${{ github.event.workflow_run.id || inputs.run_id }}
+        run: uv run --no-project python scripts/audit_action_runtimes.py --run-id "${RUN_ID}"

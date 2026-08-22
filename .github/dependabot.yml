@@ -1,0 +1,20 @@
+# `actions/checkout` and `astral-sh/setup-uv` share the `shipped-pins` group because
+# `src/doc_lattice/constants.py` ships both to adopters, so bumping either is one coupled
+# multi-file edit rather than a workflow edit. The grouped pull request is expected to arrive red
+# on the pin-parity test until a maintainer pushes the rest of that edit onto its branch: see
+# AD-42 in ARCHITECTURE.md for the decision, and "Keeping the action pins current" in
+# RELEASING.md for the files a coupled bump has to touch. Every other action updates on its own.
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: "/"
+    schedule:
+      interval: monthly
+    open-pull-requests-limit: 10
+    commit-message:
+      prefix: ci
+    groups:
+      shipped-pins:
+        patterns:
+          - actions/checkout
+          - astral-sh/setup-uv

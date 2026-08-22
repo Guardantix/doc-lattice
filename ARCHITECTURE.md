@@ -1978,3 +1978,67 @@ unchanged for every non-annotating renderer and for every failure with no single
 it. The cost is that the two document-scoped types can no longer be constructed from a message
 alone, which is a compile-time break for any caller that did so, and that one more CLI module is
 in the import graph.
+
+### AD-42: A stale action pin is noticed by two stock signals, not by an auditor
+
+**Date:** 2026-08-22
+**Status:** Accepted
+**Context:** GTX-170 moved the two shipped action pins off Node.js 20 releases, and it existed
+only because someone read `Node.js 20 is deprecated` in a live job log while doing unrelated
+work. Nothing in this repository would have said it otherwise. A deliberately frozen SHA cannot
+report that it has gone stale, which is the property that makes pinning worth doing and the
+reason a pin needs a signal of its own. The comment beside `CHECKOUT_REF` in `constants.py`
+claimed the shipped pin "is kept current by being the pin our own CI depends on"; parity with
+this repository's workflows keeps the two halves equal to each other, not current, and both
+halves can be equally out of date. Six distinct actions are referenced across `ci.yml` and
+`claude.yml`, of which only `actions/checkout` and `astral-sh/setup-uv` are the coupled pins
+`constants.py` ships to adopters, and the golden fixtures the issue proposed comparing against no
+longer exist.
+**Decision:** Two stock GitHub signals, one per failure mode, and no manifest-fetching auditor.
+
+*Release staleness* is Dependabot's. `.github/dependabot.yml` watches the `github-actions`
+ecosystem monthly and opens one pull request per action. It reads the upstream release feed,
+which is the only thing that knows a newer release exists. One group, `shipped-pins`, holds
+exactly `actions/checkout` and `astral-sh/setup-uv`, because a bump of either is a coupled
+multi-file edit and the two therefore travel as one pull request. Every other action is a
+workflow-only bump that passes the suite as it arrives, since `tests/test_workflow_pinning.py`
+asks only for a 40-hex SHA there.
+
+*Runtime deprecation* is the runner's. `.github/workflows/action-runtime-audit.yml` reads the
+jobs of a completed CI or Claude Code run and each job's check-run annotations, and fails when
+any annotation at `warning` or `failure` level carries `deprecat`. That annotation is the
+runner's own verdict about the actions that actually executed, nested composite steps included,
+and the runner applies GitHub's current policy, so no Node policy constant lives here to go stale
+in its turn. The matcher is not "any warning", because a clean job carries a setup-uv cache
+warning, and not a Node-specific pattern, because the next deprecation will be worded
+differently.
+
+Alternatives were rejected. A **custom manifest auditor** walking the recursive `action.yml`
+closure against a Node policy constant re-creates the repository-wide audit machinery AD-32
+retired, and over-reports on dormant composite edges: `pypa/gh-action-pypi-publish` at its pinned
+ref runs a Node 20 `actions/setup-python` only behind a guard that never fires on
+`ubuntu-latest`, and the 5.0.0 publish job's annotations name `download-artifact` alone. The
+runner's verdict is evidence; a closure walk is reconstruction. A **tail job inside `ci.yml`**
+reading its own run's annotations cannot see `claude.yml`, whose `claude-code-action` is a
+composite wrapping a JavaScript action with its own runtime, and it would add a job to the
+workflow whose required-context shape GTX-176 just settled. **Dependabot alone** misses an
+upstream that stops releasing but stays on a deprecated runtime: no pull request, but the
+annotation still appears, which is the reason to run both. **One group for all six actions** was
+rejected because a red coupled pull request would hold an unrelated artifact-action fix hostage.
+Dependabot's **`cooldown`** was not adopted: the options reference does not list `github-actions`
+among the ecosystems that support it, and the monthly cadence already bounds churn.
+**Consequences:** A `shipped-pins` pull request arrives red on
+`test_shipped_action_pins_match_the_pins_this_repository_runs` by design, and the red is the
+notice; a maintainer pushes the coupled edits onto that branch, and [RELEASING.md](RELEASING.md)
+owns the procedure. The audit is a separate red run on the default branch rather than a
+pull-request check, because a `workflow_run` workflow does not attach to the run that triggered
+it: an action only the release path uses is therefore noticed on the release run, after publish,
+which is a notice and not a block. Runtime deprecation is detected only for action paths that
+actually execute, so a dormant conditional branch is never reported, the deliberate trade for
+reading a verdict instead of reconstructing one. Two documented Dependabot limits stay GTX-180's
+territory: an already-wrong `# vX.Y.Z` comment beside a SHA is not corrected, and a SHA with no
+direct tag is advanced to branch HEAD. GTX-180 narrows because Dependabot now authors the
+SHA-and-comment pair and the parity tests force every copy to equal it, so a wrong comment can
+only enter by hand edit. The standing cost is at most one Dependabot pull request per action per
+month, and one small API-only job per completed CI or Claude Code run, with skipped-conclusion
+runs filtered out.
