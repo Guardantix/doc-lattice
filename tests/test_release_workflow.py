@@ -56,9 +56,43 @@ _PROTECTED_STEPS = frozenset(
 # summarizes. Branch protection names the middle value, so it is the one that cannot drift.
 _AGGREGATORS = {
     "code-quality-result": ("Code quality", "code-quality"),
+    "runtime-floor-result": ("Runtime floor compatibility", "runtime-floor"),
     "tests-result": ("Tests", "tests"),
     "yaml-compatibility-result": ("YAML parser compatibility", "yaml-compatibility"),
 }
+# GTX-119: the runtime dependencies whose declared floor the `runtime-floor` matrix does not have
+# to carry a cell for, and why each is exempt. Every other floor-declared runtime dependency needs
+# one, so adding a ranged dependency without either a cell or an entry here fails the correlation
+# guard rather than shipping an unverified span.
+_FLOOR_EXEMPT = {
+    # AD-13 pins this exact, so there is no span beneath a floor to verify.
+    "markdown-it-py": "pinned exact",
+    # AD-26 already verifies this across its whole range, at both ends and with and without the
+    # optional C accelerator, in the `yaml-compatibility` matrix.
+    "ruamel.yaml": "verified by the yaml-compatibility matrix",
+}
+
+
+def _declared_floors() -> dict[str, str]:
+    """Return each runtime dependency's declared `>=` floor, keyed by distribution name.
+
+    A dependency pinned exact carries no `>=` and so no span beneath a floor; it is absent from
+    the result rather than present with an empty value, which is what lets the caller treat
+    "declares a floor" and "needs a floor cell" as the same question.
+    """
+    dependencies = tomllib.loads((_ROOT / "pyproject.toml").read_text(encoding="utf-8"))["project"]
+    floors: dict[str, str] = {}
+    for requirement in dependencies["dependencies"]:
+        start = next(
+            (index for index, character in enumerate(requirement) if character in "<>=!~"), None
+        )
+        assert start is not None, f"{requirement!r} declares no version constraint at all"
+        name = requirement[:start].strip()
+        for specifier in requirement[start:].split(","):
+            if specifier.strip().startswith(">="):
+                assert name not in floors, f"{name} declares more than one floor: {requirement!r}"
+                floors[name] = specifier.strip().removeprefix(">=").strip()
+    return floors
 
 
 def _step_index(job: dict, name: str) -> int:
@@ -618,32 +652,85 @@ def test_publish_job_only_downloads_and_publishes_pinned_artifact():
     assert all("run" not in step for step in publish["steps"])
 
 
-def test_the_rich_floor_leg_installs_the_declared_floor():
-    """GTX-201: the leg is only a floor check if it installs the floor `pyproject.toml` declares.
+def test_the_runtime_floor_matrix_covers_every_declared_floor():
+    """GTX-119: the matrix is only a floor check if it installs the floors declared here.
 
-    `tests/test_package_metadata.py` pins the declared floor, but it ships in the sdist and so
-    cannot read `.github/`, which left the workflow's own `rich==` pin free to drift: raising the
-    floor would fail that test and force an edit there, while this leg went on installing an
-    undeclared version and reported green. Correlating the two is the whole point of the leg, so
-    it is asserted here, in the repository-only module that already parses this workflow.
+    `tests/test_package_metadata.py` pins the declared floors, but it ships in the sdist and so
+    cannot read `.github/`, which left the workflow's own `==` pins free to drift: raising a floor
+    would fail that test and force an edit there, while this matrix went on installing an
+    undeclared version and reported green. Correlating the two is the whole point of the matrix,
+    so it is asserted here, in the repository-only module that already parses this workflow.
+
+    Derived rather than listed, which is the part GTX-201's single-dependency version could not
+    do. A ranged runtime dependency added with no cell and no `_FLOOR_EXEMPT` entry fails here,
+    so the span beneath a new floor cannot ship unverified merely because nobody remembered this
+    file.
     """
-    declared = [
-        specifier.removeprefix(">=").strip()
-        for requirement in tomllib.loads((_ROOT / "pyproject.toml").read_text(encoding="utf-8"))[
-            "project"
-        ]["dependencies"]
-        if requirement.startswith("rich")
-        for specifier in requirement.removeprefix("rich").split(",")
-        if specifier.strip().startswith(">=")
-    ]
-    assert len(declared) == 1, f"expected exactly one rich floor, found {declared}"
+    cells = list(_WORKFLOW["jobs"]["runtime-floor"]["strategy"]["matrix"]["floor"])
+    assert cells == sorted(cells), f"keep the floor cells sorted for readability, found {cells}"
+    installed = {}
+    for cell in cells:
+        name, separator, version = cell.partition("==")
+        # A cell that installs a range or a series resolves to something newer than the floor and
+        # so tests the wrong version, which is the failure this whole matrix exists to prevent.
+        assert separator, f"the floor cell {cell!r} does not pin a version with =="
+        assert version, f"the floor cell {cell!r} pins an empty version"
+        assert name not in installed, f"{name} has more than one floor cell: {cells}"
+        installed[name] = version
 
-    runs = [step["run"] for step in _WORKFLOW["jobs"]["rich-floor"]["steps"] if "run" in step]
-    installs = [shlex.split(run)[-1] for run in runs if "uv pip install" in run and "rich==" in run]
-    assert installs == [f"rich=={declared[0]}"], (
-        f"the rich-floor leg installs {installs}, but pyproject.toml declares a floor of "
-        f"{declared[0]}. The leg exists to test the oldest supported rich, so the two move "
-        "together or it tests nothing."
+    expected = {
+        name: floor for name, floor in _declared_floors().items() if name not in _FLOOR_EXEMPT
+    }
+    assert installed == expected, (
+        f"the runtime-floor matrix installs {installed}, but pyproject.toml declares {expected}. "
+        "The matrix exists to test the oldest supported version of each dependency, so the two "
+        "move together or it tests nothing. A dependency that genuinely needs no cell belongs in "
+        "_FLOOR_EXEMPT with the reason."
+    )
+
+
+def test_the_runtime_floor_matrix_runs_the_whole_suite_on_every_supported_interpreter():
+    """GTX-119: one dependency at its minimum, on every interpreter, against the whole suite.
+
+    Three separable claims, because dropping any one of them leaves a supported combination
+    unverified while the job still reports green:
+
+    A constrained resolver may hold one dependency at its minimum and take the rest from a
+    resolution as new as this project's lock, so each cell overlays exactly one floor onto the
+    locked remainder. A cell holding every floor at once would not answer which dependency broke,
+    and would test a combination no resolver has to produce.
+
+    `pydantic` resolves through interpreter-specific `pydantic-core` wheels, so an answer on one
+    interpreter is not an answer on the other. The interpreter list is compared against the
+    `tests` job rather than spelled again, so adding a supported interpreter there extends the
+    floor matrix instead of silently leaving its cells behind.
+
+    And the suite runs whole. GTX-201's leg ran `tests/cli/` because the seam it was added for is
+    a CLI one, but a floor that changes validation-message rendering or parser behavior is not
+    confined to that directory, and a subset makes the green mean less than it appears to.
+    """
+    job = _WORKFLOW["jobs"]["runtime-floor"]
+    interpreters = list(job["strategy"]["matrix"]["python"])
+    assert interpreters == list(_WORKFLOW["jobs"]["tests"]["strategy"]["matrix"]["python"]), (
+        "the floor matrix must cross every interpreter the `tests` job supports; otherwise a "
+        "supported dependency and interpreter combination is never resolved at the floor."
+    )
+    assert job["env"]["UV_PYTHON"] == "${{ matrix.python }}", (
+        "without UV_PYTHON the cells all resolve against the same default interpreter and the "
+        "python axis silently runs the same environment twice."
+    )
+
+    commands = [shlex.split(step["run"]) for step in job["steps"] if "run" in step]
+    installs = [argv for argv in commands if argv[:3] == ["uv", "pip", "install"]]
+    assert installs == [["uv", "pip", "install", "${{ matrix.floor }}"]], (
+        f"expected exactly one overlay installing the cell's own floor, found {installs}. A "
+        "second install, or a hardcoded version, decouples the cell from the matrix value the "
+        "correlation guard checks."
+    )
+    runs = [argv for argv in commands if _runs_subcommand(argv, "uv", "run")]
+    assert runs == [["uv", "run", "--no-sync", "pytest"]], (
+        f"expected the whole suite and no re-sync, found {runs}. `--no-sync` is load-bearing: "
+        "`uv run` without it restores the locked version and the overlaid floor never runs."
     )
 
 

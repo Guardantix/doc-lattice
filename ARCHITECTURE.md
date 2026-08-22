@@ -588,20 +588,45 @@ decided per dependency by how much of its behavior this engine actually reads.
   `markdown-it-py` itself, so a future `rich` whose floor moves past 4.2.0 is unresolvable until
   this pin is re-reviewed and section identity re-verified. That is the intended trade, because an
   unresolvable lock fails loudly and a shifted slug does not.
-- `typer` and `pydantic` carry bounds only. No leg verifies the span beneath either ceiling,
-  because nothing here reads their internals; the bound exists to hold the next major out until
-  someone looks at it.
-- `rich` was in that group and **AD-40 moves it out**. The per-channel broken-pipe policy is built
+- `typer` and `pydantic` carried bounds only, on the grounds that nothing here read their
+  internals. **GTX-119 finds that false of both and amends this record accordingly.**
+  `cli/pipe_policy.py` constructs `PipeClosed` with no `errno` precisely because typer's `_main`
+  converts only an `OSError` carrying `EPIPE` into `sys.exit(1)`; the 141 contract rests on that
+  conversion rule. `validation_render.py` consumes the structured `ValidationError.errors()` shape
+  and branches on `loc`, `msg`, and the `extra_forbidden` type value. Both are behavior this
+  engine reads rather than merely calls, which is the same test AD-26 applies to `ruamel.yaml`.
+  Neither declared floor survived being run: `typer>=0.12` fails outright below 0.16.0, where
+  click 8.2 breaks typer and `--help` into a departed reader exits 2 instead of 141, and renders a
+  rejected option as `No such option '--json'.` rather than click's `No such option: --json` up to
+  0.25.1 -- a user-visible difference in what a mistyped flag prints. `pydantic>=2` cannot resolve
+  at all on Python 3.14, because pydantic pins an exact `pydantic-core` and none before 2.12.0
+  ships a wheel for that interpreter. The floors therefore rise to `0.26.0` and `2.12.0`, the
+  earliest releases the whole suite passes against on every supported interpreter.
+- `rich` was in that group and **AD-40 moved it out**. The per-channel broken-pipe policy is built
   on `Console.on_broken_pipe`, a documented but overridable hook, which makes one piece of rich's
   behavior something this engine reads rather than merely calls. That has two consequences this
   record now carries. The floor rises from `13` to `13.8.0`, the first release in which the hook
   exists -- verified against the published wheels, where 13.7.1 lacks it and 13.8.0 has it -- so
-  the declaration no longer admits a version under which the override is silently inert. And the
-  span gets a leg: `rich-floor` in `ci.yml` installs that exact floor and runs the CLI suite
-  against it, for the reason the ruamel leg exists, since the lock only ever installs the ceiling
-  and a difference at the floor would otherwise ship unseen. A test also asserts the hook is still
-  present on the class, so its removal in a future rich fails here rather than quietly restoring
-  exit 1 on `--help`.
+  the declaration no longer admits a version under which the override is silently inert. A test
+  also asserts the hook is still present on the class, so its removal in a future rich fails here
+  rather than quietly restoring exit 1 on `--help`.
+- **Every floor above is a CI contract rather than a claim, and one mechanism carries all three.**
+  GTX-201 gave `rich` a single `rich-floor` leg; GTX-119 generalizes it into the `runtime-floor`
+  matrix in `ci.yml`, which crosses each floor-declared read dependency with every supported
+  interpreter and overlays exactly one floor per cell onto the locked remainder. One per cell is
+  the point: a constrained resolver may hold one dependency at its minimum and take the rest from
+  a resolution as new as this project's lock, and a cell holding all three at once would neither
+  reproduce that nor say which one broke. Both interpreters, because `pydantic` resolves through
+  interpreter-specific `pydantic-core` wheels and one interpreter's answer is not the other's. The
+  whole suite, because a floor that moves validation rendering or option parsing is not confined
+  to the CLI directory. `tests/test_release_workflow.py` derives the matrix's expected cells from
+  this file's declarations, so a ranged runtime dependency added with neither a cell nor a
+  recorded exemption fails there rather than shipping an unverified span.
+- A one-time raise to whatever the lock currently resolves was rejected. It is honest only until
+  the next lock refresh, after which the floor is an assertion again with nothing to catch it, and
+  it proves nothing about either dependency independently, since locked CI only ever installs the
+  two together. Raising a floor is what this project does when a declared minimum cannot resolve
+  or pass -- and then only to the earliest version that does, which is then kept in the matrix.
 
 **Consequences:** An upstream major cannot reach a pinned adopter without a doc-lattice release,
 and raising a ceiling is a compatibility review with the suite as its evidence.
@@ -1882,7 +1907,9 @@ never depends on whether its diagnostics could be delivered.
   import -- can neutralize file descriptor 2 without depending on any of what just failed. That
   path gets its own stdlib-only equivalent of the stderr half rather than a share of the policy,
   because the policy is part of what is unavailable there.
-- The `rich` floor rises to `13.8.0` and gets a compatibility leg, amending AD-27. A
+- The `rich` floor rises to `13.8.0` and gets a compatibility leg, amending AD-27; GTX-119 later
+  folds that leg into the `runtime-floor` matrix AD-27 now owns, which runs it against the whole
+  suite on both supported interpreters rather than the CLI directory on one. A
   write-boundary fallback covering the whole `>=13` range was the alternative; it was rejected
   because it means wrapping every stream this CLI writes through in order to reproduce a seam the
   supported versions already expose, and the floor is four years of releases old.

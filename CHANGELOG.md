@@ -60,6 +60,30 @@ message text, and exit codes are unchanged. See **Fixed** below and AD-41 in ARC
 
 ### Changed
 
+- The declared floors for `typer` and `pydantic` rise to `>=0.26.0` and `>=2.12.0`, because
+  neither of the old ones survived being run. Below typer 0.16.0, click 8.2 breaks typer outright
+  and `--help` piped into a departed reader exits 2 instead of 141; from there to 0.25.1 typer
+  renders a mistyped flag as `No such option '--json'.` rather than click's `No such option:
+  --json`, which is a user-visible difference in what a rejected option prints. `pydantic>=2`
+  never resolved at all on Python 3.14, since pydantic pins an exact `pydantic-core` and no
+  release before 2.12.0 ships a wheel for that interpreter. Both new floors are the earliest
+  release the whole suite passes against on every supported interpreter. An adopter already
+  resolving through this project's own lock sees nothing change; one resolving in a constrained
+  environment now gets a resolution failure instead of a version nothing ever tested.
+- Dependency floors are now a CI contract rather than a claim. The single `rich-floor` leg is
+  generalized into a `runtime-floor` matrix that crosses every floor-declared runtime dependency
+  this engine reads -- `pydantic`, `rich`, and `typer` -- with both supported interpreters,
+  overlaying exactly one floor per cell onto the locked remainder and running the whole suite. One
+  floor per cell because a constrained resolver may hold one dependency at its minimum and take
+  the rest from a resolution as new as this project's lock; both interpreters because `pydantic`
+  resolves through interpreter-specific `pydantic-core` wheels. `rich` keeps its declared floor of
+  `13.8.0` and gains coverage: its cell now runs the whole suite on both interpreters rather than
+  `tests/cli/` on one. The matrix reports through a fixed `Runtime floor compatibility` context in
+  the fail-closed shape GTX-176 established, and `tests/test_release_workflow.py` derives the
+  expected cells from `pyproject.toml`, so a ranged dependency added with neither a cell nor a
+  recorded exemption fails there rather than shipping an unverified span. AD-27 in
+  ARCHITECTURE.md records the amended posture; RELEASING.md owns the branch-protection rollout
+  that makes the new context required.
 - A reconcile commit that loses its journal to a failed committed marker, and then cannot restore
   the prepared journal either, no longer tells you to run `doc-lattice reconcile --recover`. In
   that one state there is no journal for recovery to read, so the command could only report each

@@ -124,9 +124,9 @@ def test_runtime_dependencies_are_bounded_above():
 def test_runtime_dependency_bounds_match_the_recorded_decisions():
     assert _PYPROJECT["project"]["dependencies"] == [
         "markdown-it-py==4.2.0",
-        "typer>=0.12,<1",
+        "typer>=0.26.0,<1",
         "rich>=13.8.0,<16",
-        "pydantic>=2,<3",
+        "pydantic>=2.12.0,<3",
         "ruamel.yaml>=0.18,<0.20",
     ]
 
@@ -142,8 +142,8 @@ def test_the_rich_floor_carries_the_hook_the_broken_pipe_policy_needs():
     floor that drifted below this would ship unseen.
 
     This pins the declared floor and nothing else. Correlating it with the version the
-    ``rich-floor`` leg actually installs belongs to
-    ``tests/test_release_workflow.py::test_the_rich_floor_leg_installs_the_declared_floor``,
+    ``runtime-floor`` matrix actually installs belongs to
+    ``tests/test_release_workflow.py::test_the_runtime_floor_matrix_covers_every_declared_floor``,
     because this module ships in the sdist and so cannot read ``.github/``.
     """
     floors = [
@@ -156,6 +156,64 @@ def test_the_rich_floor_carries_the_hook_the_broken_pipe_policy_needs():
     assert floors == ["13.8.0"], (
         f"expected a single rich floor of 13.8.0, found {floors}. Lowering it removes "
         "Console.on_broken_pipe, which AD-27 records as a read compatibility surface."
+    )
+
+
+def test_the_typer_floor_is_the_oldest_release_the_cli_contract_holds_against():
+    """GTX-119: 0.26.0 is where the parser-rejection wording this CLI asserts becomes typer's.
+
+    Two separate breaks live under this floor, and the lower one is not the binding constraint.
+    Below 0.16.0 typer does not survive click 8.2 at all: ``--help`` piped into a departed reader
+    exits 2 rather than 141, because the command never reaches the point where
+    ``cli/pipe_policy.py``'s ``errno``-free ``PipeClosed`` would be converted. That break is loud.
+
+    The quiet one runs from 0.16.0 to 0.25.1, where typer renders an unknown option through its
+    own rich error panel as ``No such option '--json'.`` instead of click's ``No such option:
+    --json``. The CLI contract asserts click's wording, so the span is a user-visible difference
+    in what a mistyped flag prints -- exactly the kind of surface AD-27 weighs -- rather than a
+    crash. 0.26.0 is the first release the whole suite passes against on both supported
+    interpreters, which is the only floor this project can honestly declare.
+
+    This pins the declared floor and nothing else; the version the matrix installs is correlated
+    in ``tests/test_release_workflow.py``, which this module cannot reach from the sdist.
+    """
+    floors = [
+        specifier.removeprefix(">=")
+        for requirement in _PYPROJECT["project"]["dependencies"]
+        if requirement.startswith("typer")
+        for specifier in _specifiers(requirement)
+        if specifier.startswith(">=")
+    ]
+    assert floors == ["0.26.0"], (
+        f"expected a single typer floor of 0.26.0, found {floors}. Lowering it admits releases "
+        "that render a rejected option differently, or that break the 141 contract outright."
+    )
+
+
+def test_the_pydantic_floor_is_the_oldest_release_every_supported_interpreter_can_resolve():
+    """GTX-119: 2.12.0 is the first pydantic with a ``pydantic-core`` wheel for Python 3.14.
+
+    ``validation_render.py`` consumes the structured ``ValidationError.errors()`` shape and
+    branches on ``loc``, ``msg``, and the ``extra_forbidden`` type value, so pydantic is a read
+    surface here rather than a called one. The floor is nonetheless set by packaging: pydantic
+    ships pure-Python wheels but pins an exact ``pydantic-core``, whose wheels are built per
+    interpreter, and no release before 2.12.0 has one for 3.14. Declaring anything lower would
+    promise a resolution that cannot happen on an interpreter this project supports -- the
+    resolver would fall back to building the Rust extension from source, or fail.
+
+    This pins the declared floor and nothing else; the version the matrix installs is correlated
+    in ``tests/test_release_workflow.py``, which this module cannot reach from the sdist.
+    """
+    floors = [
+        specifier.removeprefix(">=")
+        for requirement in _PYPROJECT["project"]["dependencies"]
+        if requirement.startswith("pydantic")
+        for specifier in _specifiers(requirement)
+        if specifier.startswith(">=")
+    ]
+    assert floors == ["2.12.0"], (
+        f"expected a single pydantic floor of 2.12.0, found {floors}. Lowering it declares "
+        "support for versions with no pydantic-core wheel on a supported interpreter."
     )
 
 
