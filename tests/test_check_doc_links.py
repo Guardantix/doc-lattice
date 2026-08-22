@@ -169,6 +169,33 @@ def test_percent_encoded_target_is_resolved(tmp_path):
     assert check_repository_links(tmp_path) == []
 
 
+def test_query_string_is_not_part_of_the_target_path(tmp_path):
+    # GitHub resolves a relative destination against the blob URL, so `?plain=1` is a view
+    # parameter rather than part of the filename.
+    _write(tmp_path, "README.md", "# Readme\n\n[plain](GUIDE.md?plain=1)\n")
+    _write(tmp_path, "GUIDE.md", "# Guide\n")
+
+    assert check_repository_links(tmp_path) == []
+
+
+def test_missing_target_is_still_reported_when_a_query_is_present(tmp_path):
+    _write(tmp_path, "README.md", "# Readme\n\n[plain](MISSING.md?plain=1)\n")
+
+    messages = check_repository_links(tmp_path)
+
+    assert len(messages) == 1
+    assert "MISSING.md?plain=1" in messages[0]
+
+
+def test_fragment_is_not_heading_checked_when_the_destination_carries_a_query(tmp_path):
+    # `?plain=1` renders source rather than headings, so the fragment is a line ref such as
+    # `#L5`, not a heading id. Validating it against headings would reject a valid link.
+    _write(tmp_path, "README.md", "# Readme\n\n[line](GUIDE.md?plain=1#L5)\n")
+    _write(tmp_path, "GUIDE.md", "# Guide\n\n## Section\n")
+
+    assert check_repository_links(tmp_path) == []
+
+
 def test_directory_target_is_accepted(tmp_path):
     _write(tmp_path, "README.md", "# Readme\n\n[vendor](vendor/)\n")
     (tmp_path / "vendor").mkdir()

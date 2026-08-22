@@ -12,11 +12,10 @@ resolve through ``markdown_compat.github_heading_ids``, so a repeated heading is
 the document-order id GitHub gives it rather than collapsing onto one base slug.
 """
 
-import re
 import sys
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
-from urllib.parse import unquote
+from urllib.parse import SplitResult, unquote, urlsplit
 
 from markdown_it import MarkdownIt
 
@@ -25,9 +24,6 @@ from doc_lattice.markdown_compat import extract_headings, github_heading_ids
 _REPO_ROOT = Path(__file__).resolve().parent.parent
 _PARSER = MarkdownIt("commonmark")
 _MARKDOWN_SUFFIX = ".md"
-# A destination carrying any scheme, and the protocol-relative and root-absolute forms, are
-# external or absolute rather than repository-relative.
-_SCHEME_RE = re.compile(r"^[A-Za-z][A-Za-z0-9+.-]*:")
 
 
 @dataclass(frozen=True, slots=True)
@@ -125,9 +121,16 @@ def _fragment_message(
     )
 
 
-def _is_out_of_scope(href: str) -> bool:
-    """Report whether a destination is external or absolute rather than repository-relative."""
-    return _SCHEME_RE.match(href) is not None or href.startswith("/")
+def _is_out_of_scope(parts: SplitResult) -> bool:
+    """Report whether a destination is external or absolute rather than repository-relative.
+
+    Args:
+        parts: The split destination.
+
+    Returns:
+        True for any scheme, for the protocol-relative form, and for a root-absolute path.
+    """
+    return bool(parts.scheme) or bool(parts.netloc) or parts.path.startswith("/")
 
 
 def _resolve_target(raw_path: str, document: Path, repo_root: Path) -> Path | None:
@@ -148,6 +151,11 @@ def _link_message(
     A destination that does not exist yields exactly one message: the fragment is not also
     reported, because a fragment on a target nobody can open says nothing new.
 
+    A query is a view parameter, not part of the filename, so it is split off before the
+    target is resolved. It also suppresses heading validation: GitHub's ``?plain=1`` renders
+    source rather than headings, where a fragment is a line reference such as ``#L5`` and no
+    heading id could match it.
+
     Args:
         link: The link to resolve.
         document: The source document the link was written in.
@@ -158,18 +166,18 @@ def _link_message(
         The diagnostic text without its ``file:line`` prefix, or None.
     """
     href = link.href
-    if _is_out_of_scope(href):
+    parts = urlsplit(href)
+    if _is_out_of_scope(parts):
         return None
-    raw_path, _, raw_fragment = href.partition("#")
-    fragment = unquote(raw_fragment)
-    if not raw_path:
+    fragment = unquote(parts.fragment)
+    if not parts.path:
         return _fragment_message(fragment, document, repo_root, cache) if fragment else None
-    target = _resolve_target(raw_path, document, repo_root)
+    target = _resolve_target(parts.path, document, repo_root)
     if target is None:
         return f"link target {href!r} escapes the repository"
     if not target.exists():
         return f"link target {href!r} does not exist"
-    if not fragment or target.suffix != _MARKDOWN_SUFFIX or not target.is_file():
+    if not fragment or parts.query or target.suffix != _MARKDOWN_SUFFIX or not target.is_file():
         return None
     return _fragment_message(fragment, target, repo_root, cache)
 

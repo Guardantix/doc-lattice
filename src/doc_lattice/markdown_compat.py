@@ -249,6 +249,16 @@ def github_heading_ids(headings: list[Heading]) -> list[str]:
     not one either: it is a base slug with no deduplication, so repeated headings collapse
     onto a single id.
 
+    The slug is taken from ``Heading.text``, which is raw inline source rather than rendered
+    text, matching what ``anchor_ids`` has always slugged. The two agree wherever the pinned
+    strip class removes the markup itself -- backticks, emphasis runs, and the brackets in
+    ``## [1.0.0] - 2026-01-01`` all fall out on both sides. They diverge for a heading whose
+    source carries text GitHub does not display, an inline link being the reachable case:
+    ``## [Guide](target.md)`` yields ``guidetargetmd`` here and ``guide`` on GitHub. No
+    heading in the supported subset needs that today; closing it means rendering inline
+    content inside this adapter, which is a wider change than the heading grammar this module
+    declares.
+
     Args:
         headings: Supported headings in document order.
 
