@@ -37,6 +37,13 @@ _YAML_11_BOOLEAN_WORDS = frozenset({"y", "yes", "n", "no", "true", "false", "on"
 _CONFIG_HEADER = f"# doc-lattice configuration. See {DOC_LATTICE_REPO_URL}\n"
 _COMMENTED_IGNORE = '# ignore_globs:\n#   - "**/archive/**"\n'
 _COMMENTED_CACHE = "# cache_key: my-project-docs   # opt-in load cache slot under your cache home\n"
+# The one commented key carrying a correctness caveat, so it is scaffolded rather than left for a
+# reader to discover in the docs. The trailing comment states only that the tier trades reads for
+# trust; the full caveat (a size- and mtime-preserving rewrite is served stale, and reconcile
+# ignores the setting) lives in README's Load cache section, which has room to say it properly.
+_COMMENTED_TRUST_STAT = (
+    "# cache_trust_stat: false      # opt-in stat fast tier for read-only commands\n"
+)
 _COMMENTED_LINEAR = "# linear_team: ENG\n"
 
 
@@ -76,7 +83,13 @@ def render_config(docs_roots: tuple[str, ...], linear_team: str | None) -> str:
     yaml.indent(mapping=2, sequence=4, offset=2)
     buf = io.StringIO()
     yaml.dump(data, buf)
-    parts = [_CONFIG_HEADER, buf.getvalue(), _COMMENTED_IGNORE, _COMMENTED_CACHE]
+    parts = [
+        _CONFIG_HEADER,
+        buf.getvalue(),
+        _COMMENTED_IGNORE,
+        _COMMENTED_CACHE,
+        _COMMENTED_TRUST_STAT,
+    ]
     if linear_team is None:
         parts.append(_COMMENTED_LINEAR)
     return "".join(parts)

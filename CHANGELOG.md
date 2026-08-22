@@ -58,6 +58,20 @@ moves. See **Changed** below.
   diagnostics keep the full guarantee. Tests now enforce the exclusion under both levers and pin
   the carriage-return and line-feed boundary rather than leaving either written down.
 
+- `init` now scaffolds a commented `cache_trust_stat: false` line into `.doc-lattice.yml`,
+  alongside the `ignore_globs`, `cache_key`, and `linear_team` examples it already wrote. It is
+  the one option whose fast path trades a read for trust, so a reader should meet it in the file
+  rather than only in the docs. The written file is otherwise unchanged and still has exactly one
+  active key; nothing about config loading moves.
+
+- README.md documents the twelve printed error codes beside the exit-code table, names the
+  diagnostics that carry no code, documents the global `--version` option, and states that
+  configuration and tracked lattice frontmatter reject unknown keys and do not coerce values.
+  None of this is new behavior; all of it was undocumented. The error-code table and the sample
+  `.doc-lattice.yml` are now held to the code by tests rather than by review, so neither can
+  drift again: the table's rows must be exactly the coded domain `constants.py` declares, and
+  the sample must be byte-for-byte what a flagless `init` writes.
+
 ### Fixed
 
 - A command's exit code no longer depends on which of its output streams survived. Piping
@@ -1150,6 +1164,12 @@ GitHub Release notes, which are never rewritten.
 - Heading anchor parsing now recognizes `{#marker}` only as a trailing heading marker
   (optionally followed by an ATX closing `#` sequence). An anchor-like token in the middle of
   heading text is no longer mistaken for the heading's explicit anchor.
+  **Behaviorally breaking, noted retroactively:** this was shipped as a fix but changes section
+  identity. A heading whose anchor came from a nontrailing `{#marker}` now resolves to its
+  generated slug instead, so any `derives_from` ref pointing at the old `file#marker` target
+  resolves to nothing and `check` reports it as BROKEN. Migration: move the marker to the
+  supported trailing position to keep the old anchor, or repoint the ref at the heading's
+  generated slug.
 
 ## [1.0.0] - 2026-07-12
 

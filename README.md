@@ -263,9 +263,18 @@ Pass `--indent N` with JSON output on `check`, `lint`, `impact`, or `linear` to 
 JSON with `N` spaces per level. JSON output is selected uniformly by `--format json`; `--indent`
 without an effective `--format json` is a usage error.
 
-Use the global `--no-color` option before the command to disable colored output explicitly, for
-example `doc-lattice --no-color check`. Rich also honors the [`NO_COLOR`](https://no-color.org/)
-environment variable; `--no-color` is the command-line equivalent. doc-lattice intentionally
+Two options are global rather than per-command, so they go before the command name:
+
+| Global option | What it does |
+|---------------|--------------|
+| `--version` | Print the installed version to stdout and exit 0, as in `doc-lattice --version`. |
+| `--no-color` | Disable all styling for the run, as in `doc-lattice --no-color check`. |
+
+`--version` is eager: it prints and exits before any command runs, so it needs no config file, no
+docs root, and no network. That makes it the check to run against a fresh install.
+
+Rich also honors the [`NO_COLOR`](https://no-color.org/) environment variable; `--no-color` is
+the command-line equivalent. doc-lattice intentionally
 extends the `NO_COLOR` baseline: the standard itself only asks implementers to drop color and
 leaves bold, underline, and italic styling in place, but either lever here means no styling at
 all, so no terminal escape sequence reaches human-facing output under either one, even when a
@@ -377,6 +386,15 @@ selector details, dry-run and JSON output, the durability contract, and recovery
 | `derives_from[].ref` | each edge | The upstream id: bare (whole-file target, e.g. `api-design`) or file-scoped (section target, e.g. `api-design#pagination`). |
 | `derives_from[].seen` | each edge | The locked upstream hash, or omitted for a never-reconciled (UNRECONCILED) edge. |
 | `tickets` | optional | Issue ids associated with the doc (used by `impact` and `linear`). |
+
+Tracked lattice frontmatter is strict in both directions, and so is each nested `derives_from`
+entry. An unknown key is rejected rather than ignored, and after YAML parsing each value must
+already have the schema's exact type, because values are not coerced: a `tickets:` key written
+with no value at all parses to null where a list is required, and fails the load with a
+`FRONTMATTER_ERROR` and exit 2 rather than being read as an empty list. The strictness is scoped
+to blocks the lattice tracks. A fenced block with no `id` that declares none of `authority`,
+`derives_from`, or `tickets` is deliberately accepted and skipped, keys and all, so another tool
+can own that file; see [Files with no `id`](#files-with-no-id).
 
 `id`, `title`, each `tickets` entry, `derives_from[].ref`, and `derives_from[].seen` must be
 single-line text carrying no control character. A value that decodes to any C0 code point
@@ -532,15 +550,28 @@ doc-lattice runs zero-config (defaulting to a `docs/` root), or reads `.doc-latt
 from the current directory:
 
 ```yaml
-# doc-lattice configuration
+# doc-lattice configuration. See https://github.com/Guardantix/doc-lattice
 docs_roots:
-  - docs                  # directories to scan, or individual .md files (default: ["docs"])
-# ignore_globs:           # paths to skip within those roots
+  - docs
+# ignore_globs:
 #   - "**/archive/**"
-# cache_key: my-docs      # opt-in incremental load cache slot (see Load cache below)
-# cache_trust_stat: false # opt-in stat fast tier for read-only commands (accepts the mtime caveat)
-# linear_team: ENG        # the Linear team the `linear` query targets
+# cache_key: my-project-docs   # opt-in load cache slot under your cache home
+# cache_trust_stat: false      # opt-in stat fast tier for read-only commands
+# linear_team: ENG
 ```
+
+That block is byte-for-byte what `init` writes with no flags, and a test holds the two together,
+so what you read here is what you get rather than a paraphrase that drifts. The commented keys
+are the optional ones: `ignore_globs` lists paths to skip within the roots, `cache_key` and
+`cache_trust_stat` are the opt-in load cache described below, and `linear_team` names the team
+the `linear` query targets. Uncomment what you need; `docs_roots` is the only active key, and it
+defaults to `["docs"]` when the file is absent entirely.
+
+Configuration is strict in both directions. An unknown key is rejected rather than ignored, and
+after YAML parsing each value must already have the schema's exact type, because values are not
+coerced. A scalar where a list is required (`docs_roots: docs`) and a key written with no value
+at all (`docs_roots:`, which parses to null) are both config errors that exit 2, not quietly
+normalized inputs.
 
 The project root is the resolved parent of the selected config file, including an explicit
 `--config PATH`, or the resolved current directory in zero-config mode. Relative `docs_roots`
@@ -872,6 +903,35 @@ scope is applied. Set the team the query targets with `linear_team` in `.doc-lat
 | `1` | Coherent finding: lattice drift, an authority inversion, or a Linear gate failure. |
 | `2` | Invalid, unreadable, unsafe, ambiguous, or unreliable tool state, including confirmation refusal, persistence or recovery failure, and an advisory a warning filter escalated to an error. |
 | `141` | Standard output could not be written because its reader departed. Nothing is printed. Only stdout produces this; a dead stderr leaves the code the run had otherwise earned. |
+
+### Error codes
+
+The exit status says how a run ended; an error code says which contract failed. Every code below
+belongs to a typed error and is printed ahead of the message, as `error (CODE): ...` on stderr.
+
+Carrying a code is not the same as exiting 2. Usage errors and the `reconcile --recover` problem
+report print an uncoded `error: ...`, and an unexpected failure prints an uncoded
+`internal error: ...`; all of those still exit 2. The parenthetical marks exactly the diagnostics
+that have a code to match on. Match on the code rather than on message text: messages are
+diagnostics and are free to change, while this domain is the documented migration surface.
+
+| Code | Raised when |
+|------|-------------|
+| `CONFIG_ERROR` | An explicit `--config PATH` names a file that does not exist, or the selected `.doc-lattice.yml` is unreadable, fails to parse as YAML, fails its schema, or names a `docs_roots` entry that escapes the project root or exists as something other than a directory or a regular `.md` file. A `linear_team` that is not a valid team key lands here too. An absent default config is not an error; it is zero-config mode. |
+| `VALIDATION_ERROR` | A value parsed cleanly but failed domain validation: an `impact` token that resolves to no id, a `reconcile --ref` matching no edge on the named node, or an `init` flag value that is empty, carries a control character, or is a `docs_roots` entry that is absolute or contains `..`. Command-shape and parser usage failures are *not* this; they stay uncoded. |
+| `DUPLICATE_ID` | Two files claim the same `id`, or two headings within one file resolve to the same anchor id. The error names both registration sites. |
+| `BROKEN_REF` | An operation that requires a resolved edge was aimed at one that does not resolve, in practice a single-node `reconcile` whose `--ref` names the broken edge. This is *not* the ordinary unresolved ref: that is the coherent `BROKEN` finding `check` reports with exit 1, and a broad `reconcile` skips it rather than failing. |
+| `UNREADABLE_DOC` | A discovered document cannot be read or decoded as UTF-8, its frontmatter YAML cannot be parsed, or a reconcile finds the frontmatter structure it must rewrite malformed. |
+| `FRONTMATTER_ERROR` | Tracked lattice frontmatter failed schema validation (an unknown key, a wrong type, or a control character in a text value), or an id-less block declared `authority`, `derives_from`, or `tickets` and so named no owner for the edges it declares. |
+| `LINEAR_ERROR` | The `linear` command could not obtain a usable response: no `LINEAR_API_KEY`, a transport failure, a retry budget exhausted against HTTP 429 or 5xx, GraphQL errors, a missing, oversized, or malformed payload, or more distinct ticket refs than one run accepts. |
+| `RECONCILE_IN_PROGRESS` | Another process already holds the project's reconcile lock, so the run refuses rather than writing alongside it. |
+| `RECONCILE_CONFLICT` | A reconcile destination's bytes changed between validation and the write, so the transaction was refused and rolled back rather than applied over an edit it never read. |
+| `RECONCILE_PERSISTENCE` | A reconcile transaction could not be durably written, its rollback could not be completed, or `--recover` could not safely finish an interrupted one. The message names the recovery step to run. |
+| `INIT_PERSISTENCE` | `init` could not write `.doc-lattice.yml` into the working directory. |
+| `WARNING_AS_ERROR` | A warning filter (`PYTHONWARNINGS=error`, or `-W error`) turned an advisory into an exception, ending a run that would otherwise have continued past it. |
+
+`UNKNOWN` is deliberately absent. It is the base default that every typed error overrides, and no
+production path raises an error carrying it, so it is not a diagnostic you can receive.
 
 ## Troubleshooting
 

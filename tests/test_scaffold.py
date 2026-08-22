@@ -32,9 +32,25 @@ def _load(text: str) -> Config:
     return Config.model_validate(parsed)
 
 
-def test_render_config_includes_commented_cache_key_example():
+def test_render_config_includes_commented_cache_examples():
     text = render_config(("docs",), None)
     assert "# cache_key: my-project-docs" in text
+    # cache_trust_stat is scaffolded because it is the one option whose fast path trades a read
+    # for trust, so a reader should meet it in the file rather than only in the docs.
+    assert "# cache_trust_stat: false" in text
+
+
+def test_render_config_commented_keys_load_once_uncommented():
+    """Every commented example is a real key with a valid value, not illustrative prose."""
+    text = render_config(("docs",), None)
+    uncommented = "".join(
+        line.removeprefix("# ").removeprefix("#   ") + "\n" if line.startswith("#") else line + "\n"
+        for line in text.splitlines()
+        if not line.startswith("# doc-lattice configuration")
+    )
+    config = _load(uncommented)
+    assert config.cache_trust_stat is False
+    assert config.cache_key == "my-project-docs"
 
 
 def test_render_gitignore_matches_reconcile_transaction_artifacts():
