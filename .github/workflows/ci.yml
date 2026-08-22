@@ -78,6 +78,9 @@ jobs:
       # itself, so the run body below stays free of workflow expressions.
       PYTEST_ADDOPTS: ${{ matrix.python == '3.13' && '--no-cov' || '' }}
     steps:
+      # SCRATCH ONLY (GTX-176 verification): fail exactly one matrix leg on purpose.
+      - if: matrix.python == '3.13'
+        run: exit 1
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
         with:
