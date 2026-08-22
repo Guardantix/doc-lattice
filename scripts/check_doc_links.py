@@ -10,8 +10,13 @@ Heading fragments are validated only against Markdown targets, and only against 
 grammar the pinned compatibility adapter supports: top-level, column-zero ATX headings. Fragments
 resolve through ``markdown_compat.github_heading_ids``, so a repeated heading is addressable at
 the document-order id GitHub gives it rather than collapsing onto one base slug.
+
+Destinations are read from Markdown link tokens. A destination written as raw HTML is reported
+rather than resolved, because resolving it means parsing HTML, and a gate that skipped it
+silently would go green on the one link form it cannot see.
 """
 
+import re
 import sys
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath, PureWindowsPath
@@ -29,6 +34,10 @@ _MARKDOWN_SUFFIX = ".md"
 # link written with them resolves and this checker has to agree.
 _SINGLE_DOT_SEGMENTS = frozenset({".", "%2e"})
 _DOUBLE_DOT_SEGMENTS = frozenset({"..", ".%2e", "%2e.", "%2e%2e"})
+# Detection only, over text markdown-it has already classified as raw HTML. This never decides
+# whether a destination is valid, so it needs no HTML parser: it answers whether a maintained
+# document carries a destination this gate cannot see.
+_HTML_ANCHOR_RE = re.compile(r"<a\s[^>]*\bhref\s*=", re.IGNORECASE)
 
 
 @dataclass(frozen=True, slots=True)
@@ -65,6 +74,38 @@ def extract_links(markdown: str) -> list[Link]:
             if isinstance(href, str) and href:
                 links.append(Link(href=href, line=line))
     return links
+
+
+def html_anchor_lines(markdown: str) -> list[int]:
+    """Return the lines carrying a raw HTML anchor with an ``href``, in document order.
+
+    Markdown-it emits raw HTML as ``html_block`` and ``html_inline`` rather than as link
+    tokens, so an anchor written that way never reaches ``extract_links`` and its destination
+    would go unchecked. Reporting the anchor keeps that gap loud rather than silently green;
+    resolving the destination is deliberately not attempted, because doing it properly means
+    parsing HTML and this gate's contract is Markdown links.
+
+    An anchor with no ``href`` carries no destination -- ``<a name="top">`` names one -- so it
+    is not reported.
+
+    Args:
+        markdown: Markdown document text.
+
+    Returns:
+        One 1-based line per raw anchor found, where an inline anchor reports the line its
+        containing block starts on.
+    """
+    lines: list[int] = []
+    for token in _PARSER.parse(markdown):
+        start = token.map[0] + 1 if token.map is not None else 1
+        if token.type == "html_block":
+            lines.extend(start for _ in _HTML_ANCHOR_RE.finditer(token.content))
+        if token.type != "inline" or token.children is None:
+            continue
+        for child in token.children:
+            if child.type == "html_inline" and _HTML_ANCHOR_RE.search(child.content):
+                lines.append(start)
+    return lines
 
 
 def maintained_documents(repo_root: Path) -> list[Path]:
@@ -112,8 +153,9 @@ def _contained_parts(base: PurePosixPath, raw_path: str) -> tuple[str, ...] | No
     to ``GUIDE.md`` rather than naming a directory called ``..``. Containment is unaffected --
     an encoded double-dot pops exactly like a bare one, and popping past the root refuses.
 
-    The join is lexical on purpose: resolving through the filesystem would follow symlinks and
-    report a link that GitHub renders perfectly well as leaving the repository.
+    This pass is lexical so that a destination which escapes on paper is refused before the
+    filesystem is touched at all. It is not the whole containment story: a contained path can
+    still be a symlink out of the repository, which ``_escapes_by_symlink`` covers.
 
     Args:
         base: The source document's directory, relative to the repository root.
@@ -182,6 +224,46 @@ def _resolve_target(raw_path: str, document: Path, repo_root: Path) -> Path | No
     return None if parts is None else repo_root.joinpath(*parts)
 
 
+def _escapes_by_symlink(target: Path, repo_root: Path) -> bool:
+    """Report whether a lexically contained path leaves the repository once resolved.
+
+    The lexical pass settles the destination as written; this settles where the filesystem
+    actually sends it. Both are needed: a symlink is invisible to the first, and the second
+    alone would let ``..`` be walked out and back before anyone looked.
+
+    An in-repository symlink stays legitimate, because only its resolved location is judged.
+    One that leaves is refused rather than followed, and it is judged before the target is
+    opened, so no outside file is read to answer a fragment.
+
+    Args:
+        target: The lexically contained candidate path.
+        repo_root: The repository root, already resolved by the caller so that a checkout
+            reached through a symlinked parent does not read as escaping.
+
+    Returns:
+        True when the resolved target lies outside the repository.
+    """
+    return not target.resolve().is_relative_to(repo_root)
+
+
+def _target_message(href: str, target: Path, repo_root: Path) -> str | None:
+    """Return a diagnostic when a contained path cannot serve as a link target.
+
+    Args:
+        href: The destination as written, for the diagnostic.
+        target: The lexically contained candidate path.
+        repo_root: The resolved repository root.
+
+    Returns:
+        The diagnostic text, or None when the target is usable.
+    """
+    if _escapes_by_symlink(target, repo_root):
+        return f"link target {href!r} leaves the repository through a symlink"
+    if not target.exists():
+        return f"link target {href!r} does not exist"
+    return None
+
+
 def _selects_plain_view(query: str) -> bool:
     """Report whether a query selects GitHub's plain-source view.
 
@@ -234,8 +316,9 @@ def _link_message(
     target = _resolve_target(parts.path, document, repo_root)
     if target is None:
         return f"link target {href!r} does not resolve inside the repository"
-    if not target.exists():
-        return f"link target {href!r} does not exist"
+    unusable = _target_message(href, target, repo_root)
+    if unusable is not None:
+        return unusable
     if not fragment or target.suffix != _MARKDOWN_SUFFIX or not target.is_file():
         return None
     return _fragment_message(fragment, target, repo_root, cache)
@@ -258,10 +341,16 @@ def check_repository_links(repo_root: Path) -> list[str]:
     messages: list[str] = []
     for document in maintained_documents(root):
         source = document.relative_to(root).as_posix()
-        for link in extract_links(document.read_text(encoding="utf-8")):
+        text = document.read_text(encoding="utf-8")
+        for link in extract_links(text):
             message = _link_message(link, document, root, cache)
             if message is not None:
                 messages.append(f"{source}:{link.line}: {message}")
+        messages.extend(
+            f"{source}:{line}: raw HTML anchor carries a destination this check cannot "
+            f"resolve; write it as a Markdown link"
+            for line in html_anchor_lines(text)
+        )
     return messages
 
 

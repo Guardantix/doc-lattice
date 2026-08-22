@@ -53,7 +53,11 @@ message text, and exit codes are unchanged. See **Fixed** below and AD-41 in ARC
   Link sources are the sorted root `*.md` files, a target may be any repository-contained
   relative path, and absolute and external destinations stay out of scope. Destinations come from
   parsed link tokens, so reference-style links are followed and link-like text inside code is not
-  a link.
+  a link. A destination written as a raw HTML anchor is reported rather than resolved, since
+  reading its `href` means parsing HTML and a silent skip would leave the gate green on the one
+  link form it cannot see. Containment is settled twice, once lexically on the destination as
+  written and once on where the filesystem sends it, so an in-repository symlink keeps working
+  while one leaving the repository is refused before its target is opened.
 - Dependabot now watches this repository's GitHub Actions pins. `.github/dependabot.yml` checks the
   six actions `.github/workflows/ci.yml` and `.github/workflows/claude.yml` reference once a month
   and opens one pull request per action, because a SHA-pinned action cannot report on its own that

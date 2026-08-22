@@ -291,6 +291,73 @@ def test_ordinary_query_accepts_a_resolving_fragment(tmp_path):
     assert check_repository_links(tmp_path) == []
 
 
+def test_symlink_leaving_the_repository_is_reported(tmp_path):
+    # The lexical join keeps a symlink's own path, so without a resolved check the later
+    # exists/is_file/read_text calls would follow it out of the repository.
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    outside = tmp_path / "outside.md"
+    outside.write_text("# Outside\n\n## Secret Heading\n", encoding="utf-8")
+    (repo / "OUT.md").symlink_to(outside)
+    _write(repo, "README.md", "# Readme\n\n[x](OUT.md#secret-heading)\n")
+
+    messages = check_repository_links(repo)
+
+    assert len(messages) == 1
+    assert "OUT.md" in messages[0]
+
+
+def test_symlink_staying_inside_the_repository_resolves(tmp_path):
+    # An in-repository symlink is legitimate and GitHub renders it, so containment must reject
+    # only the ones that leave.
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    _write(repo, "REAL.md", "# Real\n\n## Inside Heading\n")
+    (repo / "ALIAS.md").symlink_to(repo / "REAL.md")
+    _write(repo, "README.md", "# Readme\n\n[x](ALIAS.md#inside-heading)\n")
+
+    assert check_repository_links(repo) == []
+
+
+def test_raw_html_anchor_is_reported_as_unchecked(tmp_path):
+    # Markdown-it emits html_inline for a raw anchor, so its href never reaches link
+    # extraction. Reporting it keeps the gap loud instead of silently green.
+    _write(tmp_path, "README.md", '# Readme\n\nSee <a href="MISSING.md">guide</a>.\n')
+
+    messages = check_repository_links(tmp_path)
+
+    assert len(messages) == 1
+    assert "README.md" in messages[0]
+    assert "HTML anchor" in messages[0]
+
+
+def test_raw_html_anchor_in_a_block_is_reported(tmp_path):
+    _write(
+        tmp_path,
+        "README.md",
+        '# Readme\n\n<details>\n<summary>x</summary>\n<a href="MISSING.md">g</a>\n</details>\n',
+    )
+
+    messages = check_repository_links(tmp_path)
+
+    assert len(messages) == 1
+    assert "HTML anchor" in messages[0]
+
+
+def test_html_anchor_without_an_href_is_not_reported(tmp_path):
+    # A bare <a name="..."> names a destination rather than carrying one, so there is nothing
+    # to verify and nothing to complain about.
+    _write(tmp_path, "README.md", '# Readme\n\n<a name="top"></a>\n')
+
+    assert check_repository_links(tmp_path) == []
+
+
+def test_html_anchor_inside_code_is_not_reported(tmp_path):
+    _write(tmp_path, "README.md", '# Readme\n\n```html\n<a href="MISSING.md">g</a>\n```\n')
+
+    assert check_repository_links(tmp_path) == []
+
+
 def test_directory_target_is_accepted(tmp_path):
     _write(tmp_path, "README.md", "# Readme\n\n[vendor](vendor/)\n")
     (tmp_path / "vendor").mkdir()

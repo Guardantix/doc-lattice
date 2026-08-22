@@ -77,10 +77,12 @@ and repository hygiene checks. If a hook changes a file, re-stage it before comm
   and the exact install pins in README.md and MANAGED_CI.md synchronized. Run
   `scripts/check_version_sync.py` for every documentation or release change that can affect those
   values.
-- `scripts/check_doc_links.py` resolves every relative link and `#anchor` in the maintained
-  documents, which it takes as the sorted root `*.md` files. A target may be any
+- `scripts/check_doc_links.py` resolves every relative Markdown link and `#anchor` in the
+  maintained documents, which it takes as the sorted root `*.md` files. A target may be any
   repository-contained relative path, `docs/` staging included; absolute and external
-  destinations are out of scope. Fragments resolve through
+  destinations are out of scope. Write destinations as Markdown links: a raw HTML anchor is
+  reported rather than resolved, because reading its `href` means parsing HTML and a silent
+  skip would leave the gate green on the one link form it cannot see. Fragments resolve through
   `markdown_compat.github_heading_ids`, so renaming a heading or moving a file fails the hook
   and the CI code-quality job rather than breaking a deep link silently. Use that helper for
   GitHub heading ids: `github_slug` is a base slug with no deduplication, and `anchor_ids`
