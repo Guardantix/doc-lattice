@@ -198,7 +198,12 @@ def fetch_json(path: str) -> Response:
         connection.close()
     try:
         return Response(status=status, payload=json.loads(body))
-    except json.JSONDecodeError as error:
+    except (json.JSONDecodeError, UnicodeDecodeError) as error:
+        # Both are `ValueError`, and neither is caught by `check`, so letting either escape would
+        # end the run on a traceback -- with the interpreter's exit 1, which is this script's
+        # *finding* code. An unreadable body would then read as a mislabeled pin, which is the one
+        # confusion the finding-versus-failure split exists to prevent. `json.loads` decodes bytes
+        # itself, so invalid UTF-8 raises the decode error rather than the JSON one.
         if status != _HTTP_OK:
             return Response(status=status, payload=None)
         raise TransportError(f"GET {path} did not return JSON: {error}") from error

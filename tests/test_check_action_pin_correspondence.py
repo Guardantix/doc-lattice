@@ -441,6 +441,44 @@ def test_fetch_json_carries_an_error_status_whose_body_is_not_json(monkeypatch):
     assert (response.status, response.payload) == (502, None)
 
 
+def test_fetch_json_carries_an_error_status_whose_body_is_not_utf_8(monkeypatch):
+    # `json.loads` decodes bytes itself, so a body that is not valid UTF-8 raises
+    # `UnicodeDecodeError` rather than `JSONDecodeError`. Both are `ValueError` and neither is
+    # caught by `check`, so an escape would end the run on a traceback carrying the interpreter's
+    # exit 1 -- this script's *finding* code -- and an unreadable proxy page would report as a
+    # mislabeled pin.
+    # The invalid byte is deliberately not the first one: a leading `\xff\xfe` is a UTF-16 BOM,
+    # which `json.detect_encoding` honors, so it decodes and raises the *JSON* error instead --
+    # exercising the other branch and passing whether or not the decode error is handled.
+    connection, _constructed = _fake_connection(502, b"<html>\xff bad gateway</html>")
+    monkeypatch.setattr(http.client, "HTTPSConnection", connection)
+
+    response = fetch_json(_PROBE)
+
+    assert (response.status, response.payload) == (502, None)
+
+
+def test_fetch_json_raises_when_a_success_is_not_utf_8(monkeypatch):
+    connection, _constructed = _fake_connection(200, b'{"sha": "\xff\xfe"}')
+    monkeypatch.setattr(http.client, "HTTPSConnection", connection)
+
+    with pytest.raises(TransportError, match="did not return JSON"):
+        fetch_json(_COMMITS)
+
+
+def test_an_unreadable_body_reaches_the_failure_channel(monkeypatch, capsys):
+    # The end of the path the two tests above start. Exit 2, not 1, and the other pin is still
+    # checked -- which is the whole reason the transport raises a type `check` recognizes.
+    monkeypatch.delenv("GITHUB_STEP_SUMMARY", raising=False)
+    connection, _constructed = _fake_connection(200, b"<html>\xff not utf-8</html>")
+    monkeypatch.setattr(http.client, "HTTPSConnection", connection)
+
+    code = main(["--pin", CHECKOUT_USES], fetch_json)
+
+    assert code == 2
+    assert "::error::infrastructure failure:" in capsys.readouterr().err
+
+
 def test_fetch_json_raises_when_the_request_produced_no_status(monkeypatch):
     connection, _constructed = _fake_connection(
         0, b"", error=OSError("Temporary failure in name resolution")
