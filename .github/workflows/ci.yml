@@ -76,7 +76,25 @@ jobs:
       # 3.13 the same configuration falls back to the C tracer, which roughly doubles the suite's
       # runtime to re-measure a number the other leg already enforces. pytest reads this variable
       # itself, so the run body below stays free of workflow expressions.
-      PYTEST_ADDOPTS: ${{ matrix.python == '3.13' && '--no-cov' || '' }}
+      #
+      # Every pytest job here also runs the suite across worker processes, for the reason this
+      # comment records once and the two jobs below refer back to. The suite's cost is flat --
+      # roughly 3100 tests at about 19ms each, with no test above three seconds -- so there is no
+      # hot path to shorten and process parallelism is the only lever. `auto` matches the four
+      # vCPUs a public repository's `ubuntu-latest` runner has, which is also where the measured
+      # gain stops: two workers cut the suite from about 59s to 33s, four to 18s, and eight to
+      # 17s. A larger runner would buy nothing.
+      #
+      # `--dist loadfile` is required, not a tuning choice. The default `load` distributes single
+      # tests, which splits `tests/test_reconcile_fuzz.py` across workers and breaks the corpus
+      # floor at the end of it: that test asserts over a module-level accumulator the other 2196
+      # tests in the file populate, so a worker holding a subset sees claims that fired nowhere
+      # and fails. `loadfile` keeps a file whole on one worker, which restores the session state
+      # that test is documented to depend on. Anything that redistributes below file granularity
+      # has to leave that file intact.
+      PYTEST_ADDOPTS: >-
+        -n auto --dist loadfile
+        ${{ matrix.python == '3.13' && '--no-cov' || '' }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
@@ -121,8 +139,9 @@ jobs:
         clib: [true, false]
     env:
       # The `tests` job owns the coverage gate; this leg only asks whether the suite still
-      # passes against a different parser build.
-      PYTEST_ADDOPTS: --no-cov
+      # passes against a different parser build. It carries the same worker settings, and the
+      # `tests` job records why `--dist loadfile` is load-bearing rather than tuning.
+      PYTEST_ADDOPTS: --no-cov -n auto --dist loadfile
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
@@ -159,8 +178,10 @@ jobs:
     runs-on: ubuntu-latest
     env:
       # The `tests` job owns the coverage gate; this leg only asks whether the CLI's exit-code
-      # contract still holds against the oldest `rich` the project declares.
-      PYTEST_ADDOPTS: --no-cov
+      # contract still holds against the oldest `rich` the project declares. It carries the same
+      # worker settings, and the `tests` job records why `--dist loadfile` is load-bearing rather
+      # than tuning.
+      PYTEST_ADDOPTS: --no-cov -n auto --dist loadfile
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
