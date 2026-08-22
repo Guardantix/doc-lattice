@@ -26,6 +26,24 @@ moves. See **Changed** below.
 
 ### Changed
 
+- A reconcile commit that loses its journal to a failed committed marker, and then cannot restore
+  the prepared journal either, no longer tells you to run `doc-lattice reconcile --recover`. In
+  that one state there is no journal for recovery to read, so the command could only report each
+  retained before stage as an opaque orphan and exit 2, with nothing tying a stage back to the
+  destination it belongs to. The diagnostic now says the journal is absent, states that every
+  destination reached its after image and that no rollback was attempted, and lists each
+  destination with the digest it should currently hold, its retained before stage, and that
+  stage's digest, so the manual restore it prescribes is one you can actually carry out and
+  verify.
+
+  A failed reset is not read as an absent journal on its own. The commit classifies the journal
+  path before choosing what to say, and only a confirmed-absent journal drops the instruction: an
+  exact prepared journal and a visible committed marker each still prescribe `--recover`, which
+  acts on either, and so does anything else found there, which recovery authenticates and refuses
+  safely when it cannot. Every state where the prepared journal is not the file on disk now
+  carries the entry mapping with it, the committed marker excepted, where the transaction is
+  durable and nothing should be restored. RECONCILE.md owns the resulting state.
+
 - A rejected `init` input now reports `VALIDATION_ERROR` rather than `CONFIG_ERROR`. `init` writes
   `.doc-lattice.yml` and never reads one, so a bad `--docs-root`, `--linear-team`, or
   `--default-branch` was pointing the user at a file that did not exist yet and had nothing to do
