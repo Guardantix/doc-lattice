@@ -58,7 +58,11 @@ def _print_reconcile_lines(
     # The basename is still repo-controlled, so it is displayed rather than interpolated raw.
     name = escape(format_path_for_display(Path(path.name)))
     for target_ref in sorted(applied):
-        runtime.stdout.print(f"{verb} {name}: {escape(target_ref)}")
+        # soft_wrap: each record is one line at any width, so a long document name or target
+        # ref stays intact instead of hard-wrapping mid-token. Same contract the impact,
+        # check, lint, and stale-shipped renderers carry, and the one _report_recovery below
+        # already opts into for its journal paths.
+        runtime.stdout.print(f"{verb} {name}: {escape(target_ref)}", soft_wrap=True)
 
 
 def _journal_selector(
@@ -114,7 +118,9 @@ def _report_reconcile(
     for rewrite in rewrites:
         _print_reconcile_lines(runtime, rewrite.path, rewrite.applied, dry_run=dry_run)
     if not rewrites:
-        runtime.stdout.print("nothing to reconcile")
+        # The all-clear is a print like any other, so it carries the same one-record contract:
+        # 20 characters must not wrap into two lines on a narrower console.
+        runtime.stdout.print("nothing to reconcile", soft_wrap=True)
 
 
 _RECOVERY_SUMMARIES: dict[RecoveryAction, str] = {

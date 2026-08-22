@@ -276,6 +276,14 @@ message text, and exit codes are unchanged. See **Fixed** below and AD-41 in ARC
   offered version 2's `provenance`. Every other invalid-journal diagnostic is unchanged, and what
   the journal format accepts is unchanged. AD-35 in ARCHITECTURE.md owns the extension to this
   boundary and AD-36 records that its own provenance decision does not move.
+- `reconcile` no longer hard-wraps its human output at the terminal width. Each per-file record
+  (`reconciled 'pc-design.md': art-direction#accent`) and the `nothing to reconcile` all-clear are
+  now one record on one line at any width, so a long document name or target ref stays intact for
+  a line-oriented pipeline instead of breaking mid-token on a narrow console. These were the last
+  human-output prints outside the one-record-per-line contract the `impact`, `check`, `lint`, and
+  `linear stale-shipped` renderers already carry, and the one `reconcile --recover` had already
+  opted into for its own journal-path lines. Styling is unaffected -- these are CLI adapters
+  covered by the console-wide `--no-color` lever -- and `--format json` output is unchanged.
 
 ## [5.0.0] - 2026-08-19
 
