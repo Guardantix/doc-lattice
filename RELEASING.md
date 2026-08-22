@@ -344,7 +344,12 @@ A pinned action is pinned to a commit SHA, so it cannot tell you it has gone sta
 GitHub signals do that instead: Dependabot opens a pull request when an upstream publishes a newer
 release, and the `Action runtime audit` workflow goes red when the runner annotates a completed run
 about a deprecated runtime. AD-42 in [ARCHITECTURE.md](ARCHITECTURE.md) records why those two and
-not a manifest auditor. This section owns what to do when either one fires.
+not a manifest auditor.
+
+A third signal answers a different question: not whether the pin is current, but whether it is the
+release it says it is. `Action pin correspondence` resolves each shipped pin's SHA against the tag
+its trailing `# vX.Y.Z` comment names, monthly and on demand, and AD-43 records why that needs
+asking at all. This section owns what to do when any of the three fires.
 
 ### A Dependabot pull request
 
@@ -378,6 +383,18 @@ them.
 Dependabot stops rebasing a pull request once a human pushes to it. The branch is yours from that
 point, so rebase it onto `main` yourself if it falls behind.
 
+Before you merge a coupled bump, check the new pair against the upstream release rather than only
+against the other copies of itself, which is all the suite compares:
+
+```bash
+uv run python scripts/check_action_pin_correspondence.py
+```
+
+That is the same script `Action pin correspondence` runs, and it needs network access, so it is
+not part of `uv run --group dev pytest`. Run it from the branch. A clean run means each SHA really
+is the release its comment names; a finding means the pair is wrong and merging it would ship a
+mislabeled pin to every adopter.
+
 ### A red `Action runtime audit` run
 
 `Action runtime audit` runs after every completed CI or Claude Code run and reads that run's job
@@ -402,6 +419,48 @@ gh run list --workflow "Action runtime audit"
 The fix is a version bump rather than a workflow change. Find the newest release of the action the
 summary names and take it through the procedure above: the open Dependabot pull request if there is
 one, or the same coupled edit by hand for a `shipped-pins` action if there is not.
+
+### A red `Action pin correspondence` run
+
+`Action pin correspondence` runs monthly and on demand. It asks GitHub, for each of the two shipped
+pins, whether the SHA is the commit the trailing `# vX.Y.Z` comment names. Every other check in the
+repository compares our own text to another copy of our own text, so a SHA paired with the wrong
+release passes all of them; this is the only one that can disagree with the comment.
+
+Read the job summary before the failure line, because the run reports two different things and
+only one of them is about the pins:
+
+| Result | What it means | What to do |
+|--------|---------------|------------|
+| `finding` | The pin and its comment disagree, the tag is gone, or the comment is not an exact release | The coupled edit above, once you have decided which half is wrong |
+| `failure` | The check could not establish correspondence: authentication, rate limit, transport, an unexpected status, or an unreadable payload | Nothing about the pins. Re-dispatch, and look at the status the summary names |
+
+The exit codes carry the same split, 1 for a finding and 2 for a failure, and a finding wins when
+both happen in one run. Resolving a finding means deciding which half is wrong, and the answer is
+usually the comment: the SHA is what actually runs, and it is the half every workflow and every
+adopter executes. Take the correction through the coupled-edit table above so `constants.py`,
+`MANAGED_CI.md`, and the spelled-out test copies move together. A missing tag is the other shape:
+upstream deleted or retagged the release, and the pin now names a commit no release resolves to.
+That is a bump, not a comment fix.
+
+Re-run it on demand, which is how you confirm a fix without waiting a month:
+
+```bash
+gh workflow run "Action pin correspondence"
+gh run list --workflow "Action pin correspondence"
+```
+
+To reproduce a finding locally, or to prove the check still catches one, pass a deliberately wrong
+pair rather than editing `constants.py`, which every parity test holds every copy to:
+
+```bash
+uv run python scripts/check_action_pin_correspondence.py \
+  --pin "actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.0"
+```
+
+Like the runtime audit, this is a notice and not a pull-request check: it is scheduled and manual
+only, it is not one of the four protected contexts below, and nothing turns red until somebody
+looks.
 
 ## Accounts and access
 

@@ -57,6 +57,22 @@ message text, and exit codes are unchanged. See **Fixed** below and AD-41 in ARC
   releases that target Node.js 20. No shipped pin moves in this change: both mechanisms report, and
   every pin stays exactly where it was. AD-42 in ARCHITECTURE.md records the decision, including
   why a manifest-fetching auditor and a tail job inside `ci.yml` were both rejected.
+- A new `Action pin correspondence` workflow asks GitHub whether each shipped pin's SHA really is
+  the commit its trailing `# vX.Y.Z` comment names. Every other check compares this repository's
+  text against another copy of this repository's text, so a SHA paired with the wrong release is
+  self-consistent in every file and passes green everywhere, while the comment is what a reader and
+  an adopter use to judge what the pin is. `scripts/check_action_pin_correspondence.py` holds the
+  logic: it reads the two pairs from `constants.py`, refuses a non-exact comment such as `v7`,
+  probes each tag's reference for existence, resolves it through the commits endpoint so an
+  annotated tag is peeled to its commit, and writes a job summary. A wrong comment, a deleted or
+  retagged upstream release, and a SHA advanced past every tag are all reported as correspondence
+  findings, and are kept distinct from infrastructure failures such as a rate limit or an outage,
+  which say nothing about the pins. The check runs monthly and on `workflow_dispatch`; it is a
+  notice rather than a gate and is not one of the four protected contexts, because the answer needs
+  network access and the pull-request suite stays offline. No pin moves in this change. AD-43 in
+  ARCHITECTURE.md records the decision and amends AD-42, whose conclusion that a wrong comment can
+  only enter by hand edit holds at authorship time alone: a Git tag is mutable, and the pinned
+  `actions/checkout` release reports `immutable: false`.
 
 ### Changed
 

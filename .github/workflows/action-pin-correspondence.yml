@@ -1,0 +1,36 @@
+name: Action pin correspondence
+
+on:
+  workflow_dispatch:
+  schedule:
+    # Mid-month, deliberately away from the monthly Dependabot wave. Dependabot answers "a newer
+    # release exists"; this answers "the SHA we hold is still the release our comment names", and
+    # the interesting window for the second question is the one between bumps.
+    - cron: '0 6 15 * *'
+
+# Asks GitHub whether each shipped pin's SHA really is the commit its trailing `# vX.Y.Z` comment
+# claims. Every other check compares our own text to our own text, so a SHA paired with the wrong
+# release is self-consistent everywhere and passes green. AD-42 in ARCHITECTURE.md records why this
+# runs alongside Dependabot and the `Action runtime audit` rather than replacing either.
+#
+# Scheduled and manual only, never a pull-request check: the answer needs network access, so it
+# cannot live in the offline suite that gates every pull request, and RELEASING.md records exactly
+# four protected contexts that this deliberately does not join. Like the runtime audit, it is a red
+# notice somebody has to look at.
+jobs:
+  correspondence:
+    name: Action pin correspondence
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
+      - run: uv python install 3.14
+      - run: uv sync --locked
+      - name: Check each pin against the release its comment names
+        env:
+          # A public read either way, so this buys the authenticated rate limit rather than
+          # access. `contents: read` above is the whole grant.
+          GITHUB_TOKEN: ${{ github.token }}
+        run: uv run --no-sync python scripts/check_action_pin_correspondence.py
