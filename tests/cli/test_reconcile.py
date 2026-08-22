@@ -1134,6 +1134,20 @@ def test_reconcile_real_run_reports_reconciled_lines(lattice_dir: Path, monkeypa
     assert "reconciled 'pc-design.md': art-direction#motion" in result.stdout
 
 
+def test_reconcile_keeps_every_record_on_one_line_at_any_width(lattice_dir: Path, monkeypatch):
+    # Same one-record-per-line contract the impact, check, lint, and stale-shipped renderers
+    # already carry: a document name or target ref that survives a pipe today must stay intact
+    # at any terminal width rather than hard-wrapping mid-token into a fragment. `--ref` narrows
+    # the run to a single record so the expectation is one exact line.
+    monkeypatch.setenv("COLUMNS", "20")
+    monkeypatch.chdir(lattice_dir)
+    result = runner.invoke(
+        app, ["reconcile", "pc-design", "--ref", "art-direction#accent", "--dry-run"]
+    )
+    assert result.exit_code == 0
+    assert result.stdout == "would reconcile 'pc-design.md': art-direction#accent\n"
+
+
 def test_reconcile_dry_run_leaves_files_unchanged(lattice_dir: Path, monkeypatch):
     monkeypatch.chdir(lattice_dir)
     docs = lattice_dir / "docs"
@@ -1230,6 +1244,18 @@ def test_reconcile_dry_run_after_clean_reports_nothing_to_reconcile(lattice_dir:
     result = runner.invoke(app, ["reconcile", "--all", "--dry-run"])
     assert result.exit_code == 0
     assert "nothing to reconcile" in result.stdout
+
+
+def test_reconcile_keeps_the_all_clear_on_one_line_at_any_width(lattice_dir: Path, monkeypatch):
+    # The all-clear branch is a print like any other, and it cannot occur in the same run as a
+    # record, so it needs its own regression. `nothing to reconcile` is exactly 20 characters,
+    # so the width has to sit below 20 for an unwrapped line to prove anything.
+    monkeypatch.setenv("COLUMNS", "15")
+    monkeypatch.chdir(lattice_dir)
+    assert runner.invoke(app, ["reconcile", "--all"]).exit_code == 0  # real run clears drift
+    result = runner.invoke(app, ["reconcile", "--all", "--dry-run"])
+    assert result.exit_code == 0
+    assert result.stdout == "nothing to reconcile\n"
 
 
 def test_reconcile_json_after_clean_reports_empty_list(lattice_dir: Path, monkeypatch):
