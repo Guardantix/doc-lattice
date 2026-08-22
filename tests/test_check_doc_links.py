@@ -443,6 +443,35 @@ def test_messages_are_ordered_by_document_then_by_link(tmp_path):
     assert messages[2].startswith("'ZULU.md'")
 
 
+def test_uppercase_markdown_suffix_is_still_fragment_checked(tmp_path):
+    # GitHub renders any case of the suffix as Markdown, so a case-sensitive suffix test would
+    # accept a dead anchor on GUIDE.MD -- the silent skip this gate exists to prevent.
+    _write(tmp_path, "README.md", "# Readme\n\n[x](GUIDE.MD#no-such-heading)\n")
+    _write(tmp_path, "GUIDE.MD", "# Guide\n\n## Section\n")
+
+    messages = check_repository_links(tmp_path)
+
+    assert len(messages) == 1
+    assert "no-such-heading" in messages[0]
+
+
+def test_links_and_raw_anchors_are_ordered_by_line_within_a_document(tmp_path):
+    # Collecting every link message before every anchor message would print line 7 first.
+    _write(
+        tmp_path,
+        "README.md",
+        '# Readme\n\n<a href="MISSING.md">g</a>\n\npara\n\n[x](ALSO-MISSING.md)\n',
+    )
+
+    messages = check_repository_links(tmp_path)
+
+    assert len(messages) == 2
+    assert messages[0].startswith("'README.md':3:")
+    assert "HTML anchor" in messages[0]
+    assert messages[1].startswith("'README.md':7:")
+    assert "ALSO-MISSING.md" in messages[1]
+
+
 def test_maintained_documents_are_the_sorted_root_markdown_files(tmp_path):
     _write(tmp_path, "README.md", "# Readme\n")
     _write(tmp_path, "AGENTS.md", "# Agents\n")

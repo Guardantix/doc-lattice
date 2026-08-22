@@ -37,6 +37,9 @@ _SINGLE_DOT_SEGMENTS = frozenset({".", "%2e"})
 _DOUBLE_DOT_SEGMENTS = frozenset({"..", ".%2e", "%2e.", "%2e%2e"})
 _HTML_ANCHOR_TAG = "a"
 _HTML_HREF_ATTRIBUTE = "href"
+_HTML_ANCHOR_MESSAGE = (
+    "raw HTML anchor carries a destination this check cannot resolve; write it as a Markdown link"
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -358,7 +361,7 @@ def _link_message(
     unusable = _target_message(href, target, repo_root)
     if unusable is not None:
         return unusable
-    if not fragment or target.suffix != _MARKDOWN_SUFFIX or not target.is_file():
+    if not fragment or target.suffix.lower() != _MARKDOWN_SUFFIX or not target.is_file():
         return None
     return _fragment_message(fragment, target, repo_root, cache)
 
@@ -371,9 +374,10 @@ def check_repository_links(repo_root: Path) -> list[str]:
             containment boundary every relative target must stay inside.
 
     Returns:
-        Messages in document order, sources sorted by name. Each names the source document,
-        the line its link's block starts on, and the destination as written. An empty list
-        means every relative destination and heading fragment resolves.
+        Messages in document order, sources sorted by name, with unresolvable links and raw
+        HTML anchors interleaved by line rather than grouped by kind. Each names the source
+        document, the line its link's block starts on, and the destination as written. An
+        empty list means every relative destination and heading fragment resolves.
     """
     root = repo_root.resolve()
     cache: dict[Path, frozenset[str]] = {}
@@ -381,15 +385,16 @@ def check_repository_links(repo_root: Path) -> list[str]:
     for document in maintained_documents(root):
         source = format_path_for_display(document.relative_to(root).as_posix())
         text = document.read_text(encoding="utf-8")
+        found: list[tuple[int, str]] = []
         for link in extract_links(text):
             message = _link_message(link, document, root, cache)
             if message is not None:
-                messages.append(f"{source}:{link.line}: {message}")
-        messages.extend(
-            f"{source}:{line}: raw HTML anchor carries a destination this check cannot "
-            f"resolve; write it as a Markdown link"
-            for line in html_anchor_lines(text)
-        )
+                found.append((link.line, message))
+        found.extend((line, _HTML_ANCHOR_MESSAGE) for line in html_anchor_lines(text))
+        # Stable sort, so a link and an anchor reported on one line keep the order they were
+        # collected in and the two kinds of finding interleave by line rather than by kind.
+        found.sort(key=lambda entry: entry[0])
+        messages.extend(f"{source}:{line}: {message}" for line, message in found)
     return messages
 
 
