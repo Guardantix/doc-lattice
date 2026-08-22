@@ -37,16 +37,19 @@ breaking, so the window is open again as a fact rather than by choice, and the n
 Admission is unchanged and still narrow on purpose: an item belongs here only if it is breaking,
 or if it has to be true at the moment a major ships. Everything else waits for 6.x, which is what
 keeps this release from staying open indefinitely. Applying that rule admitted nine here rather
-than three, six of them moved back in from the minor train, and a tenth moved forward from 7.0
-on 2026-08-22 once its direction settled on a breaking refusal rather than a Git-root resolution.
+than three, six of them moved back in from the minor train. Two more were admitted on 2026-08-22:
+GTX-153 moved forward from 7.0 once its direction settled on a breaking refusal rather than a
+Git-root resolution, and GTX-279 was filed because the README pass had already landed when the
+window was held open.
 
-Six of those nine have since landed and wait in `## [Unreleased]` beside GTX-212 and GTX-214:
+Seven of those nine have since landed and wait in `## [Unreleased]` beside GTX-212 and GTX-214:
 reconcile's lock diagnostics (GTX-238, which GTX-212's own review spawned into this section),
 `PYTHONWARNINGS=error` (GTX-202), the broken stderr pipe (GTX-201), the load-cache write warning
 (GTX-221), the journal's own validation diagnostic (GTX-227), and the codes `init` reports for a
-value it rejects before writing anything (GTX-216). One was canceled rather than worked:
+value it rejects before writing anything (GTX-216), and the README pass itself (GTX-113, PR
+#301). One was canceled rather than worked:
 reconcile's post-load re-parse warning (GTX-200), which the PR that spawned it had already fixed.
-Three are still open -- GTX-153 and GTX-113 below, and GTX-213, the sweep this document's
+Three are still open -- GTX-153 and GTX-279 below, and GTX-213, the sweep this document's
 inventory now rests on, which closes with that sweep and so is not carried below as pending work.
 
 - Decouple fetching `init`'s printed snippets from its directory-sensitive config write, and stop
@@ -57,12 +60,11 @@ inventory now rests on, which closes with that sweep and so is not carried below
   change and so belongs in a major. The refusal keeps `init`'s current-directory contract and
   resolves no Git root, so it needs no ARCHITECTURE decision, only a CHANGELOG migration note
   and the README changes the issue lists. The issue's thread records the direction.
-- Make README describe what 6.0 actually prints and enforces (GTX-113). This still lands last, on
-  the rule that the README pass cannot land ahead of the behavior it documents. All sixteen of
-  its recorded blockers are satisfied history -- each either shipped in 5.0.0, waits in
-  `## [Unreleased]`, or was canceled with GTX-200 -- and GTX-153 above is the one item now in
-  front of it, since it changes what `init` does and what README's command table and Upgrading
-  section say about it.
+- Make README describe what 6.0 actually prints and enforces at the tag (GTX-279). GTX-113 did
+  this once, and PR #301 landed it, but the window was then held open and behavior has landed
+  since, so the same rule applies again: the README pass cannot land ahead of the behavior it
+  documents, and this one lands last, after GTX-153 above and anything else admitted before the
+  tag. It audits the `## [Unreleased]` entries merged after GTX-113 rather than repeating it.
 
 ## 6.x: make the honor-system rules mechanical
 
