@@ -15,6 +15,7 @@ include = [
 ]
 exclude = [
     "/tests/test_bench_sections.py",
+    "/tests/test_check_doc_links.py",
     "/tests/test_check_version_sync.py",
     "/tests/test_extract_release_notes.py",
     "/tests/test_release_gate.py",

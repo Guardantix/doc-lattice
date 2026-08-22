@@ -238,6 +238,38 @@ class _Slugger:
         return result
 
 
+def github_heading_ids(headings: list[Heading]) -> list[str]:
+    """Return the GitHub heading id each heading would render with.
+
+    GitHub has no explicit ``{#anchor}`` syntax, so a marker is slugged as literal heading
+    text: ``## Notes {#n}`` renders the id ``notes-n``. This is the namespace a Markdown
+    ``#fragment`` link resolves against when the document is viewed on GitHub, and it is
+    where ``anchor_ids`` deliberately differs -- that function substitutes doc-lattice's
+    explicit identity for the same heading and is not a substitute here. ``github_slug`` is
+    not one either: it is a base slug with no deduplication, so repeated headings collapse
+    onto a single id.
+
+    The slug is taken from ``Heading.text``, which is raw inline source rather than rendered
+    text, matching what ``anchor_ids`` has always slugged. The two agree wherever the pinned
+    strip class removes the markup itself -- backticks, emphasis runs, and the brackets in
+    ``## [1.0.0] - 2026-01-01`` all fall out on both sides. They diverge for a heading whose
+    source carries text GitHub does not display, an inline link being the reachable case:
+    ``## [Guide](target.md)`` yields ``guidetargetmd`` here and ``guide`` on GitHub. No
+    heading in the supported subset needs that today; closing it means rendering inline
+    content inside this adapter, which is a wider change than the heading grammar this module
+    declares.
+
+    Args:
+        headings: Supported headings in document order.
+
+    Returns:
+        Ids positionally aligned with ``headings``, deduplicated in document order by the
+        pinned github-slugger collision rule.
+    """
+    slugger = _Slugger()
+    return [slugger.slug(heading.text) for heading in headings]
+
+
 def anchor_ids(headings: list[Heading]) -> list[str]:
     """Return one explicit or generated addressable id per heading.
 
@@ -247,12 +279,10 @@ def anchor_ids(headings: list[Heading]) -> list[str]:
     Returns:
         Addressable ids positionally aligned with ``headings``.
     """
-    slugger = _Slugger()
-    ids: list[str] = []
-    for heading in headings:
-        unique = slugger.slug(heading.text)
-        ids.append(heading.anchor if heading.anchor is not None else unique)
-    return ids
+    return [
+        heading.anchor if heading.anchor is not None else generated
+        for heading, generated in zip(headings, github_heading_ids(headings), strict=True)
+    ]
 
 
 def strip_heading_anchor(text: str) -> str:

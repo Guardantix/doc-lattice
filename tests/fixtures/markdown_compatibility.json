@@ -7,6 +7,7 @@
       {"level": 2, "text": "After", "anchor": null, "line": 14}
     ],
     "anchor_ids": ["top", "after"],
+    "github_ids": ["top", "after"],
     "spans": [[1, 14], [14, 14]]
   },
   {
@@ -19,6 +20,7 @@
       {"level": 4, "text": "Example {#bad}##", "anchor": null, "line": 4}
     ],
     "anchor_ids": ["c-guide", "accent", "use-id-in-examples", "example-bad"],
+    "github_ids": ["c-guide", "accent-accent", "use-id-in-examples", "example-bad"],
     "spans": [[1, 4], [2, 4], [3, 4], [4, 4]]
   },
   {
@@ -32,6 +34,7 @@
       {"level": 2, "text": "Notes-1", "anchor": null, "line": 5}
     ],
     "anchor_ids": ["notes", "notes-1", "n", "notes-n-1", "notes-1-1"],
+    "github_ids": ["notes", "notes-1", "notes-n", "notes-n-1", "notes-1-1"],
     "spans": [[1, 1], [2, 2], [3, 3], [4, 4], [5, 5]]
   },
   {
@@ -44,6 +47,7 @@
       {"level": 2, "text": "Привет 你好", "anchor": null, "line": 4}
     ],
     "anchor_ids": ["привет-你好", "é-under‿score", "", "привет-你好-1"],
+    "github_ids": ["привет-你好", "é-under‿score", "", "привет-你好-1"],
     "spans": [[1, 1], [2, 2], [3, 3], [4, 4]]
   },
   {
@@ -55,6 +59,7 @@
       {"level": 6, "text": "Six", "anchor": null, "line": 5}
     ],
     "anchor_ids": ["", "-1", "six"],
+    "github_ids": ["", "-1", "six"],
     "spans": [[1, 5], [2, 5], [5, 5]]
   },
   {
@@ -67,6 +72,7 @@
       {"level": 2, "text": "Peer {#peer}", "anchor": "peer", "line": 7}
     ],
     "anchor_ids": ["top", "child", "nested", "peer"],
+    "github_ids": ["top-top", "child-child", "nested-nested", "peer-peer"],
     "spans": [[1, 8], [3, 6], [5, 6], [7, 8]]
   },
   {
@@ -76,6 +82,7 @@
       {"level": 1, "text": "Top level", "anchor": null, "line": 6}
     ],
     "anchor_ids": ["top-level"],
+    "github_ids": ["top-level"],
     "spans": [[6, 6]]
   },
   {
@@ -85,6 +92,7 @@
       {"level": 1, "text": "Visible", "anchor": null, "line": 2}
     ],
     "anchor_ids": ["visible"],
+    "github_ids": ["visible"],
     "spans": [[2, 3]]
   },
   {
@@ -95,6 +103,7 @@
       {"level": 2, "text": "After", "anchor": null, "line": 5}
     ],
     "anchor_ids": ["before", "after"],
+    "github_ids": ["before", "after"],
     "spans": [[1, 5], [5, 5]]
   },
   {
@@ -104,6 +113,7 @@
       {"level": 1, "text": "Before", "anchor": null, "line": 1}
     ],
     "anchor_ids": ["before"],
+    "github_ids": ["before"],
     "spans": [[1, 3]]
   },
   {
@@ -116,6 +126,7 @@
       {"level": 2, "text": "Other {#third}", "anchor": "third", "line": 4}
     ],
     "anchor_ids": ["same", "same", "third", "third"],
+    "github_ids": ["first-same", "second-same", "third", "other-third"],
     "spans": [[1, 1], [2, 2], [3, 3], [4, 4]]
   }
 ]

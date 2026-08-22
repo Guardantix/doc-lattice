@@ -43,6 +43,7 @@ uv run --group dev ruff format --check src tests
 uv run --group dev ty check src
 uv run --group dev python scripts/check_typing_boundaries.py src
 uv run --group dev python scripts/check_version_sync.py
+uv run --group dev python scripts/check_doc_links.py
 uv run --group dev python scripts/generate_github_slugger_data.py --check
 uv run --group dev python scripts/bench_sections.py
 ```
@@ -76,6 +77,16 @@ and repository hygiene checks. If a hook changes a file, re-stage it before comm
   and the exact install pins in README.md and MANAGED_CI.md synchronized. Run
   `scripts/check_version_sync.py` for every documentation or release change that can affect those
   values.
+- `scripts/check_doc_links.py` resolves every relative Markdown link and `#anchor` in the
+  maintained documents, which it takes as the sorted root `*.md` files. A target may be any
+  repository-contained relative path, `docs/` staging included; absolute and external
+  destinations are out of scope. Write destinations as Markdown links: a raw HTML anchor is
+  reported rather than resolved, because reading its `href` means parsing HTML and a silent
+  skip would leave the gate green on the one link form it cannot see. Fragments resolve through
+  `markdown_compat.github_heading_ids`, so renaming a heading or moving a file fails the hook
+  and the CI code-quality job rather than breaking a deep link silently. Use that helper for
+  GitHub heading ids: `github_slug` is a base slug with no deduplication, and `anchor_ids`
+  answers a different question, doc-lattice's explicit `{#anchor}` identity.
 - Section identity is pinned to `markdown-it-py==4.2.0` and a `github-slugger@2.0.0` target.
   Never hand-edit `_github_slugger_data.py`. Node is a maintenance-only dependency for generator
   verification. Adapter, dependency, Unicode, or generated-data changes require the generator
@@ -100,7 +111,8 @@ and repository hygiene checks. If a hook changes a file, re-stage it before comm
 - Run a focused test while iterating, then run the complete verification set before handoff.
   The full pytest suite enforces coverage of at least 80 percent.
 
-For Markdown-only changes, at minimum run the version-sync guard, a relative-link check, and
-`git diff --check`. Run the full suite when commit hooks do not execute it. For production changes,
-the complete handoff verification is pytest, Ruff check and format check, `ty`, typing boundaries,
-version sync, and any generator or benchmark gate affected by the change.
+For Markdown-only changes, at minimum run `scripts/check_version_sync.py`,
+`scripts/check_doc_links.py`, and `git diff --check`. Run the full suite when commit hooks do not
+execute it. For production changes, the complete handoff verification is pytest, Ruff check and
+format check, `ty`, typing boundaries, version sync, doc links, and any generator or benchmark
+gate affected by the change.

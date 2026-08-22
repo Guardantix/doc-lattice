@@ -27,6 +27,7 @@ jobs:
       - run: uv run --no-sync ty check src/
       - run: uv run --no-sync python scripts/check_typing_boundaries.py src/
       - run: uv run --no-sync python scripts/check_version_sync.py
+      - run: uv run --no-sync python scripts/check_doc_links.py
 
   # The three `*-result` jobs below exist so branch protection can require one fixed context per
   # matrix instead of the per-leg names GitHub generates from the matrix values. Requiring the

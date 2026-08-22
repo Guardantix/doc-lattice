@@ -34,6 +34,30 @@ message text, and exit codes are unchanged. See **Fixed** below and AD-41 in ARC
 
 ### Added
 
+- `markdown_compat.github_heading_ids` returns the addressable id GitHub renders for each heading
+  in a document, deduplicated in document order by the pinned `github-slugger@2.0.0` collision
+  rule. Neither existing public function answers that: `github_slug` is a base slug with no
+  deduplication, so repeated headings collapse onto one id, and `anchor_ids` resolves
+  doc-lattice's explicit `{#anchor}` identity, which is a different namespace because GitHub has
+  no such syntax and slugs the literal marker-bearing heading instead. The new helper is a thin
+  wrapper over the existing deduplicator rather than a second collision algorithm, and
+  `anchor_ids` now derives from it, so both namespaces stay pinned to one implementation. The
+  golden compatibility fixture gains a `github_ids` column per case, which is where the
+  divergence between the two is recorded.
+- `scripts/check_doc_links.py` resolves every relative link and heading fragment in the maintained
+  root documents, and runs both as a pre-commit hook and as an explicit step in the CI
+  code-quality job, which enumerates its checks directly and never invokes pre-commit. CLAUDE.md
+  told contributors to run "a relative-link check" that the repository never defined, so every
+  contributor invented one and the anchor half was usually skipped; meanwhile the maintained
+  documents accumulated 36 deep anchor links that a renamed heading would have broken silently.
+  Link sources are the sorted root `*.md` files, a target may be any repository-contained
+  relative path, and absolute and external destinations stay out of scope. Destinations come from
+  parsed link tokens, so reference-style links are followed and link-like text inside code is not
+  a link. A destination written as a raw HTML anchor is reported rather than resolved, since
+  reading its `href` means parsing HTML and a silent skip would leave the gate green on the one
+  link form it cannot see. Containment is settled twice, once lexically on the destination as
+  written and once on where the filesystem sends it, so an in-repository symlink keeps working
+  while one leaving the repository is refused before its target is opened.
 - Dependabot now watches this repository's GitHub Actions pins. `.github/dependabot.yml` checks the
   six actions `.github/workflows/ci.yml` and `.github/workflows/claude.yml` reference once a month
   and opens one pull request per action, because a SHA-pinned action cannot report on its own that
