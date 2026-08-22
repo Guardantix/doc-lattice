@@ -32,8 +32,46 @@ derives from `ProjectError`. Catching either type, or `ProjectError`, is unaffec
 `DocumentError` is the new way to catch exactly the failures that name one document. Error codes,
 message text, and exit codes are unchanged. See **Fixed** below and AD-41 in ARCHITECTURE.md.
 
+A third thing to act on, and the only one that changes what a zero-config run does. `init` run
+from a subdirectory of a repository whose root already holds `.doc-lattice.yml` now refuses,
+exiting 2 with `VALIDATION_ERROR`, where it used to exit 0 having written a second, nested config
+carrying default settings. That nested file was never read by anything: `check`, `lint`,
+`impact`, `reconcile`, `graph`, and `linear` all select a default config from their own current
+directory, so the run reported success for a configuration no later command would ever load. If
+you have a script that runs `init` from a subdirectory, either move it to the directory holding
+the config or, when it only wanted the printed blocks, switch it to `init --print-only`, which is
+new in this release and writes nothing at all.
+
+Two bounds on that refusal are worth knowing before you read an exit 2 as a bug. The search walks
+up only as far as the nearest `.git` entry, inclusive, so a config above your checkout does not
+block a new project and a submodule or nested repository under a configured root still scaffolds
+normally. And it fires only when the current directory has no config of its own: an ordinary
+rerun at a configured root still reports that the file already exists, leaves it untouched, and
+prints, exactly as before. Nothing that used to be written is now written to a different place;
+the only outcome that moved is a write that used to happen and now does not.
+
+This was decided as a compatibility choice rather than falling out of the fix. The alternative
+was to resolve the Git root and write there, which would have overturned two documented
+behaviors -- `init` keeping its current-directory contract, and having no Git prerequisite -- and
+made the write destination depend on whether Git discovery succeeded. The refusal keeps both, so
+it needs this note and README rather than an ARCHITECTURE decision. A deliberately nested lattice
+stays supported and needs no flag: README prints the exact bytes `init` writes, so it is one
+hand-written file, and the diagnostic says so. See **Added** and **Changed** below.
+
 ### Added
 
+- `init --print-only` prints the `.gitignore`, pre-commit, and workflow blocks and writes nothing.
+  Those three are hand-maintained artifacts an adopter has to re-fetch on every upgrade, and until
+  now the only way to obtain them was a command that also scaffolds `.doc-lattice.yml`, which
+  coupled a read to a write and made the retrieval depend on which directory it ran in. The mode
+  prints byte-for-byte what an ordinary run prints and narrates the same branch and placement
+  guidance on stderr, minus the one line reporting a write. It branches ahead of every config
+  concern, so it renders no config text, runs no config validation, and is not subject to the
+  nested-scaffold refusal above: it succeeds from exactly the subdirectory where an ordinary run
+  is now declined. Only `--default-branch` affects its output; combining it with `--docs-root` or
+  `--linear-team` is refused as a usage error, uncoded and exiting 2, because those two feed only
+  the config this mode does not render and silently ignoring them would report success for a
+  request nothing acted on. README's Upgrading section now retrieves through it.
 - `markdown_compat.github_heading_ids` returns the addressable id GitHub renders for each heading
   in a document, deduplicated in document order by the pinned `github-slugger@2.0.0` collision
   rule. Neither existing public function answers that: `github_slug` is a base slug with no
@@ -100,6 +138,26 @@ message text, and exit codes are unchanged. See **Fixed** below and AD-41 in ARC
 
 ### Changed
 
+- `init` refuses to scaffold a config into a directory that has none when an ancestor inside the
+  same repository already holds one, instead of writing a nested config nothing reads. The
+  diagnostic names the configuration it found and both ways forward: run `init` in that directory,
+  or pass `--print-only` here. It is reported as `VALIDATION_ERROR`, with the other inputs `init`
+  checks before writing anything, because the directory is the input in question -- not
+  `CONFIG_ERROR`, which would name a file `init` found but still never reads, and not
+  `INIT_PERSISTENCE`, which stays exactly "an I/O failure happened". The boundary is a filesystem
+  walk for `.git`, testing for existence rather than for a directory so a linked worktree and a
+  submodule checkout are recognized by the regular file they carry. It is deliberately not a Git
+  query: `init` has no Git prerequisite, and resolving the boundary through Git would re-create
+  the resolver AD-32 retired. The consequence is stated rather than fixed -- under `GIT_DIR`,
+  `GIT_CEILING_DIRECTORIES`, or `GIT_DISCOVERY_ACROSS_FILESYSTEM` this walk and the default-branch
+  probe can disagree about where the repository begins, which costs one refusal too many or one
+  too few and never a file written in the wrong place, because the boundary bounds only the
+  refusal and never selects a destination. See **Migration** above.
+- The release smoke test now runs `init --print-only` in its throwaway directory and asserts the
+  config is absent afterwards, before the ordinary `init` run whose write it then asserts. The
+  read-only mode needed an observer, since nothing else in that step reads the directory back, and
+  keeping both runs preserves the packaged-scaffolding coverage the throwaway directory has
+  carried rather than retiring it under cover of a cleanup.
 - The declared floors for `typer` and `pydantic` rise to `>=0.26.0` and `>=2.12.0`, because
   neither of the old ones survived being run. Below typer 0.16.0, click 8.2 breaks typer outright
   and `--help` piped into a departed reader exits 2 instead of 141; from there to 0.25.1 typer

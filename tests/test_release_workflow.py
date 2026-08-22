@@ -539,12 +539,32 @@ def test_smoke_step_runs_the_packaged_cli_against_the_release_fixture():
             assert _flag_value(argv, "--config") == "${FIXTURE}"
             assert _flag_value(argv, "--from") == "${REF}"
     # The scaffolding path has no fixture to run against, so it is pinned by where it runs
-    # instead: a throwaway directory, because `init` writes into the working directory and the
-    # checkout already holds a configuration file that would mask a scaffolding regression.
-    inits = _throwaway_dir_runs(_commands(step), "doc-lattice", "init")
+    # instead: a throwaway directory, because `init` writes into the working directory and this
+    # checkout tracks no `.doc-lattice.yml` of its own for the run to collide with, so a run in
+    # the checkout root would scaffold one into the working tree of the release job.
+    commands = _commands(step)
+    inits = _throwaway_dir_runs(commands, "doc-lattice", "init")
     assert inits
     for argv in inits:
         assert _flag_value(argv, "--from") == "${REF}"
+    # GTX-153 added the read-only mode, and a smoke run of it proves nothing without an observer:
+    # nothing else in this step reads the directory afterwards, so an accidental write would land
+    # silently. Both runs share the one throwaway directory and are separated by the two
+    # assertions about it -- absent after the print-only run, present after the scaffolding one.
+    # Asserting both is what keeps the addition from quietly retiring the packaged write path,
+    # which is the coverage the throwaway directory has carried since GTX-142.
+    lines = [line.strip() for line in commands.splitlines()]
+
+    def _sole_line(predicate) -> int:
+        matches = [index for index, line in enumerate(lines) if predicate(line)]
+        assert len(matches) == 1, f"expected exactly one matching line, got {matches}"
+        return matches[0]
+
+    printing = _sole_line(lambda line: "--print-only" in line)
+    absent = _sole_line(lambda line: line == 'test ! -e "${workdir}/.doc-lattice.yml"')
+    scaffolding = _sole_line(lambda line: "doc-lattice init" in line and "--print-only" not in line)
+    present = _sole_line(lambda line: line == 'test -e "${workdir}/.doc-lattice.yml"')
+    assert printing < absent < scaffolding < present
     assert _step_index(release, "Smoke-test the commit") < _step_index(release, _TAG_STEP)
 
 

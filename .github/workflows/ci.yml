@@ -295,7 +295,10 @@ jobs:
           uvx --python 3.13 --from "${REF}" doc-lattice check --config "${FIXTURE}"
           uvx --python 3.13 --from "${REF}" doc-lattice lint --config "${FIXTURE}"
           workdir="$(mktemp -d)"
+          ( cd "${workdir}" && uvx --python 3.13 --from "${REF}" doc-lattice init --print-only )
+          test ! -e "${workdir}/.doc-lattice.yml"
           ( cd "${workdir}" && uvx --python 3.13 --from "${REF}" doc-lattice init )
+          test -e "${workdir}/.doc-lattice.yml"
 
       - name: Create and push the tag
         if: steps.gate.outputs.create_tag == 'true'

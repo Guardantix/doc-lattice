@@ -1826,7 +1826,13 @@ _MODULE_PATH_BEARING_NAMES: dict[str, frozenset[str]] = {
     # `--linear-team` together, so it holds a path only half the time, and routing a team key
     # through a path helper would use it against its own contract. That message keeps `!r`, and
     # what makes it control-safe is that it is the rejection of a control-bearing value.
-    "cli/commands/init.py": frozenset({"root", "target", "target_name"}),
+    #
+    # GTX-153 added `ancestor`: the configuration file a bounded parent walk found above the
+    # invocation directory, which the nested-scaffold refusal names. It is scoped here rather
+    # than added globally because the word reads as a graph or tree position everywhere else in
+    # this project, and `reconcile_transaction.py` already scopes its own ancestor-directory
+    # spelling as `current` for the same reason.
+    "cli/commands/init.py": frozenset({"ancestor", "root", "target", "target_name"}),
 }
 
 # Individual expressions inside scanned modules that are not paths despite the name. Every entry
