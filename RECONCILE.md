@@ -212,6 +212,46 @@ because the journal is still outstanding.
   the journal and the stages it names aside yourself. With no journal outstanding, reconcile runs
   again normally.
 
+## A lost journal after a failed committed marker
+
+One double failure ends with no journal at all. If the committed-marker replace fails in a way
+that also removes the journal, and the create that would restore the prepared journal then fails
+too, the run stops with every destination already holding its after image, no rollback attempted,
+and nothing on disk describing what ran. The before stages are retained, but a stage is only
+*named* after the destination it was written beside; it records no destination of its own, and
+recovery binds a stage to one only from a journal. So this state is outside what `--recover` can
+act on: it reports `no reconcile journal to recover`, names each retained stage as an orphaned
+artifact, deletes nothing, and exits 2.
+
+The commit diagnostic therefore stops prescribing `doc-lattice reconcile --recover` for that
+state. A failed reset is not by itself evidence that the journal is gone, so the diagnostic
+classifies the canonical journal path first and names which of four states it found:
+
+- **An exact prepared journal.** A restoring create can raise after linking the file, while
+  cleaning its own helper stage. Recovery has its authority: preserve the journal and the staged
+  evidence, then run `doc-lattice reconcile --recover`.
+- **The committed marker.** This is what remains when the marker landed and only its durability
+  step, or the reset's replace back to the prepared bytes, failed. The transaction is durable and
+  every destination holds its after image; `doc-lattice reconcile --recover` finishes cleanup.
+- **No journal.** The state above, and the only one where the recovery instruction is dropped.
+  The diagnostic says the journal is not present, states that every destination reached its after
+  image and that no rollback was attempted, and then carries out the mapping the failing process
+  is the last holder of: for each entry, the project-relative destination, the SHA-256 it should
+  currently hold, the retained before stage, and that stage's SHA-256, ordered by destination so
+  a batch over several documents always reads the same. Restore each destination from its stage
+  by hand only after checking both recorded digests: the destination against its after image,
+  since an unrelated editor may have changed it since the failure, and the stage against its
+  before image, since nothing authenticates the stage the way `--recover` would. Preserve
+  anything that does not match, for investigation, instead of copying it.
+- **Anything else at that path.** Foreign bytes, an unreadable file, a nonregular collision. The
+  instruction stays, because recovery authenticates what it finds and refuses safely when it
+  cannot, which is more than this commit can establish about a path it could not rewrite. The
+  same mapping is printed with it, since those bytes have displaced the transaction's own record
+  and nothing else on disk still holds it.
+
+That mapping is the only record of these associations once the prepared journal is not the file
+on disk, so keep the diagnostic. Nothing reconstructs it afterwards.
+
 ## Orphaned artifacts
 
 Every recovery also scans the project for transaction artifacts matching the patterns above that no

@@ -67,6 +67,7 @@ from doc_lattice.loader import build_lattice
 from doc_lattice.model import Node, NodeMeta, ParsedDoc, RawEdge
 from doc_lattice.path_utils import format_path_for_display
 from doc_lattice.reconcile_transaction import (
+    JournalEntry,
     JournalProvenance,
     JournalSelector,
     RecoveryResult,
@@ -626,6 +627,37 @@ class TestTransactionSinks:
                 )
         _assert_displayed(str(exc.value), first)
         _assert_displayed(str(exc.value), second)
+
+    def test_lost_journal_mappings_display_every_recorded_path(self, tmp_path: Path):
+        # The recorded spellings, not resolved paths: this sink renders the journal's own
+        # text, and a destination filename is repo-controlled wherever it is read from.
+        digest = "0" * 64
+        entry = JournalEntry(
+            destination=HOSTILE,
+            before_path=f"before-{HOSTILE}",
+            before_sha256=digest,
+            after_path=f"after-{HOSTILE}",
+            after_sha256=digest,
+        )
+        prepared = reconcile_transaction._PreparedTransaction(
+            journal=_LoadedJournal(
+                version=RECONCILE_JOURNAL_VERSION,
+                state="prepared",
+                entries=(entry,),
+                provenance=None,
+            ),
+            provenance=JournalProvenance(
+                created_at=datetime(2026, 1, 1, tzinfo=UTC),
+                tool_version="0.0.0",
+                selector=JournalSelector(mode="all", downstream_id=None, ref=None),
+            ),
+            entries=(),
+            journal_path=tmp_path / "journal",
+            journal_bytes=b"{}",
+        )
+        mapped = reconcile_transaction._lost_journal_entry_mappings(prepared)
+        _assert_displayed(mapped, HOSTILE)
+        _assert_displayed(mapped, f"before-{HOSTILE}")
 
     def test_dry_run_refusal_names_the_journal(self, tmp_path: Path, monkeypatch):
         journal = tmp_path / HOSTILE

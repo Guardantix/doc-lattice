@@ -793,6 +793,77 @@ def test_reconcile_recover_partial_json_names_the_unresolved_destination(
     }
 
 
+def test_reconcile_lost_journal_double_failure_maps_orphans_and_recover_cannot_act(
+    tmp_path: Path, monkeypatch
+):
+    """Drive both failures through the CLI and read what an operator is actually told.
+
+    GTX-146: the committed-marker replace loses the journal and the restoring create fails
+    too, so nothing on disk describes the transaction while both destinations hold their
+    after images. The unit suite pins the internal ``RecoveryResult``; this asserts the
+    operator-visible outcome end to end, including that the follow-on ``--recover`` really
+    is as useless as the diagnostic now says it is.
+    """
+    project = _two_downstream_project(tmp_path)
+    monkeypatch.chdir(project)
+    journal = project / RECONCILE_JOURNAL_NAME
+    real_create = transaction.atomic_create_bytes
+    marker_failed = False
+
+    def lose_journal_then_fail(path: Path, data: bytes, *, prefix: str) -> None:  # noqa: ARG001
+        nonlocal marker_failed
+        marker_failed = True
+        path.unlink()
+        raise OSError("committed marker replace failed")
+
+    def fail_journal_restore(path: Path, data: bytes, *, prefix: str) -> None:
+        if marker_failed:
+            raise OSError("prepared journal restore failed")
+        real_create(path, data, prefix=prefix)
+
+    monkeypatch.setattr(transaction, "atomic_replace_bytes", lose_journal_then_fail)
+    monkeypatch.setattr(transaction, "atomic_create_bytes", fail_journal_restore)
+
+    failed = runner.invoke(app, ["reconcile", "--all"])
+
+    assert failed.exit_code == 2
+    assert failed.stdout == ""
+    assert "rollback was not attempted" in failed.stderr
+    # The prescription an operator cannot act on is gone from the operator-visible text.
+    assert "run 'doc-lattice reconcile --recover'" not in failed.stderr
+    assert "has no journal to read" in failed.stderr
+    assert "the retained stage against its before image" in failed.stderr
+    assert "preserve any destination or stage that does not match" in failed.stderr
+    assert not journal.exists()
+    stages = sorted(project.rglob("*.doc-lattice-before.*.tmp"))
+    assert len(stages) == 2
+    for stage in stages:
+        destination = stage.parent / stage.name.split(".doc-lattice-before.")[0].lstrip(".")
+        relative = destination.relative_to(project).as_posix()
+        assert f"destination {format_path_for_display(relative)} holds after image" in (
+            failed.stderr
+        )
+        assert format_path_for_display(stage.relative_to(project).as_posix()) in failed.stderr
+        assert sha256(destination.read_bytes()).hexdigest() in failed.stderr
+        assert sha256(stage.read_bytes()).hexdigest() in failed.stderr
+
+    monkeypatch.undo()
+    monkeypatch.chdir(project)
+    crashed = _tree_snapshot(project)
+
+    recovered = runner.invoke(app, ["reconcile", "--recover"])
+
+    # Exactly the uselessness the diagnostic now names: no journal to read, both stages
+    # reported as opaque orphans, nothing tying either one back to its destination.
+    assert recovered.exit_code == 2
+    assert "no reconcile journal to recover" in recovered.stdout
+    assert "orphaned reconcile artifacts remain; nothing was deleted" in recovered.stderr
+    for stage in stages:
+        relative = stage.relative_to(project).as_posix()
+        assert f"orphaned artifact: {format_path_for_display(relative)}" in recovered.stderr
+    assert _tree_snapshot(project) == crashed
+
+
 def test_reconcile_recover_reports_orphans_without_deleting_them(tmp_path: Path, monkeypatch):
     docs = tmp_path / "docs"
     docs.mkdir()

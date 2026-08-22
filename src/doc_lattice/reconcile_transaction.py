@@ -1677,6 +1677,95 @@ def _reset_prepared_journal(
         raise ReconcilePersistenceError(message)
 
 
+def _lost_journal_entry_mappings(prepared: _PreparedTransaction) -> str:
+    """Spell every destination a manual repair must visit and the stage it reads.
+
+    Once the journal is gone the failing process is the last holder of the association
+    between a destination and the before stage retained beside it. A retained stage is
+    named after its destination but records nothing that binds it to one, and recovery
+    authenticates a stage only after a journal supplies that binding, so a diagnostic that
+    omitted the mapping would leave an operator with an opaque orphan and no way back.
+    Both recorded digests travel with it, and the remediation requires both checks rather
+    than printing them as description. The after digest is what an operator checks a
+    destination against before overwriting it, since an unrelated editor may have changed
+    it since the marker failed. The before digest is what authenticates the stage itself:
+    recovery would refuse to act on a stage that did not match its recorded digest, and a
+    manual restore has no such gate unless the diagnostic states one, so a truncated or
+    substituted stage would otherwise be copied over a valid after image.
+
+    Args:
+        prepared: The transaction whose prepared journal could not be restored.
+
+    Returns:
+        One clause per recorded entry, ordered by recorded destination so a transaction
+        over several documents always renders the same text.
+    """
+    ordered = sorted(prepared.journal.entries, key=lambda entry: entry.destination)
+    return "; ".join(
+        f"destination {format_path_for_display(entry.destination)} holds after image "
+        f"{entry.after_sha256} and is restored from retained before stage "
+        f"{format_path_for_display(entry.before_path)} with digest {entry.before_sha256}"
+        for entry in ordered
+    )
+
+
+def _failed_reset_remediation(
+    prepared: _PreparedTransaction,
+    committed_bytes: bytes,
+) -> str:
+    """Prescribe only the remediation the journal now on disk can actually support.
+
+    A reset failure is not evidence that the journal is absent. ``atomic_create_bytes`` can
+    raise after linking the file while cleaning its helper stage, and a failed replace back
+    to the prepared bytes leaves the committed marker visible, so the canonical path is
+    classified here rather than inferred from which branch raised.
+
+    Only a confirmed-absent journal drops the recovery instruction, because that is the one
+    state where recovery has nothing at all to read. Anything else still present at the path
+    is worth handing to ``--recover``, which authenticates it and refuses safely when it
+    cannot, so the prescription stays honest without being narrowed on a guess. The entry
+    mapping rides along wherever the prepared journal is not the file on disk, since the
+    transaction's own record is what an operator has otherwise lost. It is withheld from the
+    committed marker alone, where the transaction is durable and a restore-from-before-stage
+    listing would read as an invitation to undo a committed batch.
+
+    Args:
+        prepared: The transaction whose prepared journal could not be restored.
+        committed_bytes: The committed marker this commit was publishing when it failed.
+
+    Returns:
+        The remediation clause for the raised diagnostic, ending its sentence.
+    """
+    journal_path = prepared.journal_path
+    prepared_status, prepared_detail = _exact_journal_status(journal_path, prepared.journal_bytes)
+    if prepared_status == "exact":
+        return (
+            "preserve the journal and staged evidence, then run 'doc-lattice reconcile --recover'"
+        )
+    committed_status, _committed_detail = _exact_journal_status(journal_path, committed_bytes)
+    if committed_status == "exact":
+        return (
+            "the visible journal is the committed marker, so the transaction is durable and "
+            "every destination holds its after image; preserve the journal and staged "
+            "evidence, then run 'doc-lattice reconcile --recover' to finish cleanup"
+        )
+    mappings = _lost_journal_entry_mappings(prepared)
+    if prepared_status == "absent":
+        return (
+            f"{prepared_detail}, so 'doc-lattice reconcile --recover' has no journal to read "
+            "and can neither identify nor restore these destinations; every destination "
+            "reached its after image before the marker failed; restore each one by hand only "
+            "after checking both digests recorded below, the destination against its after "
+            "image and the retained stage against its before image, and preserve any "
+            f"destination or stage that does not match rather than copying it: {mappings}"
+        )
+    return (
+        "preserve the journal and staged evidence, then run 'doc-lattice reconcile --recover'; "
+        f"{prepared_detail}, so recovery may refuse it, and this is the only remaining record "
+        f"of what the transaction staged: {mappings}"
+    )
+
+
 def _abort_failed_marker(
     prepared: _PreparedTransaction,
     committed_bytes: bytes,
@@ -1688,9 +1777,8 @@ def _abort_failed_marker(
         _reset_prepared_journal(prepared, committed_bytes)
     except ReconcilePersistenceError as reset_error:
         error = ReconcilePersistenceError(
-            f"{primary}; prepared journal reset failed: {reset_error}; rollback was not attempted; "
-            "preserve the journal and staged evidence, then run "
-            "'doc-lattice reconcile --recover'"
+            f"{primary}; prepared journal reset failed: {reset_error}; rollback was not "
+            f"attempted; {_failed_reset_remediation(prepared, committed_bytes)}"
         )
         error.add_note(f"original marker failure: {exception_details(primary)}")
         error.add_note(f"journal reset failure: {exception_details(reset_error)}")

@@ -18,6 +18,7 @@ from doc_lattice.error_types import (
     ReconcileInProgressError,
     ReconcilePersistenceError,
 )
+from doc_lattice.path_utils import format_path_for_display
 from doc_lattice.reconcile import Rewrite
 from doc_lattice.reconcile_transaction import JournalSelector
 
@@ -1432,7 +1433,6 @@ def test_absent_journal_restore_failure_refuses_rollback_and_leaves_no_journal(
     assert "restoring prepared journal" in message
     assert "prepared journal restore failed" in message
     assert "rollback was not attempted" in message
-    assert "run 'doc-lattice reconcile --recover'" in message
     assert restores == []
     assert destination.read_bytes() == b"new bytes"
     # A create that failed before publication leaves the journal absent rather than
@@ -1441,6 +1441,29 @@ def test_absent_journal_restore_failure_refuses_rollback_and_leaves_no_journal(
     retained = list(tmp_path.rglob("*.tmp"))
     assert len(retained) == 1
     assert RECONCILE_BEFORE_IMAGE_INFIX in retained[0].name
+    # GTX-146 changed this deliberately. The diagnostic used to prescribe
+    # 'doc-lattice reconcile --recover' for the one state recovery cannot act on: with the
+    # journal confirmed absent there is no authority to read, so --recover can only report
+    # the retained stage as an opaque orphan. It now says so, and carries out the mapping
+    # the failing process is the last holder of.
+    assert "run 'doc-lattice reconcile --recover'" not in message
+    assert f"journal {format_path_for_display(journal)} is not present" in message
+    assert "has no journal to read" in message
+    # Both digests are preconditions, not decoration. Recovery refuses a stage that does not
+    # match its recorded digest; a manual restore has no such gate unless this text states
+    # one, so a truncated stage would otherwise be copied over a valid after image.
+    assert (
+        "restore each one by hand only after checking both digests recorded below, the "
+        "destination against its after image and the retained stage against its before "
+        "image, and preserve any destination or stage that does not match rather than "
+        "copying it"
+    ) in message
+    assert (
+        f"destination {format_path_for_display('doc.md')} holds after image "
+        f"{persistence.sha256_bytes(b'new bytes')} and is restored from retained before "
+        f"stage {format_path_for_display(retained[0].relative_to(tmp_path).as_posix())} "
+        f"with digest {persistence.sha256_bytes(b'old bytes')}"
+    ) in message
 
     monkeypatch.undo()
     crash_tree = _file_snapshot(tmp_path)
@@ -1457,6 +1480,107 @@ def test_absent_journal_restore_failure_refuses_rollback_and_leaves_no_journal(
     assert result.is_incomplete
     assert destination.read_bytes() == b"new bytes"
     assert _file_snapshot(tmp_path) == crash_tree
+
+
+def test_lost_journal_double_failure_maps_every_destination_in_recorded_order(
+    tmp_path: Path, monkeypatch
+):
+    # Two destinations prepared in reverse name order: the mapping is sorted by recorded
+    # destination, so what a multi-document transaction raises does not depend on the order
+    # the planner happened to hand the rewrites over in.
+    second = tmp_path / "b-doc.md"
+    first = tmp_path / "a-doc.md"
+    for destination in (second, first):
+        destination.write_bytes(b"old bytes")
+    rewrites = [
+        _rewrite(second, b"old bytes", b"new bytes", "up#x"),
+        _rewrite(first, b"old bytes", b"new bytes", "up#x"),
+    ]
+    real_create = reconcile_transaction.atomic_create_bytes
+    marker_failed = False
+
+    def _lose_journal_then_fail(
+        path: Path,
+        data: bytes,  # noqa: ARG001 (signature matches persistence primitive)
+        *,
+        prefix: str,  # noqa: ARG001 (signature matches persistence primitive)
+    ) -> None:
+        nonlocal marker_failed
+        marker_failed = True
+        path.unlink()
+        raise OSError("committed marker replace failed")
+
+    def _fail_journal_restore(path: Path, data: bytes, *, prefix: str) -> None:
+        if marker_failed:
+            raise OSError("prepared journal restore failed")
+        real_create(path, data, prefix=prefix)
+
+    monkeypatch.setattr(reconcile_transaction, "atomic_replace_bytes", _lose_journal_then_fail)
+    monkeypatch.setattr(reconcile_transaction, "atomic_create_bytes", _fail_journal_restore)
+
+    with pytest.raises(ReconcilePersistenceError) as caught:
+        _commit_rewrites(tmp_path, rewrites, {second: second, first: first})
+
+    message = str(caught.value)
+    assert "run 'doc-lattice reconcile --recover'" not in message
+    stages = {
+        stage.name.split(RECONCILE_BEFORE_IMAGE_INFIX)[0].lstrip("."): stage
+        for stage in tmp_path.rglob(f"*{RECONCILE_BEFORE_IMAGE_INFIX}*")
+    }
+    assert set(stages) == {"a-doc.md", "b-doc.md"}
+    mapped = [
+        (
+            f"destination {format_path_for_display(name)} holds after image "
+            f"{persistence.sha256_bytes(b'new bytes')} and is restored from retained before "
+            f"stage {format_path_for_display(stages[name].name)} "
+            f"with digest {persistence.sha256_bytes(b'old bytes')}"
+        )
+        for name in ("a-doc.md", "b-doc.md")
+    ]
+    assert "; ".join(mapped) in message
+    assert second.read_bytes() == b"new bytes"
+    assert first.read_bytes() == b"new bytes"
+
+
+def test_reset_failure_over_a_visible_committed_marker_still_prescribes_recovery(
+    tmp_path: Path, monkeypatch
+):
+    # The marker landed and only its durability step failed, so the journal an operator can
+    # see is a valid committed one. Recovery reads it and finishes cleanup, which is why a
+    # failed reset over it must not be reported as the lost-journal state.
+    destination = tmp_path / "doc.md"
+    destination.write_bytes(b"old bytes")
+    rewrite = _rewrite(destination, b"old bytes", b"new bytes", "up#x")
+    journal = tmp_path / RECONCILE_JOURNAL_NAME
+    replaces = 0
+
+    def _land_marker_then_fail(path: Path, data: bytes, *, prefix: str) -> None:  # noqa: ARG001
+        nonlocal replaces
+        replaces += 1
+        if replaces == 1:
+            path.write_bytes(data)
+            raise OSError("committed marker fsync failed")
+        raise OSError("prepared journal reset replace failed")
+
+    monkeypatch.setattr(reconcile_transaction, "atomic_replace_bytes", _land_marker_then_fail)
+
+    with pytest.raises(ReconcilePersistenceError) as caught:
+        _commit_rewrites(tmp_path, [rewrite], {destination: destination})
+
+    message = str(caught.value)
+    assert "resetting prepared journal" in message
+    assert "the visible journal is the committed marker" in message
+    assert "run 'doc-lattice reconcile --recover' to finish cleanup" in message
+    assert destination.read_bytes() == b"new bytes"
+    assert json.loads(journal.read_bytes())["state"] == "committed"
+
+    monkeypatch.undo()
+    result = _recover_transaction(tmp_path)
+
+    # The prescription is honest: recovery really does act on this journal.
+    assert result.action == "cleaned_committed"
+    assert destination.read_bytes() == b"new bytes"
+    _assert_no_transaction_artifacts(tmp_path)
 
 
 def test_restored_journal_helper_cleanup_failure_leaves_a_recoverable_prepared_journal(
@@ -1606,6 +1730,14 @@ def test_foreign_journal_bytes_refuse_the_reset_and_are_preserved_exactly(
     assert "the visible journal contains unexpected bytes" in message
     assert "rollback was not attempted" in message
     assert "run 'doc-lattice reconcile --recover'" in message
+    # GTX-146: the prescription stays, because recovery authenticates whatever is at that
+    # path and refuses safely when it cannot. What is added is the transaction's own record,
+    # which these foreign bytes have displaced and nothing else on disk still holds.
+    assert (
+        f"destination {format_path_for_display('doc.md')} holds after image "
+        f"{persistence.sha256_bytes(b'new bytes')}"
+    ) in message
+    assert "the only remaining record of what the transaction staged" in message
     # Bytes matching neither image belong to something this transaction does not own, so
     # they are evidence to preserve byte for byte rather than a journal to overwrite.
     assert restores == []
