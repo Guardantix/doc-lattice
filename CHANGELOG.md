@@ -68,13 +68,19 @@ moves. See **Changed** below.
   would otherwise invite one. The written file is otherwise unchanged and still has exactly one active
   key; nothing about config loading moves.
 
-- README.md documents the twelve printed error codes beside the exit-code table, names the
-  diagnostics that carry no code, documents the global `--version` option, and states that
+- README.md documents the twelve printed error codes beside the exit-code table, separates the
+  uncoded shapes an exit 2 can take, documents the global `--version` option, and states that
   configuration and tracked lattice frontmatter reject unknown keys and do not coerce values.
-  None of this is new behavior; all of it was undocumented. The error-code table and the sample
-  `.doc-lattice.yml` are now held to the code by tests rather than by review, so neither can
-  drift again: the table's rows must be exactly the coded domain `constants.py` declares, and
-  the sample must be byte-for-byte what a flagless `init` writes.
+  None of this is new behavior; all of it was undocumented. The uncoded shapes are given apart
+  because they are not one grammar: a usage check a command writes itself and the
+  `reconcile --recover` problem report print `error: ...`, an unexpected failure prints
+  `internal error: ...`, a usage failure the parser rejects first prints Typer's own `Usage:`
+  line and boxed `Error`, and a bare invocation prints help with no diagnostic at all. A caller
+  cannot classify every exit 2 by matching `error`, so the document says so rather than implying
+  otherwise. The error-code table and the sample `.doc-lattice.yml` are now held to the code by
+  tests rather than by review, so neither can drift again: the table's rows must be exactly the
+  coded domain `constants.py` declares, and the sample must be byte-for-byte what a flagless
+  `init` writes. Tests pin the uncoded shapes too.
 
 ### Fixed
 

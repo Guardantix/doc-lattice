@@ -910,11 +910,17 @@ scope is applied. Set the team the query targets with `linear_team` in `.doc-lat
 The exit status says how a run ended; an error code says which contract failed. Every code below
 belongs to a typed error and is printed ahead of the message, as `error (CODE): ...` on stderr.
 
-Carrying a code is not the same as exiting 2. Usage errors and the `reconcile --recover` problem
-report print an uncoded `error: ...`, and an unexpected failure prints an uncoded
-`internal error: ...`; all of those still exit 2. The parenthetical marks exactly the diagnostics
-that have a code to match on. Match on the code rather than on message text: messages are
-diagnostics and are free to change, while this domain is the documented migration surface.
+Carrying a code is not the same as exiting 2, and an uncoded run is not one shape. A usage check a
+command writes itself, such as `--indent` without `--format json`, and the `reconcile --recover`
+problem report print `error: ...`; an unexpected failure prints `internal error: ...`. A usage
+failure the parser rejects before any command runs, such as an unknown option or a missing
+argument, never reaches that renderer at all: Typer prints its own `Usage:` line and a boxed
+`Error` instead, under `--no-color` as well. Invoking `doc-lattice` with no arguments is the one
+exit 2 with no diagnostic anywhere; it prints help. So a caller cannot classify every exit-2 run by
+matching `error`, and matching a coded one is the only case this document underwrites. The
+parenthetical marks exactly the diagnostics that have a code to match on. Match on the code rather
+than on message text: messages are diagnostics and are free to change, while this domain is the
+documented migration surface.
 
 | Code | Raised when |
 |------|-------------|

@@ -380,6 +380,40 @@ def test_configless_commands_reject_config_option():
     assert "No such option: --config" in stderr
 
 
+def test_parser_rejection_carries_neither_a_code_nor_the_error_prefix():
+    """Pin the shape README's error-code section gives a parser-rejected usage failure.
+
+    A usage check an adapter writes itself prints ``error: ...`` through ``print_project_error``'s
+    uncoded sibling path. A failure Typer rejects before any command runs never reaches that
+    module, so it carries neither a code nor that prefix, and README documents the two separately.
+    """
+    result = runner.invoke(app, ["--bogus"])
+    assert result.exit_code == 2
+    stderr = Text.from_ansi(result.stderr).plain
+    # The runner invokes the app object, so the program name is its own, not the console script's.
+    # The shape is what README documents, so pin the lead-in and not the name in front of it.
+    assert stderr.startswith("Usage: ")
+    assert "No such option: --bogus" in stderr
+    assert "error:" not in stderr
+    assert "error (" not in stderr
+
+
+def test_no_arguments_prints_help_and_exits_two_with_no_diagnostic():
+    """The one exit 2 that prints no diagnostic at all, which README names as such."""
+    result = runner.invoke(app, [])
+    assert result.exit_code == 2
+    assert Text.from_ansi(result.stderr).plain == ""
+    assert "Usage: " in Text.from_ansi(result.stdout).plain
+
+
+def test_adapter_authored_usage_check_prints_the_uncoded_error_prefix():
+    """The contrasting shape: an adapter's own usage check, uncoded but prefixed."""
+    result = runner.invoke(app, ["check", "--indent", "2"])
+    assert result.exit_code == 2
+    stderr = Text.from_ansi(result.stderr).plain
+    assert stderr == "error: --indent requires --format json\n"
+
+
 @pytest.mark.parametrize("command", ["check", "lint", "impact", "linear"])
 def test_json_commands_help_lists_indent(command, monkeypatch):
     monkeypatch.delenv("NO_COLOR", raising=False)
