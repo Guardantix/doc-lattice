@@ -37,6 +37,9 @@ ACTIONABLE_LEVELS = frozenset({"warning", "failure"})
 # the runner images are deprecated in the same words, and the next runtime deprecation will be
 # worded differently from this one.
 DEPRECATION_MARKER = "deprecat"
+# The conclusion of a job the runner never started. Its check run exists and reports as
+# completed, so only the conclusion separates it from a job that ran and passed.
+_SKIPPED = "skipped"
 
 # Spelled out rather than imported from `doc_lattice.constants`, which this script cannot reach
 # under `--no-project`. These are the two pins `constants.py` ships to adopters, so a bump of
@@ -84,12 +87,14 @@ class Job:
         name: The job's display name.
         html_url: Web address of the job's log.
         status: Lifecycle state, such as ``completed``.
+        conclusion: Outcome once completed, or None while it is not.
     """
 
     id: int
     name: str
     html_url: str
     status: str
+    conclusion: str | None
 
 
 @dataclass(frozen=True)
@@ -240,6 +245,7 @@ def parse_job(payload: object) -> Job:
         name=_require_str(job, "name", "job"),
         html_url=_require_str(job, "html_url", "job"),
         status=_require_str(job, "status", "job"),
+        conclusion=_optional_str(job, "conclusion", "job"),
     )
 
 
@@ -430,16 +436,20 @@ def _audit(
 ) -> tuple[Run, list[Finding], int]:
     """Read one run and return its identity, its findings, and how many jobs were audited.
 
-    A job that has not completed has no settled annotations, so it is skipped rather than read:
-    the `workflow_run` trigger fires on completion of the run, but a cancelled run can still
-    carry jobs the runner never finished.
+    Two kinds of job are passed over rather than read, because each costs a request that cannot
+    produce a finding. A job that has not completed has no settled annotations: the
+    `workflow_run` trigger fires on completion of the run, but a cancelled run can still carry
+    jobs the runner never finished. A job the runner skipped executed no action at all, so it
+    can carry no runtime deprecation -- the same reasoning the workflow applies to a skipped
+    source run, one layer down. A `cancelled` or `failure` conclusion is read normally: those
+    jobs ran steps, and a deprecation warning from one of them is exactly what this looks for.
     """
     run = parse_run(fetch(f"/repos/{repository}/actions/runs/{run_id}"))
     jobs = [
         parse_job(entry)
         for entry in paginate(fetch, f"/repos/{repository}/actions/runs/{run_id}/jobs", "jobs")
     ]
-    completed = [job for job in jobs if job.status == "completed"]
+    readable = [job for job in jobs if job.status == "completed" and job.conclusion != _SKIPPED]
     audited = [
         (
             job,
@@ -448,9 +458,9 @@ def _audit(
                 for entry in paginate(fetch, f"/repos/{repository}/check-runs/{job.id}/annotations")
             ],
         )
-        for job in completed
+        for job in readable
     ]
-    return run, collect_findings(audited), len(completed)
+    return run, collect_findings(audited), len(readable)
 
 
 def main(argv: Sequence[str] | None = None, fetch: Callable[[str], object] = fetch_json) -> int:

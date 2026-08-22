@@ -54,13 +54,15 @@ _RUN_PAYLOAD = {
 }
 
 
-def _job_payload(job_id: int, name: str, status: str = "completed") -> dict:
+def _job_payload(
+    job_id: int, name: str, status: str = "completed", conclusion: str = "success"
+) -> dict:
     return {
         "id": job_id,
         "name": name,
         "html_url": f"https://github.com/{_REPOSITORY}/actions/runs/{_RUN_ID}/job/{job_id}",
         "status": status,
-        "conclusion": "success" if status == "completed" else None,
+        "conclusion": conclusion if status == "completed" else None,
     }
 
 
@@ -81,6 +83,7 @@ def _job(job_id: int, name: str, status: str = "completed"):
         name=payload["name"],
         html_url=payload["html_url"],
         status=payload["status"],
+        conclusion=payload["conclusion"],
     )
 
 
@@ -317,6 +320,43 @@ def test_main_skips_jobs_that_have_not_completed(monkeypatch, capsys):
     assert code == 0
     assert any("/check-runs/1/annotations" in call for call in calls)
     assert not any("/check-runs/2/annotations" in call for call in calls)
+    assert "Jobs audited: 1." in capsys.readouterr().out
+
+
+def test_main_skips_jobs_the_runner_never_started(monkeypatch, capsys):
+    # A skipped job executed no action, so it can carry no runtime deprecation: reading one
+    # spends a request per skipped job to learn nothing. This is the reasoning the workflow
+    # already applies to a skipped source run, applied one layer down. Every run of `ci.yml`
+    # on a pull request skips the three release jobs, so it is three requests every time.
+    monkeypatch.delenv("GITHUB_STEP_SUMMARY", raising=False)
+    fetch, calls = _fake_api(
+        jobs=[
+            _job_payload(1, "Tests (3.13)"),
+            _job_payload(2, "Publish to PyPI", conclusion="skipped"),
+        ],
+        annotations={1: [], 2: []},
+    )
+
+    code = main(["--repository", _REPOSITORY, "--run-id", str(_RUN_ID)], fetch)
+
+    assert code == 0
+    assert any("/check-runs/1/annotations" in call for call in calls)
+    assert not any("/check-runs/2/annotations" in call for call in calls)
+    assert "Jobs audited: 1." in capsys.readouterr().out
+
+
+def test_main_reads_a_job_that_ran_and_failed(monkeypatch, capsys):
+    # The skip above is on `skipped` alone, never on "did not succeed". A failing job ran its
+    # steps, and a deprecation warning attached to one of them is exactly what this looks for.
+    monkeypatch.delenv("GITHUB_STEP_SUMMARY", raising=False)
+    fetch, _calls = _fake_api(
+        jobs=[_job_payload(1, "Tests (3.13)", conclusion="failure")],
+        annotations={1: [_annotation_payload("warning", _NODE_20_MESSAGE)]},
+    )
+
+    code = main(["--repository", _REPOSITORY, "--run-id", str(_RUN_ID)], fetch)
+
+    assert code == 1
     assert "Jobs audited: 1." in capsys.readouterr().out
 
 
