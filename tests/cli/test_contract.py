@@ -402,7 +402,10 @@ def test_no_arguments_prints_help_and_exits_two_with_no_diagnostic():
     """The one exit 2 that prints no diagnostic at all, which README names as such."""
     result = runner.invoke(app, [])
     assert result.exit_code == 2
-    assert Text.from_ansi(result.stderr).plain == ""
+    # Compared raw, not through Text.from_ansi: that helper drops a trailing newline on the
+    # rich floor (13.8.0) and keeps it on current rich, so it cannot carry an exact-equality
+    # assertion across the supported range. It stays for the substring reads below.
+    assert result.stderr == ""
     assert "Usage: " in Text.from_ansi(result.stdout).plain
 
 
@@ -410,8 +413,7 @@ def test_adapter_authored_usage_check_prints_the_uncoded_error_prefix():
     """The contrasting shape: an adapter's own usage check, uncoded but prefixed."""
     result = runner.invoke(app, ["check", "--indent", "2"])
     assert result.exit_code == 2
-    stderr = Text.from_ansi(result.stderr).plain
-    assert stderr == "error: --indent requires --format json\n"
+    assert result.stderr == "error: --indent requires --format json\n"
 
 
 @pytest.mark.parametrize("command", ["check", "lint", "impact", "linear"])
