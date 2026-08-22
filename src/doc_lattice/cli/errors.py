@@ -7,7 +7,7 @@ import typer
 from rich.markup import escape
 
 from ..error_types import DocumentError, ProjectError, exception_details
-from .github import warn_unattachable_annotations, write_document_annotation
+from .github import write_document_annotation
 from .runtime import CliRuntime
 
 EXIT_FINDING = 1
@@ -82,12 +82,10 @@ def exit_on_project_error(runtime: CliRuntime, *, github: bool = False) -> Itera
         yield
     except ProjectError as exc:
         if github and isinstance(exc, DocumentError):
+            # This carries the unattachable report with it, the same one the finding renderers
+            # make: a failing document outside the base is annotated by absolute path, which
+            # GitHub drops in silence, and this is the run's only annotation.
             write_document_annotation(runtime, exc)
-            # The same unattachable report the finding renderers make. A failing document outside
-            # the base is annotated by absolute path, which GitHub drops in silence, and this is
-            # the run's only annotation: without the warning the gate fails with nothing on the
-            # diff and nothing in the log saying why.
-            warn_unattachable_annotations(runtime, [exc.source])
         print_project_error(runtime, exc)
         raise typer.Exit(EXIT_TOOL_ERROR) from exc
 

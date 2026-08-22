@@ -6,9 +6,9 @@ from ...constants import VALID_REPORT_FORMATS
 from ...lint import lint_json, lint_lattice
 from ...report_render import render_lint
 from ..errors import EXIT_FINDING, exit_on_project_error
-from ..github import github_annotation, warn_unattachable_annotations
+from ..github import write_annotations
 from ..options import ConfigOpt, IndentOpt, ReportFormatOpt
-from ..output import select_output, write_json, write_text
+from ..output import select_output, write_json
 from ..runtime import get_runtime
 
 
@@ -34,28 +34,24 @@ def register_lint(app: typer.Typer) -> None:
             valid=VALID_REPORT_FORMATS,
             indent=indent,
         )
-        with exit_on_project_error(runtime, github=selection.format == "github"):
+        with exit_on_project_error(runtime, github=selection.annotates):
             project = runtime.project(config)
             lattice = runtime.lattice(project)
             result = lint_lattice(lattice)
         if selection.format == "json":
             write_json(runtime, lint_json(result), indent=selection.indent)
-        elif selection.format == "github":
-            for violation in result.violations:
-                path = lattice.nodes_by_id[violation.source_id].path
-                write_text(
-                    runtime,
-                    github_annotation(
-                        path,
-                        runtime.annotation_root(path),
+        elif selection.annotates:
+            write_annotations(
+                runtime,
+                (
+                    (
+                        lattice.nodes_by_id[violation.source_id].path,
                         "doc-lattice ladder violation",
                         f"{violation.source_id} ({violation.source_authority}) -> "
                         f"{violation.target_ref} ({violation.target_authority})",
-                    ),
-                )
-            warn_unattachable_annotations(
-                runtime,
-                [lattice.nodes_by_id[violation.source_id].path for violation in result.violations],
+                    )
+                    for violation in result.violations
+                ),
             )
         else:
             render_lint(runtime.stdout, result)

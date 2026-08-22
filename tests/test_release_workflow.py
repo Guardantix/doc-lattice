@@ -11,6 +11,7 @@ import tomllib
 from pathlib import Path
 
 from ruamel.yaml import YAML
+from workflow_helpers import _commands, _invocations, _invokes, _named_step
 
 _ROOT = Path(__file__).resolve().parents[1]
 _WORKFLOW_TEXT = (_ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8")
@@ -40,10 +41,6 @@ _AGGREGATORS = {
 }
 
 
-def _named_step(job: dict, name: str) -> dict:
-    return next(step for step in job["steps"] if step.get("name") == name)
-
-
 def _step_index(job: dict, name: str) -> int:
     """Return a named step's position, which is the order the runner executes it in."""
     return next(index for index, step in enumerate(job["steps"]) if step.get("name") == name)
@@ -52,55 +49,6 @@ def _step_index(job: dict, name: str) -> int:
 def _action(step: dict) -> str:
     """Return a step's action reference with its pin stripped, or "" if it runs a script."""
     return step.get("uses", "").split("@", 1)[0]
-
-
-def _uncommented(line: str) -> str:
-    """Return a command line with any shell comment removed, ignoring `#` inside quotes."""
-    quote = ""
-    for index, char in enumerate(line):
-        if quote:
-            quote = "" if char == quote else quote
-        elif char in "'\"":
-            quote = char
-        elif char == "#" and (index == 0 or line[index - 1].isspace()):
-            return line[:index].rstrip()
-    return line
-
-
-def _commands(step: dict) -> str:
-    """Return a step's executable command lines, dropping blanks and commented-out text.
-
-    Comments are stripped because the shell ignores them: a step reading `uv build --wheel
-    # --sdist` builds only a wheel, and leaving the comment in place would let it satisfy
-    assertions about the arguments the step actually passes.
-    """
-    return "\n".join(
-        stripped
-        for line in step.get("run", "").splitlines()
-        if (stripped := _uncommented(line.strip()))
-    )
-
-
-def _invocations(text: str) -> list[list[str]]:
-    """Return the argument list of every command in shell text.
-
-    A line may chain several commands, so read each one separately: `rm -rf dist && uv build`
-    still builds, while the arguments in `uv build --wheel && echo --sdist` belong to two
-    different programs and only the build's own arguments describe what it produces.
-    """
-    argvs = []
-    for line in text.splitlines():
-        lexer = shlex.shlex(line, posix=True, punctuation_chars=True)
-        lexer.whitespace_split = True
-        current: list[str] = []
-        for token in lexer:
-            if set(token) <= {"&", "|", ";"}:
-                argvs.append(current)
-                current = []
-            else:
-                current.append(token)
-        argvs.append(current)
-    return [argv for argv in argvs if argv]
 
 
 def _out_dir(argv: list[str]) -> str | None:
@@ -171,17 +119,6 @@ def _fetches_tags(argv: list[str]) -> bool:
 def _runs_twine_check(argv: list[str]) -> bool:
     """Report whether a command runs twine's `check` subcommand."""
     return _runs_subcommand(argv, "twine", "check")
-
-
-def _invokes(argv: list[str], script: str) -> bool:
-    """Report whether a command runs `script` rather than only naming it.
-
-    `-c` and `-m` make the interpreter execute inline code or a module instead, which demotes
-    any path on the line to an ordinary argument the gate never runs.
-    """
-    if not argv or argv[0] not in {"uv", "uvx", "python", "python3"}:
-        return False
-    return script in argv[1:] and set(argv).isdisjoint({"-c", "-m"})
 
 
 def _needs(job: dict) -> list[str]:

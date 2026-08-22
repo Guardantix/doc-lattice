@@ -37,6 +37,9 @@ ACTIONABLE_LEVELS = frozenset({"warning", "failure"})
 # the runner images are deprecated in the same words, and the next runtime deprecation will be
 # worded differently from this one.
 DEPRECATION_MARKER = "deprecat"
+# The conclusion of a job the runner never started. Its check run exists and reports as
+# completed, so only the conclusion separates it from a job that ran and passed.
+_SKIPPED = "skipped"
 
 # Spelled out rather than imported from `doc_lattice.constants`, which this script cannot reach
 # under `--no-project`. These are the two pins `constants.py` ships to adopters, so a bump of
@@ -138,12 +141,13 @@ def fetch_json(path: str) -> object:
         The decoded JSON body, which callers narrow at their own boundary.
 
     Raises:
-        AuditError: If ``gh`` succeeds but does not print decodable JSON.
+        AuditError: If ``gh`` fails, or succeeds but does not print decodable JSON. Exiting
+            here instead would bypass ``main``'s handler, which is what renders a failure as an
+            ``::error`` annotation -- and a bad token or a 404 is the likeliest failure there is.
     """
     result = subprocess.run(("gh", "api", path), check=False, capture_output=True, text=True)
     if result.returncode != 0:
-        print(result.stderr.strip() or f"gh api {path} failed", file=sys.stderr)
-        sys.exit(2)
+        raise AuditError(result.stderr.strip() or f"gh api {path} failed")
     try:
         return json.loads(result.stdout)
     except json.JSONDecodeError as error:
@@ -336,13 +340,22 @@ def collect_findings(
     ]
 
 
-def _cell(text: str) -> str:
-    """Return annotation text safe to place inside a Markdown table cell.
+def _flatten(text: str) -> str:
+    """Return upstream text collapsed onto one line.
 
-    A pipe would end the cell early and a newline would end the row, and annotation messages are
-    upstream text that may contain either.
+    Annotation messages are upstream text that may carry line breaks, and both renderings below
+    are line-oriented: a break would end a table row early and split a log line in two.
     """
-    return text.replace("|", r"\|").replace("\r\n", " ").replace("\n", " ").replace("\r", " ")
+    return text.replace("\r\n", " ").replace("\n", " ").replace("\r", " ")
+
+
+def _cell(text: str) -> str:
+    """Return text safe to place inside a Markdown table cell.
+
+    A pipe would end the cell early. This is the table's escaping alone, so a change to it
+    cannot reach the plain log line ``describe`` renders.
+    """
+    return _flatten(text).replace("|", r"\|")
 
 
 def describe(finding: Finding) -> str:
@@ -357,7 +370,7 @@ def describe(finding: Finding) -> str:
     location = f"{finding.annotation.path or '?'}:{finding.annotation.start_line or '?'}"
     return (
         f"{finding.job.name}: {finding.annotation.level}: "
-        f"{location}: {_cell(finding.annotation.message)}"
+        f"{location}: {_flatten(finding.annotation.message)}"
     )
 
 
@@ -388,7 +401,7 @@ def render_summary(run: Run, findings: Sequence[Finding], jobs_audited: int) -> 
         lines.extend(_TABLE_HEADER)
         lines.extend(
             f"| [{_cell(finding.job.name)}]({finding.job.html_url}) "
-            f"| {_cell(finding.annotation.level)} "
+            f"| {finding.annotation.level} "
             f"| {_cell(finding.annotation.message)} |"
             for finding in findings
         )
@@ -423,16 +436,20 @@ def _audit(
 ) -> tuple[Run, list[Finding], int]:
     """Read one run and return its identity, its findings, and how many jobs were audited.
 
-    A job that has not completed has no settled annotations, so it is skipped rather than read:
-    the `workflow_run` trigger fires on completion of the run, but a cancelled run can still
-    carry jobs the runner never finished.
+    Two kinds of job are passed over rather than read, because each costs a request that cannot
+    produce a finding. A job that has not completed has no settled annotations: the
+    `workflow_run` trigger fires on completion of the run, but a cancelled run can still carry
+    jobs the runner never finished. A job the runner skipped executed no action at all, so it
+    can carry no runtime deprecation -- the same reasoning the workflow applies to a skipped
+    source run, one layer down. A `cancelled` or `failure` conclusion is read normally: those
+    jobs ran steps, and a deprecation warning from one of them is exactly what this looks for.
     """
     run = parse_run(fetch(f"/repos/{repository}/actions/runs/{run_id}"))
     jobs = [
         parse_job(entry)
         for entry in paginate(fetch, f"/repos/{repository}/actions/runs/{run_id}/jobs", "jobs")
     ]
-    completed = [job for job in jobs if job.status == "completed"]
+    readable = [job for job in jobs if job.status == "completed" and job.conclusion != _SKIPPED]
     audited = [
         (
             job,
@@ -441,9 +458,9 @@ def _audit(
                 for entry in paginate(fetch, f"/repos/{repository}/check-runs/{job.id}/annotations")
             ],
         )
-        for job in completed
+        for job in readable
     ]
-    return run, collect_findings(audited), len(completed)
+    return run, collect_findings(audited), len(readable)
 
 
 def main(argv: Sequence[str] | None = None, fetch: Callable[[str], object] = fetch_json) -> int:
