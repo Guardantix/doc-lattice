@@ -76,7 +76,31 @@ jobs:
       # 3.13 the same configuration falls back to the C tracer, which roughly doubles the suite's
       # runtime to re-measure a number the other leg already enforces. pytest reads this variable
       # itself, so the run body below stays free of workflow expressions.
-      PYTEST_ADDOPTS: ${{ matrix.python == '3.13' && '--no-cov' || '' }}
+      #
+      # Every pytest job here also runs the suite across worker processes, for the reason this
+      # comment records once and the two jobs below refer back to. The suite's cost is flat --
+      # roughly 3100 tests at about 19ms each, with no test above three seconds -- so there is no
+      # hot path to shorten and process parallelism is the only lever. `auto` resolves to the four
+      # vCPUs an `ubuntu-latest` runner reports, which the run log confirms as "4/4 workers".
+      #
+      # Measured on the runner rather than on a developer machine, because the two disagree. The
+      # yaml-compatibility pytest step went from about 76s to about 41s and the whole leg from
+      # about 88s to about 50s, which is roughly 1.9x, not the near-4x the worker count suggests.
+      # Those four vCPUs behave like two physical cores with SMT, and a CPU-bound Python suite
+      # gains little from the second thread; a workstation with four real cores sees closer to
+      # 3.3x on the same flags. Do not size this from a local measurement. Whether a larger runner
+      # would recover the rest is untested, so nothing here assumes it either way.
+      #
+      # `--dist loadfile` is required, not a tuning choice. The default `load` distributes single
+      # tests, which splits `tests/test_reconcile_fuzz.py` across workers and breaks the corpus
+      # floor at the end of it: that test asserts over a module-level accumulator the other 2196
+      # tests in the file populate, so a worker holding a subset sees claims that fired nowhere
+      # and fails. `loadfile` keeps a file whole on one worker, which restores the session state
+      # that test is documented to depend on. Anything that redistributes below file granularity
+      # has to leave that file intact.
+      PYTEST_ADDOPTS: >-
+        -n auto --dist loadfile
+        ${{ matrix.python == '3.13' && '--no-cov' || '' }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
@@ -121,8 +145,9 @@ jobs:
         clib: [true, false]
     env:
       # The `tests` job owns the coverage gate; this leg only asks whether the suite still
-      # passes against a different parser build.
-      PYTEST_ADDOPTS: --no-cov
+      # passes against a different parser build. It carries the same worker settings, and the
+      # `tests` job records why `--dist loadfile` is load-bearing rather than tuning.
+      PYTEST_ADDOPTS: --no-cov -n auto --dist loadfile
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
@@ -159,8 +184,10 @@ jobs:
     runs-on: ubuntu-latest
     env:
       # The `tests` job owns the coverage gate; this leg only asks whether the CLI's exit-code
-      # contract still holds against the oldest `rich` the project declares.
-      PYTEST_ADDOPTS: --no-cov
+      # contract still holds against the oldest `rich` the project declares. It carries the same
+      # worker settings, and the `tests` job records why `--dist loadfile` is load-bearing rather
+      # than tuning.
+      PYTEST_ADDOPTS: --no-cov -n auto --dist loadfile
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - uses: astral-sh/setup-uv@20cfd1bf945f4377ade1205e4dbc17946fc9a30d # v10.0.1
