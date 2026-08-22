@@ -76,6 +76,23 @@ def test_version_flag():
     assert __version__ in result.stdout
 
 
+def test_version_flag_is_eager_and_ignores_a_broken_config(tmp_path: Path, monkeypatch):
+    """--version answers before any command runs, so a config that would fail cannot stop it.
+
+    README publishes this as the check to run against a fresh install: no config file, no docs
+    root, no network. A config that any command would reject with CONFIG_ERROR is the sharpest
+    way to pin that, since it fails only if config loading moved ahead of the eager callback.
+    """
+    (tmp_path / ".doc-lattice.yml").write_text("bogus: 1\n", encoding="utf-8")
+    monkeypatch.chdir(tmp_path)
+
+    assert runner.invoke(app, ["check"]).exit_code == EXIT_TOOL_ERROR
+
+    result = runner.invoke(app, ["--version"])
+    assert result.exit_code == 0
+    assert __version__ in result.stdout
+
+
 def _run_cli_subprocess(argv: list[str], env: dict[str, str]) -> subprocess.CompletedProcess[str]:
     script = (
         "import sys\n"
@@ -361,6 +378,42 @@ def test_configless_commands_reject_config_option():
     assert result.exit_code == 2
     stderr = Text.from_ansi(result.stderr).plain
     assert "No such option: --config" in stderr
+
+
+def test_parser_rejection_carries_neither_a_code_nor_the_error_prefix():
+    """Pin the shape README's error-code section gives a parser-rejected usage failure.
+
+    A usage check an adapter writes itself prints ``error: ...`` through ``print_project_error``'s
+    uncoded sibling path. A failure Typer rejects before any command runs never reaches that
+    module, so it carries neither a code nor that prefix, and README documents the two separately.
+    """
+    result = runner.invoke(app, ["--bogus"])
+    assert result.exit_code == 2
+    stderr = Text.from_ansi(result.stderr).plain
+    # The runner invokes the app object, so the program name is its own, not the console script's.
+    # The shape is what README documents, so pin the lead-in and not the name in front of it.
+    assert stderr.startswith("Usage: ")
+    assert "No such option: --bogus" in stderr
+    assert "error:" not in stderr
+    assert "error (" not in stderr
+
+
+def test_no_arguments_prints_help_and_exits_two_with_no_diagnostic():
+    """The one exit 2 that prints no diagnostic at all, which README names as such."""
+    result = runner.invoke(app, [])
+    assert result.exit_code == 2
+    # Compared raw, not through Text.from_ansi: that helper drops a trailing newline on the
+    # rich floor (13.8.0) and keeps it on current rich, so it cannot carry an exact-equality
+    # assertion across the supported range. It stays for the substring reads below.
+    assert result.stderr == ""
+    assert "Usage: " in Text.from_ansi(result.stdout).plain
+
+
+def test_adapter_authored_usage_check_prints_the_uncoded_error_prefix():
+    """The contrasting shape: an adapter's own usage check, uncoded but prefixed."""
+    result = runner.invoke(app, ["check", "--indent", "2"])
+    assert result.exit_code == 2
+    assert result.stderr == "error: --indent requires --format json\n"
 
 
 @pytest.mark.parametrize("command", ["check", "lint", "impact", "linear"])

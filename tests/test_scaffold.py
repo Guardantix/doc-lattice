@@ -19,6 +19,7 @@ from doc_lattice.constants import (
     SETUP_UV_REF,
     SETUP_UV_VERSION,
 )
+from doc_lattice.linear_query import is_valid_team_key
 from doc_lattice.scaffold import (
     build_scaffold,
     render_ci,
@@ -32,9 +33,13 @@ def _load(text: str) -> Config:
     return Config.model_validate(parsed)
 
 
-def test_render_config_includes_commented_cache_key_example():
+def test_render_config_includes_commented_cache_examples():
     text = render_config(("docs",), None)
     assert "# cache_key: my-project-docs" in text
+    # cache_trust_stat is scaffolded because it is the one option whose fast path trades a read
+    # for trust, so a reader should meet it in the file rather than only in the docs. It is
+    # scaffolded at true so that uncommenting it opts in, which is what its comment claims.
+    assert "# cache_trust_stat: true" in text
 
 
 def test_render_gitignore_matches_reconcile_transaction_artifacts():
@@ -92,8 +97,22 @@ def test_commented_example_keys_stay_valid_against_config_schema():
     lines = render_config(("docs",), None).splitlines()
     body = [line for line in lines if "configuration. See" not in line]  # drop header
     cfg = _load("\n".join(re.sub(r"^#\s?", "", line) for line in body))
+    # Pin the whole set, not a sample: a newly scaffolded commented key would otherwise be
+    # uncommented, loaded, and then silently unexamined by this test.
+    assert cfg.model_fields_set == {
+        "docs_roots",
+        "ignore_globs",
+        "cache_key",
+        "cache_trust_stat",
+        "linear_team",
+    }
     assert cfg.ignore_globs == ["**/archive/**"]
-    assert cfg.linear_team == "ENG"
+    assert cfg.cache_key == "my-project-docs"
+    assert cfg.cache_trust_stat is True
+    # Config types linear_team as a bare str, so a placeholder example would load cleanly here
+    # and only fail downstream in linear_query. Hold the example to the domain that owns it.
+    assert cfg.linear_team is not None
+    assert is_valid_team_key(cfg.linear_team)
 
 
 def test_render_config_lists_multiple_roots():
