@@ -6,6 +6,7 @@ workflow resolves to a 40-character commit SHA, so restating individual pins her
 only force a lockstep edit on every routine pin refresh.
 """
 
+import re
 import shlex
 import tomllib
 from pathlib import Path
@@ -25,6 +26,10 @@ _PROCEED = "steps.gate.outputs.proceed == 'true'"
 _TAG_STEP = "Create and push the tag"
 _SMOKE_FIXTURE = "tests/fixtures/release-smoke/.doc-lattice.yml"
 _PACKAGE_URL = "git+https://github.com/Guardantix/doc-lattice"
+# `name="$(command)"`, which `_invocations` hands back as one word because the substitution is
+# quoted. The inner text is re-read as its own command rather than matched as a string, so a
+# `mktemp` reached through flags or extra spacing still counts.
+_COMMAND_SUBSTITUTION = re.compile(r"^(\w+)=\$\((.*)\)$")
 # The release steps that verify the source and the published artifacts. None of them produces a
 # job output, so deleting one leaves every other job green and the release still publishes; these
 # names are the only thing standing between a silent deletion and an unverified release.
@@ -105,6 +110,55 @@ def _runs_subcommand(argv: list[str], program: str, subcommand: str) -> bool:
         word == program and argv[index + 1 : index + 2] == [subcommand]
         for index, word in enumerate(argv)
     )
+
+
+def _expands(word: str, name: str) -> bool:
+    """Report whether a word expands the shell variable `name`, in either spelling."""
+    return word in {f"${name}", f"${{{name}}}"}
+
+
+def _throwaway_dirs(text: str) -> set[str]:
+    """Return the variables shell text assigns a freshly created temporary directory to.
+
+    Only a directory `mktemp` made itself counts. `mktemp` without `-d` creates a file, and a
+    literal path would name somewhere in the checkout, which is the thing a throwaway workdir
+    exists not to be.
+    """
+    names = set()
+    for argv in _invocations(text):
+        for word in argv:
+            match = _COMMAND_SUBSTITUTION.match(word)
+            if match is not None and any(
+                inner[:1] == ["mktemp"] and "-d" in inner for inner in _invocations(match.group(2))
+            ):
+                names.add(match.group(1))
+    return names
+
+
+def _throwaway_dir_runs(text: str, program: str, subcommand: str) -> list[list[str]]:
+    """Return each `program subcommand` command that runs inside a throwaway directory.
+
+    Three separate presence checks would not prove this. `_invocations` splits a line at `&&`,
+    so it exposes the command's own argv but no longer associates it with the `cd` in front of
+    it, and an unrelated `mktemp` block plus a command left in the checkout root would satisfy
+    them all. The binding is re-established here by reading one line at a time: the `cd` has to
+    target a variable this same text assigned from `mktemp -d`, and the command has to come
+    after it in that command group. A later `cd` somewhere else ends the group's reach, since
+    from that point the command runs wherever that `cd` landed.
+    """
+    workdirs = _throwaway_dirs(text)
+    matched = []
+    for line in text.splitlines():
+        entered = False
+        for argv in _invocations(line):
+            # A command group may be a subshell, whose parentheses tokenize as words of their
+            # own; they bound the `cd`'s effect rather than change which command runs.
+            words = [word for word in argv if word not in {"(", ")"}]
+            if words[:1] == ["cd"]:
+                entered = any(_expands(word, name) for word in words[1:] for name in workdirs)
+            elif entered and _runs_subcommand(words, program, subcommand):
+                matched.append(words)
+    return matched
 
 
 def _fetches_tags(argv: list[str]) -> bool:
@@ -273,6 +327,13 @@ def test_smoke_step_runs_the_packaged_cli_against_the_release_fixture():
             # command is handed, so pointing FIXTURE at a passing stub fails here too.
             assert _flag_value(argv, "--config") == "${FIXTURE}"
             assert _flag_value(argv, "--from") == "${REF}"
+    # The scaffolding path has no fixture to run against, so it is pinned by where it runs
+    # instead: a throwaway directory, because `init` writes into the working directory and the
+    # checkout already holds a configuration file that would mask a scaffolding regression.
+    inits = _throwaway_dir_runs(_commands(step), "doc-lattice", "init")
+    assert inits
+    for argv in inits:
+        assert _flag_value(argv, "--from") == "${REF}"
     assert _step_index(release, "Smoke-test the commit") < _step_index(release, _TAG_STEP)
 
 
