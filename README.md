@@ -273,13 +273,13 @@ Two options are global rather than per-command, so they go before the command na
 `--version` is eager: it prints and exits before any command runs, so it needs no config file, no
 docs root, and no network. That makes it the check to run against a fresh install.
 
-Rich also honors the [`NO_COLOR`](https://no-color.org/) environment variable; `--no-color` is
-the command-line equivalent. doc-lattice intentionally
-extends the `NO_COLOR` baseline: the standard itself only asks implementers to drop color and
-leaves bold, underline, and italic styling in place, but either lever here means no styling at
-all, so no terminal escape sequence reaches human-facing output under either one, even when a
-terminal-forcing variable is set. This covers every command's human-facing output, not just help
-and usage-error text: reports, warnings, and diagnostics alike.
+Rich also honors the [`NO_COLOR`](https://no-color.org/) environment variable; `--no-color` is the
+command-line equivalent. doc-lattice intentionally extends the `NO_COLOR` baseline: the standard
+itself only asks implementers to drop color and leaves bold, underline, and italic styling in
+place, but either lever here means no styling at all, so no terminal escape sequence reaches
+human-facing output under either one, even when a terminal-forcing variable is set. This covers
+every command's human-facing output, not just help and usage-error text: reports, warnings, and
+diagnostics alike.
 
 One machine channel is excluded from that guarantee, deliberately and by name: the `file=` value
 of a `--format github` annotation. GitHub resolves that value against the file the annotation

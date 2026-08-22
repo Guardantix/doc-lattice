@@ -39,8 +39,10 @@ _COMMENTED_IGNORE = '# ignore_globs:\n#   - "**/archive/**"\n'
 _COMMENTED_CACHE = "# cache_key: my-project-docs   # opt-in load cache slot under your cache home\n"
 # The one commented key carrying a correctness caveat, so it is scaffolded rather than left for a
 # reader to discover in the docs. The trailing comment names the tier, the commands it applies to,
-# and the one dependency that turns an uncommented line into a config error; the caveats that make
-# it opt-in live in README's Load cache section, which has room to state them properly. They are
+# and the one dependency that a reader flipping the value to true would otherwise trip over,
+# since cache_trust_stat: true without cache_key is a config error. The scaffolded false is the
+# schema default, so uncommenting the line as written changes nothing. The caveats that make the
+# tier opt-in live in README's Load cache section, which has room to state them properly. They are
 # deliberately not restated here, since a copy would have to be re-synced with that prose.
 _COMMENTED_TRUST_STAT = (
     "# cache_trust_stat: false      "

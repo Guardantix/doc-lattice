@@ -16,6 +16,7 @@ catch truncation and copy-paste duplication without pinning any wording.
 """
 
 import re
+from collections.abc import Sequence
 from pathlib import Path
 from typing import get_args
 
@@ -39,6 +40,10 @@ _DEFAULT_DOCS_ROOTS = ("docs",)
 _CODE_ROW = re.compile(r"^\| `([A-Z_]+)` \| (.*?) \|$", re.MULTILINE)
 _OPTION_ROW = re.compile(r"^\| `(--[a-z-]+)` \|", re.MULTILINE)
 _YAML_FENCE = re.compile(r"^```yaml\n(.*?)^```$", re.MULTILINE | re.DOTALL)
+
+# Where the global-options table starts inside the Commands section. Everything before it is
+# per-command option prose, whose rows must not be read as global ones.
+_GLOBAL_TABLE_MARKER = "Two options are global rather than per-command"
 
 
 def _readme() -> str:
@@ -65,6 +70,18 @@ def _section(text: str, level: int, title: str) -> str:
     lines = split_body_lines(text)
     end = (later[0] - 1) if later else len(lines)
     return "\n".join(lines[start:end]) + "\n"
+
+
+def _long_option(opts: Sequence[str]) -> str:
+    """Return the one long spelling among a parameter's option strings.
+
+    Click orders ``opts`` as declared, so an option that later grows a short alias written first
+    would make ``opts[0]`` a short flag. README's table documents the long name, and
+    ``_OPTION_ROW`` cannot express anything else, so pick the long one rather than the first.
+    """
+    long_opts = [opt for opt in opts if opt.startswith("--")]
+    assert len(long_opts) == 1, f"expected one long spelling among {list(opts)}"
+    return long_opts[0]
 
 
 def _code_rows(text: str) -> list[tuple[str, str]]:
@@ -115,9 +132,16 @@ def test_readme_global_options_match_the_root_callback():
     options are absent because the app is built with ``add_completion=False``.
     """
     commands = _section(_readme(), 2, "Commands")
-    table = commands.split("Two options are global rather than per-command", 1)[1]
+    assert _GLOBAL_TABLE_MARKER in commands, (
+        f"the global-options table's lead-in {_GLOBAL_TABLE_MARKER!r} is gone from Commands; "
+        "restore it or repoint this test, since without it the per-command option rows above "
+        "would be read as global ones"
+    )
+    table = commands.split(_GLOBAL_TABLE_MARKER, 1)[1]
     documented = set(_OPTION_ROW.findall(table))
-    declared = {parameter.opts[0] for parameter in typer.main.get_command(create_app()).params}
+    declared = {
+        _long_option(parameter.opts) for parameter in typer.main.get_command(create_app()).params
+    }
     assert documented == declared, (
         "README's global-options table drifted from the root callback: "
         f"missing {sorted(declared - documented)}, unexpected {sorted(documented - declared)}"
