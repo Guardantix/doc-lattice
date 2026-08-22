@@ -298,13 +298,16 @@ def test_symlink_leaving_the_repository_is_reported(tmp_path):
     repo.mkdir()
     outside = tmp_path / "outside.md"
     outside.write_text("# Outside\n\n## Secret Heading\n", encoding="utf-8")
-    (repo / "OUT.md").symlink_to(outside)
-    _write(repo, "README.md", "# Readme\n\n[x](OUT.md#secret-heading)\n")
+    # Staged rather than root, so this stays a statement about targets: a root symlink is also
+    # a maintained source and would report its own escape as well.
+    (repo / "docs").mkdir()
+    (repo / "docs" / "OUT.md").symlink_to(outside)
+    _write(repo, "README.md", "# Readme\n\n[x](docs/OUT.md#secret-heading)\n")
 
     messages = check_repository_links(repo)
 
     assert len(messages) == 1
-    assert "OUT.md" in messages[0]
+    assert "docs/OUT.md" in messages[0]
 
 
 def test_symlink_staying_inside_the_repository_resolves(tmp_path):
@@ -317,6 +320,55 @@ def test_symlink_staying_inside_the_repository_resolves(tmp_path):
     _write(repo, "README.md", "# Readme\n\n[x](ALIAS.md#inside-heading)\n")
 
     assert check_repository_links(repo) == []
+
+
+def test_source_leaving_the_repository_through_a_symlink_is_reported(tmp_path):
+    # The source glob follows symlinks, so without a containment check the hook would read a
+    # file outside the checkout and quote its link destinations back through a diagnostic.
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    outside = tmp_path / "outside.md"
+    outside.write_text("# Outside\n\n[secret](CONFIDENTIAL.md)\n", encoding="utf-8")
+    (repo / "EVIL.md").symlink_to(outside)
+    _write(repo, "README.md", "# Readme\n\n[gone](MISSING.md)\n")
+
+    messages = check_repository_links(repo)
+
+    assert len(messages) == 2
+    assert messages[0] == "'EVIL.md': maintained document leaves the repository through a symlink"
+    assert not any("CONFIDENTIAL.md" in message for message in messages)
+    # The run continues, so a later document is still checked.
+    assert messages[1].startswith("'README.md':3:")
+
+
+def test_source_symlinked_to_an_undecodable_file_is_reported_rather_than_raised(tmp_path):
+    # Reading first would end the run on a UnicodeDecodeError and leave every later document
+    # unchecked, the same silent truncation a NUL-bearing target once caused.
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    blob = tmp_path / "blob.md"
+    blob.write_bytes(b"\xff\xfe\x00binary")
+    (repo / "BIN.md").symlink_to(blob)
+
+    messages = check_repository_links(repo)
+
+    assert len(messages) == 1
+    assert "leaves the repository through a symlink" in messages[0]
+
+
+def test_source_symlinked_inside_the_repository_is_still_checked(tmp_path):
+    # Containment must refuse only the sources that leave: an in-repository alias renders on
+    # GitHub and its links are the maintained document's links.
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    _write(repo, "docs/staged.md", "# Staged\n\n[gone](MISSING.md)\n")
+    (repo / "ALIAS.md").symlink_to(repo / "docs" / "staged.md")
+
+    messages = check_repository_links(repo)
+
+    assert len(messages) == 1
+    assert messages[0].startswith("'ALIAS.md':3:")
+    assert "MISSING.md" in messages[0]
 
 
 def test_raw_html_anchor_is_reported_as_unchecked(tmp_path):
@@ -453,6 +505,34 @@ def test_uppercase_markdown_suffix_is_still_fragment_checked(tmp_path):
 
     assert len(messages) == 1
     assert "no-such-heading" in messages[0]
+
+
+def test_alternate_markdown_suffix_is_fragment_checked(tmp_path):
+    # GitHub renders .markdown with the same heading grammar as .md, so exempting it from
+    # fragment validation is the same silent skip a case-sensitive suffix test was.
+    _write(tmp_path, "README.md", "# Readme\n\n[x](GUIDE.markdown#no-such-heading)\n")
+    _write(tmp_path, "GUIDE.markdown", "# Guide\n\n## Section\n")
+
+    messages = check_repository_links(tmp_path)
+
+    assert len(messages) == 1
+    assert "no-such-heading" in messages[0]
+
+
+def test_alternate_markdown_suffix_accepts_a_resolving_fragment(tmp_path):
+    _write(tmp_path, "README.md", "# Readme\n\n[x](GUIDE.mkdn#section)\n")
+    _write(tmp_path, "GUIDE.mkdn", "# Guide\n\n## Section\n")
+
+    assert check_repository_links(tmp_path) == []
+
+
+def test_fragment_on_a_differently_rendered_suffix_is_not_heading_checked(tmp_path):
+    # An .mdx heading can come from a component the pinned CommonMark adapter never sees, so
+    # validating it against this grammar would fail a link that works.
+    _write(tmp_path, "README.md", "# Readme\n\n[x](GUIDE.mdx#generated-heading)\n")
+    _write(tmp_path, "GUIDE.mdx", "# Guide\n\n<Toc />\n")
+
+    assert check_repository_links(tmp_path) == []
 
 
 def test_links_and_raw_anchors_are_ordered_by_line_within_a_document(tmp_path):

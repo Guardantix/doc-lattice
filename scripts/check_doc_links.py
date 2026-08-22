@@ -3,7 +3,8 @@
 
 The link sources are the sorted root ``*.md`` files, which is the mechanical stand-in for the
 ownership list in CLAUDE.md and keeps ``docs/`` staging out of the source set. A link target may
-be any repository-contained relative path, staged documents included.
+be any repository-contained relative path, staged documents included. Containment binds both
+ends: a source that leaves the repository through a symlink is reported rather than read.
 
 Absolute and external destinations are out of scope and skipped, as are image destinations.
 Heading fragments are validated only against Markdown targets, and only against the heading
@@ -30,6 +31,14 @@ from doc_lattice.path_utils import format_path_for_display
 _REPO_ROOT = Path(__file__).resolve().parent.parent
 _PARSER = MarkdownIt("commonmark")
 _MARKDOWN_SUFFIX = ".md"
+# The plain-Markdown suffixes GitHub renders through Linguist, matched case-blind: a fragment on
+# any of them is a heading id exactly as it is on ``.md``, so skipping them would leave a dead
+# anchor green. Suffixes whose renderer changes the heading grammar are deliberately absent --
+# ``.mdx`` can generate headings from components and ``.rmd``/``.qmd`` are knitted first -- since
+# validating those against this adapter's grammar would fail a working link.
+_MARKDOWN_TARGET_SUFFIXES = frozenset(
+    {_MARKDOWN_SUFFIX, ".markdown", ".mdown", ".mdwn", ".mkd", ".mkdn"}
+)
 # The WHATWG URL Standard's dot-segment spellings, matched ASCII case-insensitively in its
 # path state. A browser normalizes the encoded forms exactly as it does the bare ones, so a
 # link written with them resolves and this checker has to agree.
@@ -40,6 +49,7 @@ _HTML_HREF_ATTRIBUTE = "href"
 _HTML_ANCHOR_MESSAGE = (
     "raw HTML anchor carries a destination this check cannot resolve; write it as a Markdown link"
 )
+_ESCAPING_SOURCE_MESSAGE = "maintained document leaves the repository through a symlink"
 
 
 @dataclass(frozen=True, slots=True)
@@ -140,7 +150,12 @@ def html_anchor_lines(markdown: str) -> list[int]:
 
 
 def maintained_documents(repo_root: Path) -> list[Path]:
-    """Return the maintained link sources: the sorted root Markdown files.
+    """Return the candidate link sources: the sorted root Markdown files.
+
+    Selection is by name and by being a file, which is the mechanical stand-in for the CLAUDE.md
+    ownership list. Whether a candidate stays inside the repository is judged where the documents
+    are read, so one that leaves through a symlink is reported rather than dropped from the source
+    set -- a silent drop would take that document's links out of the gate and leave it green.
 
     Args:
         repo_root: The repository root.
@@ -266,26 +281,29 @@ def _resolve_target(raw_path: str, document: Path, repo_root: Path) -> Path | No
     return None if parts is None else repo_root.joinpath(*parts)
 
 
-def _escapes_by_symlink(target: Path, repo_root: Path) -> bool:
-    """Report whether a lexically contained path leaves the repository once resolved.
+def _escapes_by_symlink(path: Path, repo_root: Path) -> bool:
+    """Report whether a repository-shaped path leaves the repository once resolved.
 
-    The lexical pass settles the destination as written; this settles where the filesystem
-    actually sends it. Both are needed: a symlink is invisible to the first, and the second
-    alone would let ``..`` be walked out and back before anyone looked.
+    Both ends of a link are judged here. For a target, the lexical pass settles the destination
+    as written and this settles where the filesystem actually sends it; both are needed, since a
+    symlink is invisible to the first and the second alone would let ``..`` be walked out and
+    back before anyone looked. For a source, the root ``*.md`` glob is the only structural
+    filter there is, so this is the whole containment story.
 
     An in-repository symlink stays legitimate, because only its resolved location is judged.
-    One that leaves is refused rather than followed, and it is judged before the target is
-    opened, so no outside file is read to answer a fragment.
+    One that leaves is refused rather than followed, and it is judged before the file is opened,
+    so no outside file is read -- neither to answer a fragment nor to harvest link destinations
+    the diagnostics would then quote back.
 
     Args:
-        target: The lexically contained candidate path.
+        path: The candidate source or lexically contained target path.
         repo_root: The repository root, already resolved by the caller so that a checkout
             reached through a symlinked parent does not read as escaping.
 
     Returns:
-        True when the resolved target lies outside the repository.
+        True when the resolved path lies outside the repository.
     """
-    return not target.resolve().is_relative_to(repo_root)
+    return not path.resolve().is_relative_to(repo_root)
 
 
 def _target_message(href: str, target: Path, repo_root: Path) -> str | None:
@@ -361,7 +379,8 @@ def _link_message(
     unusable = _target_message(href, target, repo_root)
     if unusable is not None:
         return unusable
-    if not fragment or target.suffix.lower() != _MARKDOWN_SUFFIX or not target.is_file():
+    renders_as_markdown = target.suffix.lower() in _MARKDOWN_TARGET_SUFFIXES
+    if not fragment or not renders_as_markdown or not target.is_file():
         return None
     return _fragment_message(fragment, target, repo_root, cache)
 
@@ -376,7 +395,8 @@ def check_repository_links(repo_root: Path) -> list[str]:
     Returns:
         Messages in document order, sources sorted by name, with unresolvable links and raw
         HTML anchors interleaved by line rather than grouped by kind. Each names the source
-        document, the line its link's block starts on, and the destination as written. An
+        document, the line its link's block starts on, and the destination as written. A source
+        that leaves the repository carries no line, since it is refused before it is read. An
         empty list means every relative destination and heading fragment resolves.
     """
     root = repo_root.resolve()
@@ -384,6 +404,12 @@ def check_repository_links(repo_root: Path) -> list[str]:
     messages: list[str] = []
     for document in maintained_documents(root):
         source = format_path_for_display(document.relative_to(root).as_posix())
+        if _escapes_by_symlink(document, root):
+            # Refused before the read, so an outside file is neither decoded nor quoted back
+            # through a diagnostic. Reported rather than skipped, because a root Markdown file
+            # nobody checks is the silent green this gate exists to prevent.
+            messages.append(f"{source}: {_ESCAPING_SOURCE_MESSAGE}")
+            continue
         text = document.read_text(encoding="utf-8")
         found: list[tuple[int, str]] = []
         for link in extract_links(text):
