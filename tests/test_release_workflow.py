@@ -162,6 +162,30 @@ def _separated_commands(line: str) -> list[tuple[str, list[str]]]:
     return [(operator, argv) for operator, argv in separated if argv]
 
 
+def _unnested(argv: list[str], depth: int) -> tuple[list[str], int, int]:
+    """Separate a command's own words from the subshell parentheses around them.
+
+    Args:
+        argv: One command's tokens, parentheses included.
+        depth: The subshell nesting the previous command on this line left behind.
+
+    Returns:
+        The command's words, the nesting it runs at, and the nesting left for the next command.
+    """
+    words: list[str] = []
+    command_depth = depth
+    for word in argv:
+        if word == "(":
+            depth += 1
+        elif word == ")":
+            depth -= 1
+        else:
+            if not words:
+                command_depth = depth
+            words.append(word)
+    return words, command_depth, depth
+
+
 def _throwaway_dir_runs(text: str, program: str, subcommand: str) -> list[list[str]]:
     """Return each `program subcommand` command that runs inside a throwaway directory.
 
@@ -173,30 +197,39 @@ def _throwaway_dir_runs(text: str, program: str, subcommand: str) -> list[list[s
     has to come after it. A later `cd` somewhere else ends its reach, since from that point the
     command runs wherever that `cd` landed.
 
-    Which operator joined them decides whether the `cd` reaches at all, so a split that only
-    reported adjacency would still accept three rewrites that break the guarantee. Only `&&`
-    and `;` run the rest of the list in the shell that moved and on the `cd` succeeding. `||`
-    runs it precisely when the `cd` failed; `|` and `&` run it in a sibling subshell that
-    inherited the *original* directory, which is the checkout root this assertion exists to
-    exclude. Past that first operator the directory persists for the rest of the line, `|` and
-    `&` included -- their subshells inherit the directory the `cd` reached -- so it is only the
-    operator joining the `cd` to what follows that is load-bearing.
+    Two things besides that order decide whether the `cd` reaches, and dropping either one
+    accepts a rewrite that breaks the guarantee while leaving this green.
+
+    *Which operator joined them.* Only `&&` and `;` run the rest of the list in the shell that
+    moved and on the `cd` succeeding. `||` runs it precisely when the `cd` failed; `|` and `&`
+    run it in a sibling subshell that inherited the *original* directory, which is the checkout
+    root this assertion exists to exclude. Past that first operator the directory persists for
+    the rest of the line, `|` and `&` included -- their subshells inherit the directory the
+    `cd` reached -- so it is only the operator joining the `cd` to what follows that matters.
+
+    *Which subshell each ran in.* A `cd` inside a subshell is undone at the closing paren, so
+    `( cd "${d}" ) && x` runs `x` in the checkout however the two are joined. Depth is tracked
+    rather than the parentheses being discarded: the command has to run at or below the `cd`'s
+    own nesting, which keeps `cd "${d}" && ( x )` matching, since a subshell opened afterwards
+    inherits the directory.
     """
     workdirs = _throwaway_dirs(text)
     matched = []
     for line in text.splitlines():
-        entered = False
+        depth, entered_depth = 0, None
         commands = _separated_commands(line)
         for index, (_, argv) in enumerate(commands):
-            # A command group may be a subshell, whose parentheses tokenize as words of their
-            # own; they bound the `cd`'s effect rather than change which command runs.
-            words = [word for word in argv if word not in {"(", ")"}]
+            words, command_depth, depth = _unnested(argv, depth)
+            if entered_depth is not None and command_depth < entered_depth:
+                # The subshell that moved has exited, taking its directory with it.
+                entered_depth = None
             if words[:1] == ["cd"]:
                 joins = commands[index + 1][0] if index + 1 < len(commands) else ""
-                entered = joins in _SEQUENCING and any(
+                reaches = joins in _SEQUENCING and any(
                     _expands(word, name) for word in words[1:] for name in workdirs
                 )
-            elif entered and _runs_subcommand(words, program, subcommand):
+                entered_depth = command_depth if reaches else None
+            elif entered_depth is not None and _runs_subcommand(words, program, subcommand):
                 matched.append(words)
     return matched
 
