@@ -28,6 +28,32 @@ jobs:
       - run: uv run --no-sync python scripts/check_typing_boundaries.py src/
       - run: uv run --no-sync python scripts/check_version_sync.py
 
+  # The three `*-result` jobs below exist so branch protection can require one fixed context per
+  # matrix instead of the per-leg names GitHub generates from the matrix values. Requiring the
+  # legs themselves put every matrix value into the branch rule as well, which meant a matrix
+  # change here and a protection edit had to land together or strand every open pull request.
+  #
+  # Each is deliberately trivial -- no checkout, no network -- and fails closed. `always()` is
+  # what makes that work: without it a failed matrix would *skip* the aggregator, and GitHub does
+  # not treat a skipped check as failing, so the pull request would go green on a red matrix. The
+  # success comparison therefore has to live in the step, never in the job-level `if:`, where it
+  # would skip the job and restore exactly that bypass. `always()` also resists cancellation,
+  # which here is the wanted behavior: a cancelled matrix must not merge either.
+  #
+  # `tests/test_release_workflow.py` pins this shape; RELEASING.md records the required list.
+  code-quality-result:
+    name: Code quality
+    needs: code-quality
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - name: Require every matrix leg to have succeeded
+        env:
+          RESULT: ${{ needs.code-quality.result }}
+        run: |
+          echo "code-quality matrix reported: ${RESULT}"
+          test "${RESULT}" = success
+
   security-scan:
     name: Security scan
     runs-on: ubuntu-latest
@@ -59,6 +85,19 @@ jobs:
       - run: uv python install ${{ matrix.python }}
       - run: uv sync --locked --group dev
       - run: uv run --no-sync pytest
+
+  tests-result:
+    name: Tests
+    needs: tests
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - name: Require every matrix leg to have succeeded
+        env:
+          RESULT: ${{ needs.tests.result }}
+        run: |
+          echo "tests matrix reported: ${RESULT}"
+          test "${RESULT}" = success
 
   yaml-compatibility:
     name: YAML parser compatibility
@@ -101,6 +140,19 @@ jobs:
       - if: matrix.clib
         run: uv pip install ruamel.yaml.clib
       - run: uv run --no-sync pytest
+
+  yaml-compatibility-result:
+    name: YAML parser compatibility
+    needs: yaml-compatibility
+    if: always()
+    runs-on: ubuntu-latest
+    steps:
+      - name: Require every matrix leg to have succeeded
+        env:
+          RESULT: ${{ needs.yaml-compatibility.result }}
+        run: |
+          echo "yaml-compatibility matrix reported: ${RESULT}"
+          test "${RESULT}" = success
 
   rich-floor:
     name: Rich floor compatibility
