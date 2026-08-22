@@ -16,15 +16,16 @@ rather than resolved, because resolving it means parsing HTML, and a gate that s
 silently would go green on the one link form it cannot see.
 """
 
-import re
 import sys
 from dataclasses import dataclass
+from html.parser import HTMLParser
 from pathlib import Path, PurePosixPath, PureWindowsPath
 from urllib.parse import SplitResult, parse_qs, unquote, urlsplit
 
 from markdown_it import MarkdownIt
 
 from doc_lattice.markdown_compat import extract_headings, github_heading_ids
+from doc_lattice.path_utils import format_path_for_display
 
 _REPO_ROOT = Path(__file__).resolve().parent.parent
 _PARSER = MarkdownIt("commonmark")
@@ -34,10 +35,8 @@ _MARKDOWN_SUFFIX = ".md"
 # link written with them resolves and this checker has to agree.
 _SINGLE_DOT_SEGMENTS = frozenset({".", "%2e"})
 _DOUBLE_DOT_SEGMENTS = frozenset({"..", ".%2e", "%2e.", "%2e%2e"})
-# Detection only, over text markdown-it has already classified as raw HTML. This never decides
-# whether a destination is valid, so it needs no HTML parser: it answers whether a maintained
-# document carries a destination this gate cannot see.
-_HTML_ANCHOR_RE = re.compile(r"<a\s[^>]*\bhref\s*=", re.IGNORECASE)
+_HTML_ANCHOR_TAG = "a"
+_HTML_HREF_ATTRIBUTE = "href"
 
 
 @dataclass(frozen=True, slots=True)
@@ -76,17 +75,46 @@ def extract_links(markdown: str) -> list[Link]:
     return links
 
 
+class _AnchorCounter(HTMLParser):
+    """Count raw anchor start tags that carry an ``href``.
+
+    A parser rather than a pattern, because the question is which anchors the *document*
+    actually has. Anchor text inside a comment or a raw-text element such as ``<script>`` is
+    not one, and a pattern cannot tell the difference: it would fail a maintained document for
+    carrying a commented-out example of the very syntax being discouraged. ``HTMLParser``
+    routes a comment to ``handle_comment`` and raw-text content to ``handle_data``, neither of
+    which is implemented here, so both are ignored by construction rather than by exclusion.
+    """
+
+    def __init__(self) -> None:
+        super().__init__(convert_charrefs=True)
+        self.anchors = 0
+
+    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        """Count one anchor when its start tag carries a destination."""
+        if tag == _HTML_ANCHOR_TAG and any(name == _HTML_HREF_ATTRIBUTE for name, _ in attrs):
+            self.anchors += 1
+
+
+def _anchor_count(html: str) -> int:
+    """Return how many raw anchors with an ``href`` a fragment of HTML declares."""
+    counter = _AnchorCounter()
+    counter.feed(html)
+    counter.close()
+    return counter.anchors
+
+
 def html_anchor_lines(markdown: str) -> list[int]:
     """Return the lines carrying a raw HTML anchor with an ``href``, in document order.
 
     Markdown-it emits raw HTML as ``html_block`` and ``html_inline`` rather than as link
     tokens, so an anchor written that way never reaches ``extract_links`` and its destination
     would go unchecked. Reporting the anchor keeps that gap loud rather than silently green;
-    resolving the destination is deliberately not attempted, because doing it properly means
-    parsing HTML and this gate's contract is Markdown links.
+    resolving the destination is deliberately not attempted, because that widens the contract
+    from Markdown links to HTML generally.
 
     An anchor with no ``href`` carries no destination -- ``<a name="top">`` names one -- so it
-    is not reported.
+    is not reported, and neither is anchor text inside a comment or a raw-text element.
 
     Args:
         markdown: Markdown document text.
@@ -99,12 +127,12 @@ def html_anchor_lines(markdown: str) -> list[int]:
     for token in _PARSER.parse(markdown):
         start = token.map[0] + 1 if token.map is not None else 1
         if token.type == "html_block":
-            lines.extend(start for _ in _HTML_ANCHOR_RE.finditer(token.content))
+            lines.extend(start for _ in range(_anchor_count(token.content)))
         if token.type != "inline" or token.children is None:
             continue
         for child in token.children:
-            if child.type == "html_inline" and _HTML_ANCHOR_RE.search(child.content):
-                lines.append(start)
+            if child.type == "html_inline":
+                lines.extend(start for _ in range(_anchor_count(child.content)))
     return lines
 
 
@@ -129,13 +157,19 @@ def _is_single_name(segment: str) -> bool:
     reject it on a contributor's machine. Taking the stricter grammar everywhere costs only
     filenames nobody writes and makes the verdict the same wherever it runs.
 
+    A NUL is refused here rather than left to the filesystem. No path API accepts one: the
+    resolve that follows raises ``ValueError`` instead of answering, which would end the run
+    on a traceback and leave every later link in every later document unchecked.
+
     Args:
         segment: One decoded path segment.
 
     Returns:
         True when the segment names a single file or directory, with no separator of either
-        flavour, no drive, and no root.
+        flavour, no drive, no root, and no NUL.
     """
+    if "\0" in segment:
+        return False
     windows = PureWindowsPath(segment)
     return not windows.drive and not windows.root and windows.parts == (segment,)
 
@@ -197,12 +231,17 @@ def _fragment_message(
     repo_root: Path,
     cache: dict[Path, frozenset[str]],
 ) -> str | None:
-    """Return a diagnostic when a fragment matches no heading in a Markdown target."""
+    """Return a diagnostic when a fragment matches no heading in a Markdown target.
+
+    Both interpolations are neutralized: the target is a repo-controlled filename, and the
+    fragment carries whatever the destination percent-encoded, so ``#%1b`` would otherwise put
+    a live ESC on stderr. See AD-34.
+    """
     if fragment in _heading_ids(target, cache):
         return None
-    return (
-        f"fragment '#{fragment}' matches no heading in {target.relative_to(repo_root).as_posix()}"
-    )
+    displayed_target = format_path_for_display(target.relative_to(repo_root).as_posix())
+    displayed_fragment = format_path_for_display("#" + fragment)
+    return f"fragment {displayed_fragment} matches no heading in {displayed_target}"
 
 
 def _is_out_of_scope(parts: SplitResult) -> bool:
@@ -340,7 +379,7 @@ def check_repository_links(repo_root: Path) -> list[str]:
     cache: dict[Path, frozenset[str]] = {}
     messages: list[str] = []
     for document in maintained_documents(root):
-        source = document.relative_to(root).as_posix()
+        source = format_path_for_display(document.relative_to(root).as_posix())
         text = document.read_text(encoding="utf-8")
         for link in extract_links(text):
             message = _link_message(link, document, root, cache)

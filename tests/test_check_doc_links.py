@@ -358,6 +358,69 @@ def test_html_anchor_inside_code_is_not_reported(tmp_path):
     assert check_repository_links(tmp_path) == []
 
 
+def test_control_bytes_in_a_source_filename_are_neutralized(tmp_path):
+    # A filename is repo-controlled text that reaches stderr without passing any parser, so
+    # ESC in one could forge or erase an earlier pre-commit line. AD-34's boundary.
+    _write(tmp_path, "A\x1b[2KB.md", "# Evil\n\n[x](MISSING.md)\n")
+
+    messages = check_repository_links(tmp_path)
+
+    assert len(messages) == 1
+    assert "\x1b" not in messages[0]
+    assert "\\x1b" in messages[0]
+
+
+def test_control_bytes_in_a_fragment_are_neutralized(tmp_path):
+    # The fragment is repo-controlled too, and percent-encoding smuggles ESC past the parser.
+    _write(tmp_path, "README.md", "# Readme\n\n[x](GUIDE.md#%1b[2K)\n")
+    _write(tmp_path, "GUIDE.md", "# Guide\n")
+
+    messages = check_repository_links(tmp_path)
+
+    assert len(messages) == 1
+    assert "\x1b" not in messages[0]
+
+
+def test_control_bytes_in_a_target_filename_are_neutralized(tmp_path):
+    _write(tmp_path, "README.md", "# Readme\n\n[x](A%1B%5B2KB.md#nope)\n")
+    _write(tmp_path, "A\x1b[2KB.md", "# Target\n")
+
+    messages = check_repository_links(tmp_path)
+
+    assert len(messages) == 1
+    assert "\x1b" not in messages[0]
+
+
+def test_percent_encoded_nul_is_reported_rather_than_raised(tmp_path):
+    # unquote yields an embedded NUL, which resolve() raises on rather than comparing. The
+    # second link proves the run continued instead of dying on a traceback.
+    _write(tmp_path, "README.md", "# Readme\n\n[x](bad%00.md)\n\n[y](ALSO-MISSING.md)\n")
+
+    messages = check_repository_links(tmp_path)
+
+    assert len(messages) == 2
+    assert "bad%00.md" in messages[0]
+    assert "ALSO-MISSING.md" in messages[1]
+
+
+def test_anchor_inside_an_html_comment_is_not_reported(tmp_path):
+    # A commented-out example is not a destination, and failing a mandatory hook on one would
+    # reject a document for documenting itself.
+    _write(tmp_path, "README.md", '# Readme\n\n<!-- <a href="MISSING.md">example</a> -->\n')
+
+    assert check_repository_links(tmp_path) == []
+
+
+def test_anchor_inside_a_script_block_is_not_reported(tmp_path):
+    _write(
+        tmp_path,
+        "README.md",
+        "# Readme\n\n<script>\nvar s = '<a href=\"MISSING.md\">x</a>';\n</script>\n",
+    )
+
+    assert check_repository_links(tmp_path) == []
+
+
 def test_directory_target_is_accepted(tmp_path):
     _write(tmp_path, "README.md", "# Readme\n\n[vendor](vendor/)\n")
     (tmp_path / "vendor").mkdir()
@@ -371,12 +434,13 @@ def test_messages_are_ordered_by_document_then_by_link(tmp_path):
 
     messages = check_repository_links(tmp_path)
 
+    # Sources are spelled the AD-34 way, so the prefix carries the display quotes.
     assert len(messages) == 3
-    assert messages[0].startswith("ALPHA.md")
+    assert messages[0].startswith("'ALPHA.md'")
     assert "MISSING-A1.md" in messages[0]
-    assert messages[1].startswith("ALPHA.md")
+    assert messages[1].startswith("'ALPHA.md'")
     assert "MISSING-A2.md" in messages[1]
-    assert messages[2].startswith("ZULU.md")
+    assert messages[2].startswith("'ZULU.md'")
 
 
 def test_maintained_documents_are_the_sorted_root_markdown_files(tmp_path):
