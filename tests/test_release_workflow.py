@@ -12,7 +12,7 @@ import tomllib
 from pathlib import Path
 
 from ruamel.yaml import YAML
-from workflow_helpers import _commands, _invocations, _invokes, _named_step
+from workflow_helpers import _commands, _invocations, _invokes, _named_step, _uncommented
 
 _ROOT = Path(__file__).resolve().parents[1]
 _WORKFLOW_TEXT = (_ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8")
@@ -30,6 +30,9 @@ _PACKAGE_URL = "git+https://github.com/Guardantix/doc-lattice"
 # quoted. The inner text is re-read as its own command rather than matched as a string, so a
 # `mktemp` reached through flags or extra spacing still counts.
 _COMMAND_SUBSTITUTION = re.compile(r"^(\w+)=\$\((.*)\)$")
+# The two operators that run what follows in the same shell and only on the left side
+# succeeding, which is what carries a `cd` to the commands after it.
+_SEQUENCING = frozenset({"&&", ";"})
 # The release steps that verify the source and the published artifacts. None of them produces a
 # job output, so deleting one leaves every other job green and the release still publishes; these
 # names are the only thing standing between a silent deletion and an unverified release.
@@ -135,27 +138,64 @@ def _throwaway_dirs(text: str) -> set[str]:
     return names
 
 
+def _separated_commands(line: str) -> list[tuple[str, list[str]]]:
+    """Return each command on a line paired with the operator that precedes it.
+
+    `_invocations` drops the operator, which is the right shape for every caller asking what
+    ran. A caller asking where it ran needs the operator back: `cd d && x` and `cd d || x` are
+    the same two argvs to a reader that only sees the split.
+
+    The first command's operator is "", since nothing precedes it.
+    """
+    separated = []
+    lexer = shlex.shlex(_uncommented(line.strip()), posix=True, punctuation_chars=True)
+    lexer.whitespace_split = True
+    separator = ""
+    current: list[str] = []
+    for token in lexer:
+        if set(token) <= {"&", "|", ";"}:
+            separated.append((separator, current))
+            separator, current = token, []
+        else:
+            current.append(token)
+    separated.append((separator, current))
+    return [(operator, argv) for operator, argv in separated if argv]
+
+
 def _throwaway_dir_runs(text: str, program: str, subcommand: str) -> list[list[str]]:
     """Return each `program subcommand` command that runs inside a throwaway directory.
 
-    Three separate presence checks would not prove this. `_invocations` splits a line at `&&`,
-    so it exposes the command's own argv but no longer associates it with the `cd` in front of
-    it, and an unrelated `mktemp` block plus a command left in the checkout root would satisfy
-    them all. The binding is re-established here by reading one line at a time: the `cd` has to
-    target a variable this same text assigned from `mktemp -d`, and the command has to come
-    after it in that command group. A later `cd` somewhere else ends the group's reach, since
-    from that point the command runs wherever that `cd` landed.
+    Three separate presence checks would not prove this. `_invocations` splits a line at its
+    operators, so it exposes the command's own argv but no longer associates it with the `cd`
+    in front of it, and an unrelated `mktemp` block plus a command left in the checkout root
+    would satisfy them all. The binding is re-established here by reading one line at a time:
+    the `cd` has to target a variable this same text assigned from `mktemp -d`, and the command
+    has to come after it. A later `cd` somewhere else ends its reach, since from that point the
+    command runs wherever that `cd` landed.
+
+    Which operator joined them decides whether the `cd` reaches at all, so a split that only
+    reported adjacency would still accept three rewrites that break the guarantee. Only `&&`
+    and `;` run the rest of the list in the shell that moved and on the `cd` succeeding. `||`
+    runs it precisely when the `cd` failed; `|` and `&` run it in a sibling subshell that
+    inherited the *original* directory, which is the checkout root this assertion exists to
+    exclude. Past that first operator the directory persists for the rest of the line, `|` and
+    `&` included -- their subshells inherit the directory the `cd` reached -- so it is only the
+    operator joining the `cd` to what follows that is load-bearing.
     """
     workdirs = _throwaway_dirs(text)
     matched = []
     for line in text.splitlines():
         entered = False
-        for argv in _invocations(line):
+        commands = _separated_commands(line)
+        for index, (_, argv) in enumerate(commands):
             # A command group may be a subshell, whose parentheses tokenize as words of their
             # own; they bound the `cd`'s effect rather than change which command runs.
             words = [word for word in argv if word not in {"(", ")"}]
             if words[:1] == ["cd"]:
-                entered = any(_expands(word, name) for word in words[1:] for name in workdirs)
+                joins = commands[index + 1][0] if index + 1 < len(commands) else ""
+                entered = joins in _SEQUENCING and any(
+                    _expands(word, name) for word in words[1:] for name in workdirs
+                )
             elif entered and _runs_subcommand(words, program, subcommand):
                 matched.append(words)
     return matched
