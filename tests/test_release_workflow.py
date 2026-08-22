@@ -6,12 +6,15 @@ workflow resolves to a 40-character commit SHA, so restating individual pins her
 only force a lockstep edit on every routine pin refresh.
 """
 
+import itertools
+import re
 import shlex
 import tomllib
+from collections.abc import Iterator
 from pathlib import Path
 
 from ruamel.yaml import YAML
-from workflow_helpers import _commands, _invocations, _invokes, _named_step
+from workflow_helpers import _commands, _invocations, _invokes, _named_step, _uncommented
 
 _ROOT = Path(__file__).resolve().parents[1]
 _WORKFLOW_TEXT = (_ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8")
@@ -25,6 +28,23 @@ _PROCEED = "steps.gate.outputs.proceed == 'true'"
 _TAG_STEP = "Create and push the tag"
 _SMOKE_FIXTURE = "tests/fixtures/release-smoke/.doc-lattice.yml"
 _PACKAGE_URL = "git+https://github.com/Guardantix/doc-lattice"
+# `name=value`, which `_invocations` hands back as one word. The value half is re-read rather
+# than matched as a string, so a command reached through flags or extra spacing still counts.
+_ASSIGNMENT = re.compile(r"^(\w+)=(.*)$")
+_COMMAND_SUBSTITUTION = re.compile(r"^\$\((.*)\)$")
+# The two operators that run what follows in the same shell and only on the left side
+# succeeding, which is what carries a `cd` to the commands after it.
+_SEQUENCING = frozenset({"&&", ";"})
+# Operators that keep the success path running once the `cd` has already reached. `||` drops
+# off it -- it runs its right side only when the left one failed -- and `&` backgrounds
+# everything to its left, the `cd` with it.
+_CONTINUES = frozenset({"&&", ";", "|"})
+# Redirections, which make a command's output go somewhere other than the substitution reading
+# it. `$(mktemp -d >/dev/null)` expands to nothing at all.
+_REDIRECTIONS = frozenset({">", ">>", "<", "<<"})
+# Programs that run another program rather than being the work themselves. A release step
+# reaches the packaged CLI through one of these, so the CLI's own name is not argv[0].
+_LAUNCHERS = frozenset({"uv", "uvx", "python", "python3"})
 # The release steps that verify the source and the published artifacts. None of them produces a
 # job output, so deleting one leaves every other job green and the release still publishes; these
 # names are the only thing standing between a silent deletion and an unverified release.
@@ -105,6 +125,217 @@ def _runs_subcommand(argv: list[str], program: str, subcommand: str) -> bool:
         word == program and argv[index + 1 : index + 2] == [subcommand]
         for index, word in enumerate(argv)
     )
+
+
+def _expands(word: str, name: str) -> bool:
+    """Report whether a word expands the shell variable `name`, in either spelling."""
+    return word in {f"${name}", f"${{{name}}}"}
+
+
+def _makes_throwaway_dir(value: str) -> bool:
+    """Report whether an assigned value is the path `mktemp -d` printed.
+
+    The whole value has to be one `mktemp -d` and nothing else. What a substitution expands to
+    is what its *last* command printed, so finding a qualifying `mktemp` somewhere inside it
+    proves nothing: `$(mktemp -d >/dev/null; printf '%s' "${GITHUB_WORKSPACE}")` runs one and
+    still expands to the checkout. Rather than work out what a compound substitution evaluates
+    to, this recognizes the one shape it can vouch for and refuses every other -- a redirection
+    included, since `$(mktemp -d >/dev/null)` expands to nothing.
+    """
+    substitution = _COMMAND_SUBSTITUTION.match(value)
+    if substitution is None:
+        return False
+    inner = _invocations(substitution.group(1))
+    return (
+        len(inner) == 1
+        and inner[0][:1] == ["mktemp"]
+        and "-d" in inner[0]
+        and _REDIRECTIONS.isdisjoint(inner[0])
+    )
+
+
+def _retarget(words: list[str], workdirs: dict[str, int], shell: int) -> None:
+    """Update, in place, which variables currently hold a freshly created temporary directory.
+
+    Assignments are applied in command order rather than collected over the whole step, so a
+    variable reassigned to a checkout path stops counting from that command onward. Collecting
+    them timelessly would keep `workdir` classified as a throwaway through
+    `workdir="$(mktemp -d)"; workdir="${GITHUB_WORKSPACE}"; cd "${workdir}"`, which lands in
+    the checkout.
+
+    Only a directory `mktemp` made itself qualifies. `mktemp` without `-d` creates a file, and
+    a literal path would name somewhere in the checkout, which is the thing a throwaway workdir
+    exists not to be -- so any other assignment drops the name.
+
+    Only a command that is *nothing but* assignments counts, which is the form whose effect
+    outlives the command. A word that merely looks like one is not one: `echo 'D=$(mktemp -d)'`
+    prints text and assigns nothing, and `D=… cmd` sets `D` in that one command's environment.
+    Reading every word would let either declare the checkout a throwaway directory.
+
+    Each name is recorded against the shell instance that assigned it, because an assignment
+    dies with the subshell that made it: `( D="$(mktemp -d)" )` leaves `D` untouched outside,
+    so the runner's own value -- the checkout, for a name like `GITHUB_WORKSPACE` -- is what a
+    later `cd` reads. A name assigned to anything else is dropped outright rather than scoped,
+    which can retire a binding that would really have survived; that direction is the safe one.
+
+    Args:
+        words: One command's words, with the parentheses around them already removed.
+        workdirs: Each throwaway-holding variable and the shell that assigned it, updated in
+            place.
+        shell: The shell instance this command runs in.
+    """
+    assignments = []
+    for word in words:
+        assignment = _ASSIGNMENT.match(word)
+        if assignment is None:
+            return
+        assignments.append(assignment.groups())
+    for name, value in assignments:
+        if _makes_throwaway_dir(value):
+            workdirs[name] = shell
+        else:
+            workdirs.pop(name, None)
+
+
+def _separated_commands(line: str) -> list[tuple[str, list[str]]]:
+    """Return each command on a line paired with the operator that precedes it.
+
+    `_invocations` drops the operator, which is the right shape for every caller asking what
+    ran. A caller asking where it ran needs the operator back: `cd d && x` and `cd d || x` are
+    the same two argvs to a reader that only sees the split.
+
+    The first command's operator is "", since nothing precedes it.
+    """
+    separated = []
+    lexer = shlex.shlex(_uncommented(line.strip()), posix=True, punctuation_chars=True)
+    lexer.whitespace_split = True
+    separator = ""
+    current: list[str] = []
+    for token in lexer:
+        if set(token) <= {"&", "|", ";"}:
+            separated.append((separator, current))
+            separator, current = token, []
+        else:
+            current.append(token)
+    separated.append((separator, current))
+    return [(operator, argv) for operator, argv in separated if argv]
+
+
+def _unnested(
+    argv: list[str], shells: list[int], opened: Iterator[int]
+) -> tuple[list[str], tuple[int, ...]]:
+    """Separate a command's own words from the subshell parentheses around them.
+
+    Each `(` is a distinct shell instance rather than one more level, because a count cannot
+    say *which* shell a command ran in: `( cd "${d}" ) && ( x )` closes the one that moved and
+    opens a sibling at the same nesting, so a depth comparison reads them as the same shell and
+    accepts an `x` that bash runs in the checkout. Numbering the instances keeps them apart.
+
+    Args:
+        argv: One command's tokens, parentheses included.
+        shells: The shell instances currently open, outermost first, updated in place.
+        opened: Source of instance numbers, one per subshell this script opens.
+
+    Returns:
+        The command's words, and the shell instances open when it ran.
+    """
+    words: list[str] = []
+    enclosing = tuple(shells)
+    for word in argv:
+        if word == "(":
+            shells.append(next(opened))
+        elif word == ")":
+            if len(shells) > 1:
+                shells.pop()
+        else:
+            if not words:
+                enclosing = tuple(shells)
+            words.append(word)
+    return words, enclosing
+
+
+def _launches(argv: list[str], program: str, subcommand: str) -> bool:
+    """Report whether a command runs `program subcommand` rather than merely naming it.
+
+    `_runs_subcommand` finds the two words anywhere in the argv, which is what lets a runner's
+    own flags precede the CLI. On its own it also accepts `echo … doc-lattice init`, so the
+    argv has to start with the program itself or with something that launches it.
+    """
+    return (
+        bool(argv)
+        and (argv[0] == program or argv[0] in _LAUNCHERS)
+        and _runs_subcommand(argv, program, subcommand)
+    )
+
+
+def _throwaway_dir_runs(text: str, program: str, subcommand: str) -> list[list[str]]:
+    """Return each `program subcommand` command that runs inside a throwaway directory.
+
+    Three separate presence checks would not prove this. `_invocations` splits a line at its
+    operators, so it exposes the command's own argv but no longer associates it with the `cd`
+    in front of it, and an unrelated `mktemp` block plus a command left in the checkout root
+    would satisfy them all. The binding is re-established here by reading one line at a time:
+    the `cd` has to target a variable this same text assigned from `mktemp -d`, and the command
+    has to come after it. A later `cd` somewhere else ends its reach, since from that point the
+    command runs wherever that `cd` landed.
+
+    Two things besides that order decide whether the `cd` reaches, and dropping either one
+    accepts a rewrite that breaks the guarantee while leaving this green.
+
+    *Which operator joined them.* Only `&&` and `;` run the rest of the list in the shell that
+    moved and on the `cd` succeeding. `||` runs it precisely when the `cd` failed; `|` and `&`
+    run it in a sibling subshell that inherited the *original* directory, which is the checkout
+    root this assertion exists to exclude.
+
+    *Whether the success path still reaches.* Every operator between the two matters, not only
+    the first: `cd "${d}" && true || x` leaves the directory changed and never runs `x`, since
+    a successful `true` skips the `||` branch. So `||` and `&` end the binding wherever they
+    appear -- `&` because it backgrounds everything to its left, the `cd` with it -- while `|`
+    is admitted after the first operator, where it only opens a subshell that inherits the
+    directory. This under-accepts on purpose: `cd "${d}" && a || b && x` does reach `x`, and is
+    rejected rather than reasoned about, because that direction fails closed.
+
+    *Which subshell each ran in.* A `cd` inside a subshell is undone at the closing paren, so
+    `( cd "${d}" ) && x` runs `x` in the checkout however the two are joined. The shell that
+    moved has to still be open when the command runs, and it is identified rather than counted:
+    `( cd "${d}" ) && ( x )` opens a sibling at the same nesting, which a depth comparison
+    cannot tell from the shell that moved. `cd "${d}" && ( x )` still matches, since a subshell
+    opened afterwards inherits the directory.
+
+    The match itself has to be an invocation and not a mention. `_runs_subcommand` finds the
+    two words anywhere in an argv, which is what lets a runner's own flags precede the CLI, but
+    it also accepts `echo … doc-lattice init` -- a step that would exit 0 having scaffolded
+    nothing. So the argv has to start with the program itself or with something that launches
+    it. That bounds the hole rather than closing it: a launcher pointed at another program
+    still satisfies it, and no argv-shaped check can tell that from the real thing.
+    """
+    workdirs: dict[str, int] = {}
+    opened = itertools.count(1)
+    matched = []
+    for line in text.splitlines():
+        shells, moved, moved_at = [0], None, -1
+        commands = _separated_commands(line)
+        for index, (joined_by, argv) in enumerate(commands):
+            words, enclosing = _unnested(argv, shells, opened)
+            _retarget(words, workdirs, enclosing[-1])
+            if moved is not None and index > moved_at + 1 and joined_by not in _CONTINUES:
+                # The success path out of the `cd` does not reach this command.
+                moved = None
+            if moved is not None and moved not in enclosing:
+                # The shell that moved has exited, taking its directory with it.
+                moved = None
+            if words[:1] == ["cd"]:
+                joins = commands[index + 1][0] if index + 1 < len(commands) else ""
+                reaches = joins in _SEQUENCING and any(
+                    _expands(word, name)
+                    for word in words[1:]
+                    for name, assigned_in in workdirs.items()
+                    if assigned_in in enclosing
+                )
+                moved, moved_at = (enclosing[-1], index) if reaches else (None, -1)
+            elif moved is not None and _launches(words, program, subcommand):
+                matched.append(words)
+    return matched
 
 
 def _fetches_tags(argv: list[str]) -> bool:
@@ -273,6 +504,13 @@ def test_smoke_step_runs_the_packaged_cli_against_the_release_fixture():
             # command is handed, so pointing FIXTURE at a passing stub fails here too.
             assert _flag_value(argv, "--config") == "${FIXTURE}"
             assert _flag_value(argv, "--from") == "${REF}"
+    # The scaffolding path has no fixture to run against, so it is pinned by where it runs
+    # instead: a throwaway directory, because `init` writes into the working directory and the
+    # checkout already holds a configuration file that would mask a scaffolding regression.
+    inits = _throwaway_dir_runs(_commands(step), "doc-lattice", "init")
+    assert inits
+    for argv in inits:
+        assert _flag_value(argv, "--from") == "${REF}"
     assert _step_index(release, "Smoke-test the commit") < _step_index(release, _TAG_STEP)
 
 
