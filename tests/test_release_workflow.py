@@ -26,13 +26,16 @@ _PROCEED = "steps.gate.outputs.proceed == 'true'"
 _TAG_STEP = "Create and push the tag"
 _SMOKE_FIXTURE = "tests/fixtures/release-smoke/.doc-lattice.yml"
 _PACKAGE_URL = "git+https://github.com/Guardantix/doc-lattice"
-# `name="$(command)"`, which `_invocations` hands back as one word because the substitution is
-# quoted. The inner text is re-read as its own command rather than matched as a string, so a
-# `mktemp` reached through flags or extra spacing still counts.
-_COMMAND_SUBSTITUTION = re.compile(r"^(\w+)=\$\((.*)\)$")
+# `name=value`, which `_invocations` hands back as one word. The value half is re-read rather
+# than matched as a string, so a command reached through flags or extra spacing still counts.
+_ASSIGNMENT = re.compile(r"^(\w+)=(.*)$")
+_COMMAND_SUBSTITUTION = re.compile(r"^\$\((.*)\)$")
 # The two operators that run what follows in the same shell and only on the left side
 # succeeding, which is what carries a `cd` to the commands after it.
 _SEQUENCING = frozenset({"&&", ";"})
+# Programs that run another program rather than being the work themselves. A release step
+# reaches the packaged CLI through one of these, so the CLI's own name is not argv[0].
+_LAUNCHERS = frozenset({"uv", "uvx", "python", "python3"})
 # The release steps that verify the source and the published artifacts. None of them produces a
 # job output, so deleting one leaves every other job green and the release still publishes; these
 # names are the only thing standing between a silent deletion and an unverified release.
@@ -120,22 +123,36 @@ def _expands(word: str, name: str) -> bool:
     return word in {f"${name}", f"${{{name}}}"}
 
 
-def _throwaway_dirs(text: str) -> set[str]:
-    """Return the variables shell text assigns a freshly created temporary directory to.
+def _retarget(words: list[str], workdirs: set[str]) -> None:
+    """Update, in place, which variables currently hold a freshly created temporary directory.
 
-    Only a directory `mktemp` made itself counts. `mktemp` without `-d` creates a file, and a
-    literal path would name somewhere in the checkout, which is the thing a throwaway workdir
-    exists not to be.
+    Assignments are applied in command order rather than collected over the whole step, so a
+    variable reassigned to a checkout path stops counting from that command onward. Collecting
+    them timelessly would keep `workdir` classified as a throwaway through
+    `workdir="$(mktemp -d)"; workdir="${GITHUB_WORKSPACE}"; cd "${workdir}"`, which lands in
+    the checkout.
+
+    Only a directory `mktemp` made itself qualifies. `mktemp` without `-d` creates a file, and
+    a literal path would name somewhere in the checkout, which is the thing a throwaway workdir
+    exists not to be -- so any other assignment drops the name.
+
+    Args:
+        words: One command's words, with the parentheses around them already removed.
+        workdirs: The variables currently holding a throwaway directory, updated in place.
     """
-    names = set()
-    for argv in _invocations(text):
-        for word in argv:
-            match = _COMMAND_SUBSTITUTION.match(word)
-            if match is not None and any(
-                inner[:1] == ["mktemp"] and "-d" in inner for inner in _invocations(match.group(2))
-            ):
-                names.add(match.group(1))
-    return names
+    for word in words:
+        assignment = _ASSIGNMENT.match(word)
+        if assignment is None:
+            continue
+        name, value = assignment.groups()
+        substitution = _COMMAND_SUBSTITUTION.match(value)
+        if substitution is not None and any(
+            inner[:1] == ["mktemp"] and "-d" in inner
+            for inner in _invocations(substitution.group(1))
+        ):
+            workdirs.add(name)
+        else:
+            workdirs.discard(name)
 
 
 def _separated_commands(line: str) -> list[tuple[str, list[str]]]:
@@ -186,6 +203,20 @@ def _unnested(argv: list[str], depth: int) -> tuple[list[str], int, int]:
     return words, command_depth, depth
 
 
+def _launches(argv: list[str], program: str, subcommand: str) -> bool:
+    """Report whether a command runs `program subcommand` rather than merely naming it.
+
+    `_runs_subcommand` finds the two words anywhere in the argv, which is what lets a runner's
+    own flags precede the CLI. On its own it also accepts `echo … doc-lattice init`, so the
+    argv has to start with the program itself or with something that launches it.
+    """
+    return (
+        bool(argv)
+        and (argv[0] == program or argv[0] in _LAUNCHERS)
+        and _runs_subcommand(argv, program, subcommand)
+    )
+
+
 def _throwaway_dir_runs(text: str, program: str, subcommand: str) -> list[list[str]]:
     """Return each `program subcommand` command that runs inside a throwaway directory.
 
@@ -212,14 +243,22 @@ def _throwaway_dir_runs(text: str, program: str, subcommand: str) -> list[list[s
     rather than the parentheses being discarded: the command has to run at or below the `cd`'s
     own nesting, which keeps `cd "${d}" && ( x )` matching, since a subshell opened afterwards
     inherits the directory.
+
+    The match itself has to be an invocation and not a mention. `_runs_subcommand` finds the
+    two words anywhere in an argv, which is what lets a runner's own flags precede the CLI, but
+    it also accepts `echo … doc-lattice init` -- a step that would exit 0 having scaffolded
+    nothing. So the argv has to start with the program itself or with something that launches
+    it. That bounds the hole rather than closing it: a launcher pointed at another program
+    still satisfies it, and no argv-shaped check can tell that from the real thing.
     """
-    workdirs = _throwaway_dirs(text)
+    workdirs: set[str] = set()
     matched = []
     for line in text.splitlines():
         depth, entered_depth = 0, None
         commands = _separated_commands(line)
         for index, (_, argv) in enumerate(commands):
             words, command_depth, depth = _unnested(argv, depth)
+            _retarget(words, workdirs)
             if entered_depth is not None and command_depth < entered_depth:
                 # The subshell that moved has exited, taking its directory with it.
                 entered_depth = None
@@ -229,7 +268,7 @@ def _throwaway_dir_runs(text: str, program: str, subcommand: str) -> list[list[s
                     _expands(word, name) for word in words[1:] for name in workdirs
                 )
                 entered_depth = command_depth if reaches else None
-            elif entered_depth is not None and _runs_subcommand(words, program, subcommand):
+            elif entered_depth is not None and _launches(words, program, subcommand):
                 matched.append(words)
     return matched
 
