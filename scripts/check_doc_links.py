@@ -15,7 +15,7 @@ the document-order id GitHub gives it rather than collapsing onto one base slug.
 import sys
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
-from urllib.parse import SplitResult, unquote, urlsplit
+from urllib.parse import SplitResult, parse_qs, unquote, urlsplit
 
 from markdown_it import MarkdownIt
 
@@ -74,28 +74,39 @@ def maintained_documents(repo_root: Path) -> list[Path]:
     return sorted(path for path in repo_root.glob(f"*{_MARKDOWN_SUFFIX}") if path.is_file())
 
 
-def _contained_parts(base: PurePosixPath, relative: str) -> tuple[str, ...] | None:
+def _contained_parts(base: PurePosixPath, raw_path: str) -> tuple[str, ...] | None:
     """Join a relative destination onto a base directory without leaving the repository.
 
+    Structure is read off the *encoded* path and each surviving segment is decoded after,
+    because a percent-encoded separator is a literal character inside one segment rather than
+    a separator (RFC 3986). Decoding the whole path first would let ``%2Fetc%2Fpasswd`` become
+    an absolute path, and joining an absolute component discards the repository root outright.
+
     The join is lexical on purpose: resolving through the filesystem would follow symlinks and
-    report a link that GitHub renders perfectly well as escaping the repository.
+    report a link that GitHub renders perfectly well as leaving the repository.
 
     Args:
         base: The source document's directory, relative to the repository root.
-        relative: The decoded relative destination.
+        raw_path: The still-encoded path component of the destination.
 
     Returns:
-        The target's parts relative to the repository root, or None when the destination
-        climbs above it.
+        The target's parts relative to the repository root, or None when the destination does
+        not name a repository-contained path -- either because it climbs above the root, or
+        because a segment decodes into path structure of its own.
     """
     parts = list(base.parts)
-    for part in PurePosixPath(relative).parts:
-        if part == "..":
+    for raw_segment in raw_path.split("/"):
+        if raw_segment in ("", "."):
+            continue
+        if raw_segment == "..":
             if not parts:
                 return None
             parts.pop()
-        elif part not in ("", "."):
-            parts.append(part)
+            continue
+        segment = unquote(raw_segment)
+        if "/" in segment or segment in (".", ".."):
+            return None
+        parts.append(segment)
     return tuple(parts)
 
 
@@ -134,10 +145,26 @@ def _is_out_of_scope(parts: SplitResult) -> bool:
 
 
 def _resolve_target(raw_path: str, document: Path, repo_root: Path) -> Path | None:
-    """Return the repository path a relative destination names, or None when it escapes."""
+    """Return the repository path a relative destination names, or None when it does not."""
     source_dir = PurePosixPath(document.parent.relative_to(repo_root).as_posix())
-    parts = _contained_parts(source_dir, unquote(raw_path))
+    parts = _contained_parts(source_dir, raw_path)
     return None if parts is None else repo_root.joinpath(*parts)
+
+
+def _selects_plain_view(query: str) -> bool:
+    """Report whether a query selects GitHub's plain-source view.
+
+    That view lists source lines, so its fragments are line references such as ``#L5`` and no
+    heading id could match one. Every other query still renders the document, where a fragment
+    is an ordinary heading id and must be validated.
+
+    Args:
+        query: The destination's query component.
+
+    Returns:
+        True only for GitHub's ``plain=1``.
+    """
+    return "1" in parse_qs(query).get("plain", [])
 
 
 def _link_message(
@@ -152,9 +179,8 @@ def _link_message(
     reported, because a fragment on a target nobody can open says nothing new.
 
     A query is a view parameter, not part of the filename, so it is split off before the
-    target is resolved. It also suppresses heading validation: GitHub's ``?plain=1`` renders
-    source rather than headings, where a fragment is a line reference such as ``#L5`` and no
-    heading id could match it.
+    target is resolved. Only the plain-source view suppresses heading validation, and it does
+    so for a query-only destination too, which resolves against the current document.
 
     Args:
         link: The link to resolve.
@@ -169,15 +195,17 @@ def _link_message(
     parts = urlsplit(href)
     if _is_out_of_scope(parts):
         return None
-    fragment = unquote(parts.fragment)
+    # The plain-source view drops the fragment from validation but not the target from
+    # existence checking: the file still has to be there for the view to render it.
+    fragment = "" if _selects_plain_view(parts.query) else unquote(parts.fragment)
     if not parts.path:
         return _fragment_message(fragment, document, repo_root, cache) if fragment else None
     target = _resolve_target(parts.path, document, repo_root)
     if target is None:
-        return f"link target {href!r} escapes the repository"
+        return f"link target {href!r} does not resolve inside the repository"
     if not target.exists():
         return f"link target {href!r} does not exist"
-    if not fragment or parts.query or target.suffix != _MARKDOWN_SUFFIX or not target.is_file():
+    if not fragment or target.suffix != _MARKDOWN_SUFFIX or not target.is_file():
         return None
     return _fragment_message(fragment, target, repo_root, cache)
 

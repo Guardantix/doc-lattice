@@ -196,6 +196,54 @@ def test_fragment_is_not_heading_checked_when_the_destination_carries_a_query(tm
     assert check_repository_links(tmp_path) == []
 
 
+def test_percent_encoded_separator_is_not_a_path_separator(tmp_path):
+    # RFC 3986: %2F is a literal character inside one segment, not a separator. Decoding the
+    # whole path before splitting it would manufacture structure and hand joinpath an absolute
+    # component, which discards the repository root entirely.
+    _write(tmp_path, "README.md", "# Readme\n\n[x](%2Fetc%2Fpasswd)\n")
+
+    messages = check_repository_links(tmp_path)
+
+    assert len(messages) == 1
+    assert "%2Fetc%2Fpasswd" in messages[0]
+
+
+def test_percent_encoded_dot_segment_does_not_climb_out(tmp_path):
+    _write(tmp_path, "README.md", "# Readme\n\n[x](%2E%2E/outside.md)\n")
+
+    messages = check_repository_links(tmp_path)
+
+    assert len(messages) == 1
+    assert "outside.md" in messages[0]
+
+
+def test_same_document_plain_view_link_is_not_heading_checked(tmp_path):
+    # A query-only destination resolves against the current document, so this is the
+    # same-document form of the plain-source view.
+    _write(tmp_path, "README.md", "# Readme\n\n[line](?plain=1#L5)\n")
+
+    assert check_repository_links(tmp_path) == []
+
+
+def test_ordinary_query_still_validates_the_fragment(tmp_path):
+    # Only the plain-source view replaces heading ids with line anchors. Any other query still
+    # renders the document, so exempting every query would let a renamed heading pass silently.
+    _write(tmp_path, "README.md", "# Readme\n\n[x](GUIDE.md?utm_source=docs#no-such-heading)\n")
+    _write(tmp_path, "GUIDE.md", "# Guide\n\n## Section\n")
+
+    messages = check_repository_links(tmp_path)
+
+    assert len(messages) == 1
+    assert "no-such-heading" in messages[0]
+
+
+def test_ordinary_query_accepts_a_resolving_fragment(tmp_path):
+    _write(tmp_path, "README.md", "# Readme\n\n[x](GUIDE.md?utm_source=docs#section)\n")
+    _write(tmp_path, "GUIDE.md", "# Guide\n\n## Section\n")
+
+    assert check_repository_links(tmp_path) == []
+
+
 def test_directory_target_is_accepted(tmp_path):
     _write(tmp_path, "README.md", "# Readme\n\n[vendor](vendor/)\n")
     (tmp_path / "vendor").mkdir()
