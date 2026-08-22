@@ -9,14 +9,9 @@ from ...check import EdgeStatus, check_lattice, has_drift, statuses_json, summar
 from ...constants import VALID_EDGE_STATES, VALID_REPORT_FORMATS
 from ...report_render import render_statuses
 from ..errors import EXIT_FINDING, EXIT_TOOL_ERROR, exit_on_project_error
+from ..github import github_annotation, warn_unattachable_annotations
 from ..options import ConfigOpt, IndentOpt, ReportFormatOpt
-from ..output import (
-    github_annotation,
-    select_output,
-    warn_unattachable_annotations,
-    write_json,
-    write_text,
-)
+from ..output import select_output, write_json, write_text
 from ..runtime import CliRuntime, get_runtime
 
 
@@ -97,7 +92,7 @@ def register_check(app: typer.Typer) -> None:
             indent=indent,
         )
         only_states = _parse_only_states(runtime, only)
-        with exit_on_project_error(runtime):
+        with exit_on_project_error(runtime, github=selection.format == "github"):
             project = runtime.project(config)
             lattice = runtime.lattice(project)
             statuses = check_lattice(lattice)

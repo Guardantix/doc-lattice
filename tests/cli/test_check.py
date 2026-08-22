@@ -11,7 +11,7 @@ import pytest
 
 import doc_lattice.config as config_module
 from doc_lattice.cli import app
-from doc_lattice.cli.output import escape_github_property
+from doc_lattice.cli.github import escape_github_property
 from doc_lattice.constants import EdgeState
 
 from .helpers import _clean_docs, runner

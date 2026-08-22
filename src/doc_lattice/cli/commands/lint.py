@@ -6,14 +6,9 @@ from ...constants import VALID_REPORT_FORMATS
 from ...lint import lint_json, lint_lattice
 from ...report_render import render_lint
 from ..errors import EXIT_FINDING, exit_on_project_error
+from ..github import github_annotation, warn_unattachable_annotations
 from ..options import ConfigOpt, IndentOpt, ReportFormatOpt
-from ..output import (
-    github_annotation,
-    select_output,
-    warn_unattachable_annotations,
-    write_json,
-    write_text,
-)
+from ..output import select_output, write_json, write_text
 from ..runtime import get_runtime
 
 
@@ -39,7 +34,7 @@ def register_lint(app: typer.Typer) -> None:
             valid=VALID_REPORT_FORMATS,
             indent=indent,
         )
-        with exit_on_project_error(runtime):
+        with exit_on_project_error(runtime, github=selection.format == "github"):
             project = runtime.project(config)
             lattice = runtime.lattice(project)
             result = lint_lattice(lattice)

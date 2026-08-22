@@ -2509,3 +2509,48 @@ def test_reconcile_all_with_ref_filters_without_raising(lattice_dir: Path):
     refs = _planned_refs(plan)
     assert "art-direction#accent" in refs  # ref-matched edge planned
     assert "art-direction#motion" not in refs  # filtered out by ref, no raise
+
+
+# ---------------------------------------------------------------------------
+# GTX-204: reconcile's document failures carry the document they are about.
+
+
+def test_plan_rewrites_read_failure_carries_the_document_as_structured_data():
+    path = Path("downstream.md")
+
+    def raise_os_error(_path: Path) -> bytes:
+        raise OSError("disk vanished")
+
+    with pytest.raises(UnreadableDocError) as exc:
+        plan_rewrites({path: {"a#x": "newhash"}}, raise_os_error)
+
+    assert exc.value.source == path
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "---\nid: d\nderives_from: notalist\n---\nbody\n",
+        "---\n- not a mapping\n---\nbody\n",
+        "---\nid: d\nderives_from:\n  - notamapping\n---\nbody\n",
+        "---\nid: d\nderives_from:\n  - ref: 1\n---\nbody\n",
+    ],
+)
+def test_apply_reconcile_shape_failures_carry_the_document(text: str):
+    # Two of the helpers on this chain used to build the error with no path at all, even though
+    # the chain starts from `apply_reconcile(..., source)`. These are the shapes that reach them.
+    path = Path("downstream.md")
+
+    with pytest.raises(UnreadableDocError) as exc:
+        apply_reconcile(text, {"a#x": "newhash"}, path)
+
+    assert exc.value.source == path
+
+
+def test_apply_reconcile_unparseable_frontmatter_carries_the_document():
+    path = Path("downstream.md")
+
+    with pytest.raises(UnreadableDocError) as exc:
+        apply_reconcile("---\nid: [unclosed\n---\nbody\n", {"a#x": "newhash"}, path)
+
+    assert exc.value.source == path

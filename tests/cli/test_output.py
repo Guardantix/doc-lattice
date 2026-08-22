@@ -8,14 +8,7 @@ import pytest
 import typer
 from rich.console import Console
 
-from doc_lattice.cli.output import (
-    escape_github_message,
-    escape_github_property,
-    github_annotation,
-    select_output,
-    warn_unattachable_annotations,
-    write_json,
-)
+from doc_lattice.cli.output import select_output, write_json
 from doc_lattice.cli.runtime import CliRuntime
 from doc_lattice.config import ProjectConfig
 from doc_lattice.constants import VALID_REPORT_FORMATS
@@ -107,72 +100,3 @@ def test_write_json_uses_exact_injected_stdout(runtime: CliRuntime):
 
     assert _contents(runtime.stdout) == '{\n  "a": [\n    1\n  ]\n}\n'
     assert json.loads(_contents(runtime.stdout)) == {"a": [1]}
-
-
-def test_github_annotation_uses_escaped_absolute_path_outside_root(tmp_path: Path):
-    outside = tmp_path.parent / "outside%:,\nfile.md"
-
-    result = github_annotation(outside, tmp_path, "title", "message")
-
-    assert result == (f"::error file={escape_github_property(str(outside))},title=title::message")
-
-
-def test_github_annotation_escapes_all_workflow_metacharacters(tmp_path: Path):
-    result = github_annotation(
-        tmp_path / "sub%:,\nline.md",
-        tmp_path,
-        "title%:,\r\nline",
-        "message%:,\r\nline",
-    )
-
-    assert result == (
-        "::error file=sub%25%3A%2C%0Aline.md,title=title%25%3A%2C%0D%0Aline::message%25:,%0D%0Aline"
-    )
-
-
-def test_escape_github_message_encodes_workflow_command_metacharacters():
-    assert escape_github_message("100%\rfirst\nsecond: a,b") == ("100%25%0Dfirst%0Asecond: a,b")
-
-
-def test_escape_github_property_encodes_message_and_property_metacharacters():
-    assert escape_github_property("100%\rfirst\nsecond: a,b") == (
-        "100%25%0Dfirst%0Asecond%3A a%2Cb"
-    )
-
-
-def test_warn_unattachable_annotations_is_silent_when_every_document_is_contained(
-    runtime: CliRuntime, tmp_path: Path
-):
-    contained = tmp_path / "docs" / "down.md"
-
-    warn_unattachable_annotations(runtime, [contained])
-
-    assert _contents(runtime.stderr) == ""
-
-
-def test_warn_unattachable_annotations_names_the_base_and_each_outside_document(
-    runtime: CliRuntime, tmp_path: Path
-):
-    # An annotation rendered against a base that does not contain the document degrades to an
-    # absolute path GitHub drops in silence, so the gate fails with nothing shown on the diff.
-    outside = tmp_path.parent / "elsewhere" / "down.md"
-
-    warn_unattachable_annotations(runtime, [outside])
-
-    stderr = _contents(runtime.stderr)
-    assert "warning" in stderr
-    assert str(tmp_path) in stderr
-    assert str(outside) in stderr
-
-
-def test_warn_unattachable_annotations_reports_once_for_a_repeated_document(
-    runtime: CliRuntime, tmp_path: Path
-):
-    # Findings are per edge, so one document can be annotated many times in a run; the warning
-    # is per run.
-    outside = tmp_path.parent / "elsewhere" / "down.md"
-
-    warn_unattachable_annotations(runtime, [outside, outside, outside])
-
-    assert _contents(runtime.stderr).count(str(outside)) == 1
-    assert "1 annotated document(s)" in _contents(runtime.stderr)

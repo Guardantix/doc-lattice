@@ -812,3 +812,60 @@ def test_the_load_failure_detail_is_the_display_spelling_of_the_caught_exception
     assert message.endswith(repr(str(caught.value)))
     assert "\\n" in message
     assert "line: 1" in message
+
+
+# ---------------------------------------------------------------------------
+# GTX-204: the failing document is carried as structured data, not only inside the message.
+
+
+def test_schema_failure_carries_the_document_it_names():
+    # The `NodeMeta.model_validate` raise site. Asserting the attribute rather than parsing the
+    # path back out of the message is the whole point of the change: a renderer that wants to
+    # annotate the file cannot re-derive it from a formatted diagnostic.
+    source = Path("docs/a.md")
+
+    with pytest.raises(FrontmatterError) as exc:
+        parse_meta("id: x\nlayer: bogus\n", source)
+
+    assert exc.value.source == source
+
+
+def test_id_less_lattice_intent_failure_carries_the_document_it_names():
+    # The second `FrontmatterError` raise site, which formats its own message rather than going
+    # through `format_validation_error`, so it carries the path independently.
+    source = Path("docs/typo.md")
+
+    with pytest.raises(FrontmatterError) as exc:
+        parse_meta("idd: x\nderives_from: []\n", source)
+
+    assert exc.value.source == source
+
+
+def test_an_unparseable_frontmatter_block_carries_the_document_it_names():
+    source = Path("docs/a.md")
+
+    with pytest.raises(UnreadableDocError) as exc:
+        parse_meta("id: [unclosed\n", source)
+
+    assert exc.value.source == source
+
+
+def test_an_unclosed_fence_carries_the_document_it_names():
+    source = Path("docs/a.md")
+
+    with pytest.raises(UnreadableDocError) as exc:
+        split_frontmatter_parts("---\nid: x\n# no closing fence\n", source)
+
+    assert exc.value.source == source
+
+
+def test_the_carried_document_is_the_spelling_the_caller_passed():
+    # Discovery keeps each document's unresolved path as its identity, and annotation-root
+    # containment is lexical, so a raise site that resolved or normalized here would move the
+    # annotation to a different base than the drift findings use.
+    source = Path("docs/../docs/a.md")
+
+    with pytest.raises(FrontmatterError) as exc:
+        parse_meta("id: x\nlayer: bogus\n", source)
+
+    assert exc.value.source == source

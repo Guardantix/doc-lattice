@@ -96,7 +96,7 @@ def _resolve_reconcile_write_paths(
             write_paths[path] = safe_resolve(path, project_root)
         except ValueError as exc:
             msg = f"cannot write {format_path_for_display(path)}: it escapes the project root"
-            raise UnreadableDocError(msg) from exc
+            raise UnreadableDocError(msg, source=path) from exc
     return write_paths
 
 

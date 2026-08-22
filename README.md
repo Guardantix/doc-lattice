@@ -298,6 +298,17 @@ emits one escaped GitHub Actions `::error` workflow command per drift finding or
 violation, each with a repo-relative file path, so findings attach inline to the offending doc
 in the pull-request diff. Output selection never changes gate exit codes.
 
+A run that fails on one document rather than finding drift is annotated the same way. A broken
+frontmatter block, or a document that cannot be read or decoded, ends the run with exit 2 and
+emits a single annotation attached to that document, titled with the error code
+(`FRONTMATTER_ERROR`, `UNREADABLE_DOC`) and carrying the same text stderr reports. The stderr
+diagnostic is unchanged and still printed. A failure that names no single document -- a config
+defect, a broken ref, a reconcile transaction failure -- emits no annotation, because there is no
+file for GitHub to attach one to. The same unattachable warning applies: if the failing document falls outside the
+base, the run says so on stderr, since that annotation is the only one it emits. The other
+formats are unaffected: under `--format human` and `--format json` a failing run writes nothing
+to stdout and reports only on stderr.
+
 The reported path is relative to `GITHUB_WORKSPACE` when that variable is set and contains the
 document, which is the repository checkout root under GitHub Actions; annotations therefore
 stay attachable no matter which subdirectory the command runs in. Otherwise the base is the

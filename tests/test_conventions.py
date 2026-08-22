@@ -149,15 +149,53 @@ def test_every_module_has_a_docstring():
         assert ast.get_docstring(tree) is not None, f"{py_file.name} lacks a module docstring"
 
 
+def _declared_error_types() -> list[type[BaseException]]:
+    return [
+        cls
+        for _name, cls in inspect.getmembers(error_types, inspect.isclass)
+        if issubclass(cls, BaseException) and cls.__module__ == error_types.__name__
+    ]
+
+
+def _build_error(cls: type[error_types.ProjectError]) -> error_types.ProjectError:
+    """Construct one declared error type without knowing which tier it belongs to.
+
+    A document-scoped type requires the document it is about, so this branches on the base
+    rather than on a hand-listed set of names: a new one is then covered the day it is added.
+    """
+    if issubclass(cls, error_types.DocumentError):
+        return cls("msg", source=Path("docs/down.md"))
+    return cls("msg")
+
+
 def test_all_error_types_extend_project_error_with_code():
-    """Every exception defined in error_types.py must extend ProjectError and set a real code."""
-    for _name, cls in inspect.getmembers(error_types, inspect.isclass):
-        if not (issubclass(cls, BaseException) and cls.__module__ == error_types.__name__):
-            continue
-        if cls is ProjectError:
-            continue
+    """Every exception defined in error_types.py must extend ProjectError and set a real code.
+
+    An intermediate base is exempt from the code assertion for the reason ``ProjectError``
+    itself is: it declares a capability its subclasses share, and the code belongs to the
+    concrete type a raise site names. It is still required to extend ``ProjectError``.
+    """
+    declared = _declared_error_types()
+    intermediate = {base for cls in declared for base in cls.__mro__[1:]}
+    for cls in declared:
         assert issubclass(cls, ProjectError), f"{cls.__name__} does not extend ProjectError"
-        assert cls("msg").code != "UNKNOWN", f"{cls.__name__} left code at the default"
+        if cls in intermediate:
+            continue
+        assert _build_error(cls).code != "UNKNOWN", f"{cls.__name__} left code at the default"
+
+
+def test_every_intermediate_error_base_still_has_a_concrete_subclass():
+    """A base exempted from the code rule must actually be a base, not a type raised as one.
+
+    Without this the exemption above is self-granting: a concrete type gains it by being listed
+    in some other type's MRO, which is exactly what a future edit would get wrong.
+    """
+    declared = _declared_error_types()
+    exempt = {cls for cls in declared if cls in {base for c in declared for base in c.__mro__[1:]}}
+
+    assert {cls.__name__ for cls in exempt} == {"ProjectError", "DocumentError"}
+    for base in exempt:
+        assert any(cls is not base and issubclass(cls, base) for cls in declared)
 
 
 # ---------------------------------------------------------------------------

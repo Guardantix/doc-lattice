@@ -24,6 +24,14 @@ Repoint anything matching on the printed code, and anything catching `ConfigErro
 status is unchanged at 2, the messages are unchanged, and no other command's error-code mapping
 moves. See **Changed** below.
 
+A second thing to act on, and only for a caller that *constructs* this package's exception types
+rather than catching them. `FrontmatterError` and `UnreadableDocError` now require the failing
+document: `FrontmatterError(message, source=path)`, not `FrontmatterError(message)`. Both derive
+from a new `DocumentError`, which is where the `source` attribute lives, and `DocumentError`
+derives from `ProjectError`. Catching either type, or `ProjectError`, is unaffected; catching
+`DocumentError` is the new way to catch exactly the failures that name one document. Error codes,
+message text, and exit codes are unchanged. See **Fixed** below and AD-41 in ARCHITECTURE.md.
+
 ### Changed
 
 - A reconcile commit that loses its journal to a failed committed marker, and then cannot restore
@@ -104,6 +112,25 @@ moves. See **Changed** below.
   `init` writes. Tests pin the uncoded shapes too.
 
 ### Fixed
+
+- `check --format github` and `lint --format github` now annotate the document a run *failed* on,
+  not only the ones it classified. A broken frontmatter block, or a document that cannot be read
+  or decoded, previously exited 2 with a single stderr line and an empty stdout, so a pull request
+  whose gate failed on a bad document showed nothing at all on the diff -- the one place a
+  reviewer would look for the file name. Such a failure now emits an `::error file=...` line
+  attached to the offending document, resolved against the same annotation root drift findings
+  use, so it lands on the right file from a nested working directory too.
+
+  The annotation carries the error code in its title and the same message plus notes that stderr
+  carries, and it is written before the stderr diagnostic so a departed stdout reader still
+  reaches the silent 141 rather than a tool error with a half-written annotation. If the failing
+  document falls outside the annotation base, the run emits the same unattachable warning the
+  finding renderers already emit, since that annotation is the only one the run produces. Every other
+  renderer is untouched: `--format human` and `--format json` keep their exact stderr text, their
+  empty stdout, and exit 2, and a failure with no single document behind it -- a config defect, a
+  broken ref, a transaction failure -- emits no annotation under any format. AD-41 in
+  ARCHITECTURE.md records the hierarchy this rests on and what it decides for the message-only
+  error types, which are unchanged.
 
 - A command's exit code no longer depends on which of its output streams survived. Piping
   `doc-lattice` into a reader that departs early -- `head`, `jq -e`, a shell that closes the pipe

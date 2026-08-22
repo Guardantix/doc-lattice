@@ -104,9 +104,10 @@ def split_frontmatter_parts(text: str, source: Path) -> FrontmatterParts | None:
                 trailing,
                 "\n".join(lines[closing_fence_index + 1 :]),
             )
-    raise UnreadableDocError(
+    msg = (
         f"unclosed YAML frontmatter in {format_path_for_display(source)}: add a closing '---' fence"
     )
+    raise UnreadableDocError(msg, source=source)
 
 
 def split_frontmatter(text: str, source: Path) -> tuple[str | None, str]:
@@ -157,7 +158,7 @@ def parse_meta(raw_meta: str | None, source: Path) -> ParsedMeta:
     except YAML_LOAD_ERRORS as exc:
         detail = format_yaml_error_for_display(exc)
         msg = f"cannot parse frontmatter in {format_path_for_display(source)}: {detail}"
-        raise UnreadableDocError(msg) from exc
+        raise UnreadableDocError(msg, source=source) from exc
     # A fenced block holding no mapping (empty, a scalar, a list) declares no keys at all, so it
     # is the same untracked prose as a file with no fence. Warning on it would fire on any
     # document that merely opens with a thematic break.
@@ -174,7 +175,7 @@ def parse_meta(raw_meta: str | None, source: Path) -> ParsedMeta:
             model=NodeMeta,
             root_label=_ROOT_LOCATION,
         )
-        raise FrontmatterError(msg) from exc
+        raise FrontmatterError(msg, source=source) from exc
     return ParsedMeta(meta=meta, disposition="tracked", reused_anchors=reused_anchors)
 
 
@@ -243,4 +244,4 @@ def _id_less(data: dict[Any, Any], source: Path) -> ParsedMeta:
         "key, so the file and every edge it declares would be dropped from the lattice; add an "
         "'id' (check it for a typo) or remove the lattice keys"
     )
-    raise FrontmatterError(msg)
+    raise FrontmatterError(msg, source=source)
