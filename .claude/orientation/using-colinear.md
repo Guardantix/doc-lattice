@@ -11,7 +11,7 @@ Three named commands cover it.
 `/linear-finalize` has no modes and is the one skill that auto-invokes, on an open `ABC-N` PR.
 For ad-hoc reads/writes outside a workflow, run the `colinear` CLI with `--help`.
 
-This orientation matches colinear 0.66.x — verify against the `version:` line in `doctor` output; on a major/minor mismatch STOP and tell the user to re-run `colinear orientation enable`.
+This orientation matches colinear 0.67.x — verify against the `version:` line in `doctor` output; on a major/minor mismatch STOP and tell the user to re-run `colinear orientation enable`.
 If `colinear` is not found at all, run `./install.sh` from the colinear repo checkout — that is the version-skew recovery path and does not depend on the new binary.
 
 ## The pipeline
@@ -28,8 +28,14 @@ promote   show       show                    finalize   promote
           --ready    --delegate
 ```
 
-Every arrow on that line is written by a colinear command, including the one into the review state — `/linear-finalize` moves the issue there and verifies it, rather than waiting for a per-team Linear GitHub automation that fires on review request and not on PR open.
-The one arrow colinear never writes is the last: only a human closes an issue out.
+Every arrow on that line is driven by a colinear command, including the one into the review state.
+`/linear-finalize` performs that handback itself rather than depending on the team's Linear GitHub automation, whose rows are configured per team and may move the issue on PR open, on review request, or not at all.
+It attaches the attention marker either way, which no automation does, and verifies the result.
+Where an automation has already moved the issue to the review state, the handback says so and does the label half alone.
+The last arrow is the one colinear does not write directly.
+`/linear-promote --ship` merges the PR and writes no Linear state of its own; where the team's Linear GitHub integration closes issues on merge, which is its stock default, the issue reaches Done from that merge.
+So the gate is on invoking `--ship`, and an automated close is the expected outcome rather than a fault.
+Where that automation is off, a successful merge leaves the issue in the review state and a human moves it.
 
 The authoritative "agent finished, a human is needed" signal is the configured `labels.needs_human_review` marker, attached by the same handback write.
 Read that, not the workflow state, when you want to know whether work is waiting on a person: the state says where the issue sits in the pipeline, and the marker says who owes the next move.
@@ -43,7 +49,7 @@ Read that, not the workflow state, when you want to know whether work is waiting
 - **A UI issue that wants a design reference first**: `/linear-promote --design ABC-N` drafts the Claude Design brief (human-gated, and invoked directly — nothing routes an issue to it).
 - **An issue whose direction is not settled**: `/linear-promote --refine ABC-N` reviews it adversarially and returns the review in chat; add `--post` to file it as one advisory comment (human-gated).
 - **In Progress**: implementation work — done by a human, typically inside the worktree `--delegate` set up. Run the pipeline commands as you go; there is no autonomous driver. When you run the test suite during delegated work, record it: `colinear review record-test --issue ABC-N --command '<cmd>' --passed N --failed N`. Re-run after fixes — the report keeps the latest run per command.
-- **Open PR → reviewer handoff**: `/linear-finalize` — hand an issue with an open `ABC-N` PR back to the reviewer. It moves the issue to the configured review state, attaches the attention marker, and verifies both; it covers the delegated and the non-delegated return alike, selecting the path from whichever marker the issue carries under the configured `queue_ready` and `delegated` roles.
+- **Open PR → reviewer handoff**: `/linear-finalize` — hand an issue with an open `ABC-N` PR back to the reviewer. It ensures the issue is in the configured review state, moving it there unless an automation already did, attaches the attention marker either way, and verifies both; it covers the delegated and the non-delegated return alike, selecting the path from whichever marker the issue carries under the configured `queue_ready` and `delegated` roles.
 - **In Review → Done**: `/linear-promote --ship` — human-gated; never auto-invoke.
 
 ## Bulk filing
