@@ -37,12 +37,11 @@ under ``uv run --no-project``; this one runs against a synced project for exactl
 from __future__ import annotations
 
 import argparse
+import http.client
 import json
 import os
 import re
 import sys
-import urllib.error
-import urllib.request
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -52,7 +51,7 @@ from doc_lattice.constants import CHECKOUT_USES, SETUP_UV_USES
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterable, Sequence
 
-_API_ROOT = "https://api.github.com"
+_API_HOST = "api.github.com"
 _TIMEOUT_SECONDS = 30.0
 _HTTP_OK = 200
 _HTTP_NOT_FOUND = 404
@@ -159,40 +158,49 @@ def fetch_json(path: str) -> Response:
     every other non-200 is an infrastructure failure. Only a request that produced no status at
     all raises.
 
+    A connection rather than a URL is what makes that shape simple, and it is also what keeps the
+    scheme out of reach: ``HTTPSConnection`` fixes both the host and TLS in its constructor, so no
+    path composed here can move the request onto another host, and none can reach a ``file://``
+    the way a URL-opening transport composed from the same string could. Nothing is followed
+    either -- a redirect is returned as its own status and classified as an infrastructure
+    failure, which is the right answer for these two endpoints, where a 3xx means the action's
+    repository moved rather than that the pin is wrong.
+
     Args:
         path: An API path such as ``/repos/actions/checkout/git/ref/tags/v7.0.1``.
 
     Returns:
-        The response status and its decoded JSON body, which callers narrow themselves.
+        The response status and its decoded JSON body, which callers narrow themselves. A body
+        that is not JSON at all is carried as None rather than raising, because an error status
+        may legitimately have none; only an undecodable *success* raises.
 
     Raises:
         TransportError: If the request produced no HTTP response, or a 200 whose body was not
             decodable JSON. Neither says anything about the pin.
     """
-    # The scheme is fixed at a constant https root rather than composed from an argument, so no
-    # path this script builds can redirect the request onto another scheme or host.
-    request = urllib.request.Request(
-        f"{_API_ROOT}{path}",
-        headers={**_HEADERS, **_authorization()},
-        method="GET",
-    )
+    # The suppression below answers `httpsconnection-detected`, which warns that Python before
+    # 3.4.3 does not verify certificates by default. AD-24 makes 3.13 the supported floor and
+    # `requires-python` enforces it, so no interpreter this runs on predates verification. It is
+    # suppressed by rule id rather than blanket, and AD-43 records it as this repository's one
+    # semgrep suppression. Semgrep honors the directive only on the matched line or the one
+    # directly above it, which is why the reasoning is here and the directive is there; the
+    # trailing `noqa` is because Ruff reads the bare rule name as commented-out code.
+    # nosemgrep: httpsconnection-detected  # noqa: ERA001
+    connection = http.client.HTTPSConnection(_API_HOST, timeout=_TIMEOUT_SECONDS)
     try:
-        with urllib.request.urlopen(request, timeout=_TIMEOUT_SECONDS) as response:
-            status = response.status
-            body = response.read()
-    except urllib.error.HTTPError as error:
-        # A subclass of URLError, so it has to be caught first. Its body is an error document,
-        # never the payload a caller narrows, so it is closed and dropped.
-        error.close()
-        return Response(status=error.code, payload=None)
-    except urllib.error.URLError as error:
-        raise TransportError(f"GET {path} failed: {error.reason}") from error
-    except TimeoutError as error:
-        # A socket timeout surfaces as its own type rather than through URLError.
-        raise TransportError(f"GET {path} timed out after {_TIMEOUT_SECONDS:g}s") from error
+        connection.request("GET", path, headers={**_HEADERS, **_authorization()})
+        response = connection.getresponse()
+        status = response.status
+        body = response.read()
+    except (OSError, http.client.HTTPException) as error:
+        raise TransportError(f"GET {path} failed: {error}") from error
+    finally:
+        connection.close()
     try:
         return Response(status=status, payload=json.loads(body))
     except json.JSONDecodeError as error:
+        if status != _HTTP_OK:
+            return Response(status=status, payload=None)
         raise TransportError(f"GET {path} did not return JSON: {error}") from error
 
 

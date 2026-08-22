@@ -10,13 +10,10 @@ is only observable with network access, and the default `uv run --group dev pyte
 acquire that dependency.
 """
 
-import io
+import http.client
 import os
 import subprocess
 import sys
-import urllib.error
-import urllib.request
-from email.message import Message
 from pathlib import Path
 from runpy import run_path
 
@@ -381,58 +378,74 @@ def test_main_checks_exactly_the_pins_an_override_names(monkeypatch, capsys):
     assert "Pins checked: 1." in capsys.readouterr().out
 
 
-def _fake_urlopen(status: int, body: bytes):
+def _fake_connection(status: int, body: bytes, error: Exception | None = None):
+    """Return a fake HTTPSConnection class and the list recording how it was constructed."""
+    constructed = []
+
     class _Response:
-        def __enter__(self):
-            return self
-
-        def __exit__(self, *_exc):
-            return False
-
-        @property
-        def status(self) -> int:
-            return status
+        def __init__(self):
+            self.status = status
 
         def read(self) -> bytes:
             return body
 
-    def urlopen(_request, timeout=None):  # noqa: ARG001 - matches the stdlib signature
-        return _Response()
+    class _Connection:
+        def __init__(self, host, timeout=None):
+            constructed.append((host, timeout))
+            self.closed = False
 
-    return urlopen
+        def request(self, method, path, headers=None):
+            self.method, self.path, self.headers = method, path, headers
+            if error is not None:
+                raise error
+
+        def getresponse(self):
+            return _Response()
+
+        def close(self):
+            self.closed = True
+
+    return _Connection, constructed
 
 
 def test_fetch_json_returns_the_status_and_the_decoded_body(monkeypatch):
-    monkeypatch.setattr(urllib.request, "urlopen", _fake_urlopen(200, b'{"sha": "abc"}'))
+    # The host and TLS are fixed in the constructor rather than composed into a URL, which is what
+    # keeps a `--pin` override from reaching another host or a `file://` scheme.
+    connection, constructed = _fake_connection(200, b'{"sha": "abc"}')
+    monkeypatch.setattr(http.client, "HTTPSConnection", connection)
 
     response = fetch_json(_COMMITS)
 
     assert response.status == 200
     assert response.payload == {"sha": "abc"}
+    assert constructed == [("api.github.com", 30.0)]
 
 
 def test_fetch_json_returns_an_error_status_rather_than_raising(monkeypatch):
     # The status *is* the evidence: 404 from the probe is a finding and every other non-200 is a
     # failure, and neither classification is possible if the transport raises them all alike.
-    def raise_http_error(_request, timeout=None):  # noqa: ARG001 - matches the stdlib signature
-        raise urllib.error.HTTPError(
-            "https://api.github.com",
-            404,
-            "Not Found",
-            Message(),
-            io.BytesIO(b'{"message": "Not Found"}'),
-        )
-
-    monkeypatch.setattr(urllib.request, "urlopen", raise_http_error)
+    connection, _constructed = _fake_connection(404, b'{"message": "Not Found"}')
+    monkeypatch.setattr(http.client, "HTTPSConnection", connection)
 
     assert fetch_json(_PROBE).status == 404
 
 
-def test_fetch_json_raises_when_the_request_produced_no_status(monkeypatch):
-    def refuse(_request, timeout=None):  # noqa: ARG001 - matches the stdlib signature
-        raise urllib.error.URLError("Temporary failure in name resolution")
+def test_fetch_json_carries_an_error_status_whose_body_is_not_json(monkeypatch):
+    # A 5xx from an edge node is frequently an HTML page. The status still classifies the outcome,
+    # so an unreadable body there must not be escalated into a transport failure.
+    connection, _constructed = _fake_connection(502, b"<html>bad gateway</html>")
+    monkeypatch.setattr(http.client, "HTTPSConnection", connection)
 
-    monkeypatch.setattr(urllib.request, "urlopen", refuse)
+    response = fetch_json(_PROBE)
+
+    assert (response.status, response.payload) == (502, None)
+
+
+def test_fetch_json_raises_when_the_request_produced_no_status(monkeypatch):
+    connection, _constructed = _fake_connection(
+        0, b"", error=OSError("Temporary failure in name resolution")
+    )
+    monkeypatch.setattr(http.client, "HTTPSConnection", connection)
 
     with pytest.raises(TransportError, match="name resolution"):
         fetch_json(_PROBE)
@@ -441,7 +454,8 @@ def test_fetch_json_raises_when_the_request_produced_no_status(monkeypatch):
 def test_fetch_json_raises_when_a_success_carries_no_json(monkeypatch):
     # A proxy or a captive portal answers 200 with HTML. Reading that as a payload would reach
     # the payload check and be reported as a malformed commit rather than as a broken transport.
-    monkeypatch.setattr(urllib.request, "urlopen", _fake_urlopen(200, b"<html>nope</html>"))
+    connection, _constructed = _fake_connection(200, b"<html>nope</html>")
+    monkeypatch.setattr(http.client, "HTTPSConnection", connection)
 
     with pytest.raises(TransportError, match="did not return JSON"):
         fetch_json(_COMMITS)

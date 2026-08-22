@@ -2105,6 +2105,20 @@ endpoint returns is then discarded, because for an annotated tag it is the tag o
 the commit. Only `GET /repos/{owner}/{repo}/commits/tags/{tag}` peels both tag kinds to the value
 a pin is comparable against.
 
+The transport is a stdlib `http.client.HTTPSConnection` rather than a URL opened by `urllib`, and
+that is a security choice before it is a style one. The host and TLS are fixed in the constructor,
+so no path composed from a pin -- including one an operator passes to `--pin` -- can move the
+request onto another host or reach a `file://` scheme, which is exactly the hazard semgrep's
+`dynamic-urllib-use-detected` names for the URL-composing spelling. Nothing is followed either: a
+redirect is returned as its own status and classified as an infrastructure failure, which is right
+here, because a 3xx on these two endpoints means the action's repository moved rather than that the
+pin is wrong. That spelling carries this repository's **one** semgrep suppression, by rule id and
+one line wide: `httpsconnection-detected` warns that Python before 3.4.3 does not verify
+certificates by default, and AD-24's 3.13 floor excludes every interpreter that behaves that way.
+A suppression is worth a record because there were none before it; the alternative was to suppress
+the urllib rule instead, which would have silenced a hazard that is real rather than one the floor
+already answers.
+
 A *correspondence finding* and an *infrastructure failure* are separate outcomes and separate
 exit codes. A finding is a claim about the pin -- a non-exact comment, a tag that does not exist,
 or a tag naming a different commit. A failure is the check establishing nothing -- authentication,
