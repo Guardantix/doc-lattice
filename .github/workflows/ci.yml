@@ -80,10 +80,16 @@ jobs:
       # Every pytest job here also runs the suite across worker processes, for the reason this
       # comment records once and the two jobs below refer back to. The suite's cost is flat --
       # roughly 3100 tests at about 19ms each, with no test above three seconds -- so there is no
-      # hot path to shorten and process parallelism is the only lever. `auto` matches the four
-      # vCPUs a public repository's `ubuntu-latest` runner has, which is also where the measured
-      # gain stops: two workers cut the suite from about 59s to 33s, four to 18s, and eight to
-      # 17s. A larger runner would buy nothing.
+      # hot path to shorten and process parallelism is the only lever. `auto` resolves to the four
+      # vCPUs an `ubuntu-latest` runner reports, which the run log confirms as "4/4 workers".
+      #
+      # Measured on the runner rather than on a developer machine, because the two disagree. The
+      # yaml-compatibility pytest step went from about 76s to about 41s and the whole leg from
+      # about 88s to about 50s, which is roughly 1.9x, not the near-4x the worker count suggests.
+      # Those four vCPUs behave like two physical cores with SMT, and a CPU-bound Python suite
+      # gains little from the second thread; a workstation with four real cores sees closer to
+      # 3.3x on the same flags. Do not size this from a local measurement. Whether a larger runner
+      # would recover the rest is untested, so nothing here assumes it either way.
       #
       # `--dist loadfile` is required, not a tuning choice. The default `load` distributes single
       # tests, which splits `tests/test_reconcile_fuzz.py` across workers and breaks the corpus
