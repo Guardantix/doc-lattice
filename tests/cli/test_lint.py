@@ -4,7 +4,7 @@ import json
 from pathlib import Path
 
 from doc_lattice.cli import app
-from doc_lattice.cli.output import escape_github_property
+from doc_lattice.cli.github import escape_github_property
 
 from .helpers import runner
 

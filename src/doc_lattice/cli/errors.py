@@ -6,7 +6,8 @@ from contextlib import contextmanager
 import typer
 from rich.markup import escape
 
-from ..error_types import ProjectError, exception_details
+from ..error_types import DocumentError, ProjectError, exception_details
+from .github import warn_unattachable_annotations, write_document_annotation
 from .runtime import CliRuntime
 
 EXIT_FINDING = 1
@@ -48,21 +49,45 @@ def print_project_error(runtime: CliRuntime, exc: ProjectError) -> None:
 
 
 @contextmanager
-def exit_on_project_error(runtime: CliRuntime) -> Iterator[None]:
+def exit_on_project_error(runtime: CliRuntime, *, github: bool = False) -> Iterator[None]:
     """Convert project errors into the standard diagnostic and exit code.
+
+    ``github`` is passed in by the caller rather than read back off the runtime, because the
+    selected format belongs to one command invocation and the runtime is shared invocation
+    state: parking a mutable format field on it would let one command's choice be observed by
+    every other consumer of the same object. Only ``check`` and ``lint`` offer the format, and
+    both have validated it before they enter this block.
+
+    When it is set and the failure names one document, the annotation is written to stdout
+    before anything goes to stderr. That order is load-bearing under AD-40: a stdout that refuses
+    the write raises ``PipeClosed`` out of this handler and reaches the entry point's silent 141
+    with nothing printed, while a stderr that refuses one is answered in place, so an annotation
+    already on stdout survives and the exit code stays 2 either way.
+
+    A failure with no single document behind it, and every non-annotating format, keep the
+    stderr diagnostic and exit 2 they had, byte for byte.
 
     Args:
         runtime: Active invocation state.
+        github: Whether this invocation renders findings as GitHub Actions annotations.
 
     Yields:
         Control to command orchestration.
 
     Raises:
         typer.Exit: Exit code 2 when orchestration raises a project error.
+        PipeClosed: If the reader on stdout departed before the annotation was written.
     """
     try:
         yield
     except ProjectError as exc:
+        if github and isinstance(exc, DocumentError):
+            write_document_annotation(runtime, exc)
+            # The same unattachable report the finding renderers make. A failing document outside
+            # the base is annotated by absolute path, which GitHub drops in silence, and this is
+            # the run's only annotation: without the warning the gate fails with nothing on the
+            # diff and nothing in the log saying why.
+            warn_unattachable_annotations(runtime, [exc.source])
         print_project_error(runtime, exc)
         raise typer.Exit(EXIT_TOOL_ERROR) from exc
 

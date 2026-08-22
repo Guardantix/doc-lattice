@@ -283,7 +283,9 @@ def _document_version(events: list[Event]) -> tuple[int, int] | None:
     return None
 
 
-def _parse_yaml_occurrence(events: list[Event], index: int) -> tuple[_YamlOccurrence, int]:
+def _parse_yaml_occurrence(
+    events: list[Event], index: int, source: Path
+) -> tuple[_YamlOccurrence, int]:
     event = events[index]
     if isinstance(event, ScalarEvent):
         return (
@@ -306,8 +308,8 @@ def _parse_yaml_occurrence(events: list[Event], index: int) -> tuple[_YamlOccurr
         pairs: list[tuple[_YamlOccurrence, _YamlOccurrence]] = []
         next_index = index + 1
         while not isinstance(events[next_index], MappingEndEvent):
-            key, next_index = _parse_yaml_occurrence(events, next_index)
-            value, next_index = _parse_yaml_occurrence(events, next_index)
+            key, next_index = _parse_yaml_occurrence(events, next_index, source)
+            value, next_index = _parse_yaml_occurrence(events, next_index, source)
             pairs.append((key, value))
         end_event = events[next_index]
         return (
@@ -324,7 +326,7 @@ def _parse_yaml_occurrence(events: list[Event], index: int) -> tuple[_YamlOccurr
         values: list[_YamlOccurrence] = []
         next_index = index + 1
         while not isinstance(events[next_index], SequenceEndEvent):
-            value, next_index = _parse_yaml_occurrence(events, next_index)
+            value, next_index = _parse_yaml_occurrence(events, next_index, source)
             values.append(value)
         end_event = events[next_index]
         return (
@@ -337,15 +339,15 @@ def _parse_yaml_occurrence(events: list[Event], index: int) -> tuple[_YamlOccurr
             ),
             next_index + 1,
         )
-    raise UnreadableDocError("frontmatter structure is malformed; cannot reconcile")
+    raise UnreadableDocError("frontmatter structure is malformed; cannot reconcile", source=source)
 
 
-def _source_occurrence_tree(events: list[Event]) -> _YamlOccurrence:
+def _source_occurrence_tree(events: list[Event], source: Path) -> _YamlOccurrence:
     for index, event in enumerate(events):
         if isinstance(event, (ScalarEvent, AliasEvent, MappingStartEvent, SequenceStartEvent)):
-            root, _ = _parse_yaml_occurrence(events, index)
+            root, _ = _parse_yaml_occurrence(events, index, source)
             return root
-    raise UnreadableDocError("frontmatter structure is malformed; cannot reconcile")
+    raise UnreadableDocError("frontmatter structure is malformed; cannot reconcile", source=source)
 
 
 def _scalar_properties(tokens: list[Token]) -> tuple[_ScalarProperties, ...]:
@@ -688,7 +690,7 @@ def _missing_value_indicator_edit(
     if entry.flow_style:
         return _SourceEdit(seen_key.end, seen_key.end, f": {new_seen}")
     insert_at = _line_start_after(context.raw_meta, seen_key.end)
-    indent = " " * _block_indent(context.marks.block_mapping_indents, entry)
+    indent = " " * _block_indent(context.marks.block_mapping_indents, entry, context.source)
     return _SourceEdit(insert_at, insert_at, f"{indent}: {new_seen}\n")
 
 
@@ -719,7 +721,7 @@ def _scalar_span(occurrence: _ScalarOccurrence, context: "_SourceContext") -> _T
             "frontmatter derives_from entry seen is malformed in "
             f"{format_path_for_display(context.source)}"
         )
-        raise UnreadableDocError(msg)
+        raise UnreadableDocError(msg, source=context.source)
     return matches[0]
 
 
@@ -918,7 +920,9 @@ def _line_start_after(raw_meta: str, index: int) -> int:
 
 
 def _block_indent(
-    indents: tuple[_BlockIndent, ...], entry: _MappingOccurrence | _SequenceOccurrence
+    indents: tuple[_BlockIndent, ...],
+    entry: _MappingOccurrence | _SequenceOccurrence,
+    source: Path,
 ) -> int:
     """Return the column a block collection's own members are indented to.
 
@@ -934,7 +938,7 @@ def _block_indent(
     # The caller has already narrowed to a non-flow collection, and the scanner opens every
     # one of those, so this refuses a shape only a mark-accounting change could produce.
     msg = "frontmatter derives_from entry is malformed; cannot reconcile"
-    raise UnreadableDocError(msg)  # pragma: no cover
+    raise UnreadableDocError(msg, source=source)  # pragma: no cover
 
 
 def _property_removal_edits(context: _SourceContext, span: _TokenSpan) -> list[_SourceEdit]:
@@ -1040,7 +1044,7 @@ def _seen_source_edits(
         "frontmatter derives_from entry seen is malformed in "
         f"{format_path_for_display(context.source)}"
     )
-    raise UnreadableDocError(msg)
+    raise UnreadableDocError(msg, source=context.source)
 
 
 def _appended_seen_edit(
@@ -1066,7 +1070,8 @@ def _appended_seen_edit(
         context.marks.block_mapping_indents if mapping else context.marks.block_sequence_indents
     )
     member = f"seen: {new_seen}" if mapping else f"- seen: {new_seen}"
-    return _SourceEdit(insert_at, insert_at, f"{' ' * _block_indent(indents, entry)}{member}\n")
+    indent = " " * _block_indent(indents, entry, context.source)
+    return _SourceEdit(insert_at, insert_at, f"{indent}{member}\n")
 
 
 def _mapping_alias_source_edit(
@@ -1148,7 +1153,7 @@ def _verify_reconciled_meta(new_meta: str, expected: object, source: Path) -> No
             f"reconcile would leave {format_path_for_display(source)} unparseable, "
             f"so nothing was rewritten: {detail}"
         )
-        raise UnreadableDocError(msg) from exc
+        raise UnreadableDocError(msg, source=source) from exc
     try:
         if reloaded == expected:
             return
@@ -1164,12 +1169,12 @@ def _verify_reconciled_meta(new_meta: str, expected: object, source: Path) -> No
             f"frontmatter of {format_path_for_display(source)} is self-referential, so a "
             "reconcile rewrite cannot be verified and nothing was rewritten"
         )
-        raise UnreadableDocError(msg) from exc
+        raise UnreadableDocError(msg, source=source) from exc
     msg = (
         f"reconcile would not reproduce the {changed} of {format_path_for_display(source)}, "
         "so nothing was rewritten"
     )
-    raise UnreadableDocError(msg)
+    raise UnreadableDocError(msg, source=source)
 
 
 @dataclass(frozen=True, slots=True)
@@ -1220,7 +1225,7 @@ def _load_frontmatter_data(raw_meta: str, source: Path) -> object:
         msg = (
             f"cannot parse frontmatter of {format_path_for_display(source)} to reconcile: {detail}"
         )
-        raise UnreadableDocError(msg) from exc
+        raise UnreadableDocError(msg, source=source) from exc
 
 
 def _derives_from_occurrences(
@@ -1240,7 +1245,7 @@ def _derives_from_occurrences(
             f"frontmatter of {format_path_for_display(context.source)} is not written as a "
             "mapping; cannot reconcile"
         )
-        raise UnreadableDocError(msg)  # pragma: no cover
+        raise UnreadableDocError(msg, source=context.source)  # pragma: no cover
     occurrences = _resolved_member(context.anchors, root, "derives_from")
     if not isinstance(occurrences, _SequenceOccurrence):  # pragma: no cover
         # Only a sequence occurrence loads as the list the caller has already seen: an
@@ -1251,7 +1256,7 @@ def _derives_from_occurrences(
             f"frontmatter derives_from of {format_path_for_display(context.source)} is not "
             "written as a list; cannot reconcile"
         )
-        raise UnreadableDocError(msg)
+        raise UnreadableDocError(msg, source=context.source)
     if len(occurrences.value) != len(entries):  # pragma: no cover
         # The loaded list and the source list are two readings of the same text, so this
         # refuses a disagreement only a mark-accounting change could produce, rather than
@@ -1261,7 +1266,7 @@ def _derives_from_occurrences(
             f"{len(entries)} entries but is written as {len(occurrences.value)}; "
             "cannot reconcile"
         )
-        raise UnreadableDocError(msg)
+        raise UnreadableDocError(msg, source=context.source)
     return occurrences
 
 
@@ -1351,14 +1356,14 @@ def _plan_source_edits(
                 "frontmatter derives_from entry in "
                 f"{format_path_for_display(context.source)} is not a mapping"
             )
-            raise UnreadableDocError(msg)
+            raise UnreadableDocError(msg, source=context.source)
         ref = entry.get("ref")
         if not isinstance(ref, str):
             msg = (
                 "frontmatter derives_from entry ref in "
                 f"{format_path_for_display(context.source)} is not a string"
             )
-            raise UnreadableDocError(msg)
+            raise UnreadableDocError(msg, source=context.source)
         old_seen = entry.get("seen")
         new_seen = updates.get(ref)
         if new_seen is None or old_seen == new_seen:
@@ -1576,7 +1581,7 @@ def apply_reconcile(
         return current_file_text, set()
     if not isinstance(data, MutableMapping):
         msg = f"frontmatter of {format_path_for_display(source)} is not a mapping; cannot reconcile"
-        raise UnreadableDocError(msg)
+        raise UnreadableDocError(msg, source=source)
     entries = data.get("derives_from")
     if entries is None:
         return current_file_text, set()
@@ -1585,9 +1590,9 @@ def apply_reconcile(
             f"frontmatter derives_from of {format_path_for_display(source)} is not a list; "
             "cannot reconcile"
         )
-        raise UnreadableDocError(msg)
+        raise UnreadableDocError(msg, source=source)
     events = list(_yaml().parse(raw_meta))
-    source_root = _source_occurrence_tree(events)
+    source_root = _source_occurrence_tree(events, source)
     context = _SourceContext(
         raw_meta,
         source_root,
@@ -1656,7 +1661,7 @@ def plan_rewrites(
             decoded = before.decode("utf-8")
         except (OSError, UnicodeDecodeError) as exc:
             msg = f"cannot read {format_path_for_display(path)} to reconcile: {exc}"
-            raise UnreadableDocError(msg) from exc
+            raise UnreadableDocError(msg, source=path) from exc
         new_text, applied = apply_reconcile(normalize_newlines(decoded), updates, path)
         if applied:
             ending = _line_ending(decoded)

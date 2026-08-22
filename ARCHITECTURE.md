@@ -1900,3 +1900,81 @@ attribute is mutated for the duration of an invocation, which an embedder drivin
 several threads would observe. And the entry point's unguarded import surface widens from one
 module to two, which is why `cli/pipe_policy.py`'s standard-library-only import list is asserted
 by a test rather than left as a convention.
+
+### AD-41: A per-document failure carries its document, because only two error types have one
+
+**Date:** 2026-08-22
+**Status:** Accepted
+**Context:** `--format github` renders every drift and ladder finding as an `::error file=...`
+annotation attached to the offending document in the pull-request diff. A frontmatter defect is
+just as much a per-document finding, and it produced no annotation at all: `check --format github`
+exited 2 with one stderr line and an empty stdout, so a gate that failed on a broken document
+showed nothing on the diff at exactly the moment a reviewer needed the file named.
+
+The path was not missing, only unreachable. Both `FrontmatterError` raise sites, and every
+`UnreadableDocError` site outside two reconcile leaf helpers, already had the failing document in
+hand and baked it into the message through `format_path_for_display`. Recovering it meant parsing
+a formatted diagnostic back apart, which is not a contract anything should rest on.
+
+**Decision:** Add `DocumentError(ProjectError)` with a keyword-only, **required** `source: Path`,
+and derive `FrontmatterError` and `UnreadableDocError` from it. The error boundary branches on
+that base, so `exit_on_project_error` emits the annotation for any document-scoped failure without
+naming either concrete type.
+
+Three alternatives were weighed and rejected.
+
+- **An optional `source` on `ProjectError`.** Rejected because `None` is a legal value at every
+  raise site, so the defect this record closes -- a raise site that has the document and does not
+  pass it -- stays reachable and silent. A required argument on a narrow base makes the omission a
+  `TypeError` at the site instead of a missing annotation in CI.
+- **Special-casing the two concrete types in the renderer.** Rejected because it makes the
+  boundary a union that a third document-scoped type has to be added to by hand, and it invites
+  `getattr(exc, "source", None)` in place of a type the checker can see.
+- **`source` on every sibling.** Rejected because most of them have no single document: a config
+  defect is about the config file, a broken ref spans two documents, and a transaction failure is
+  about a journal. Giving them a document-shaped field would misdescribe them.
+
+The message-only rule therefore stands for every other type in `error_types.py`, and the
+convention test that enforces "a real code on every error type" now exempts an intermediate base
+the way it already exempted `ProjectError`, with a second test asserting that only a genuine base
+can claim the exemption.
+
+`source` is stored exactly as the raiser spelled it, never resolved. Discovery deliberately keeps
+each document's unresolved path as its identity (AD-8), and `CliRuntime.annotation_root` matches
+lexically, so resolving in the exception would silently move an annotation to a different base
+than the drift findings on the same run use.
+
+Three consequences of the decision, each of which had to be settled rather than assumed:
+
+- **`UnreadableDocError` is migrated, not merely re-based.** It is raised well beyond the parser:
+  the shared read boundary in `discovery.py`, the reconcile planner, and the reconcile adapter.
+  Two reconcile leaf helpers built it with no path at all even though their chain begins at
+  `apply_reconcile(..., source)`; the document is now threaded to them rather than made optional
+  to avoid touching them. Their message text is unchanged, so only the structured field is new.
+- **Annotation intent is passed into the boundary, not parked on the runtime.**
+  `exit_on_project_error` takes a keyword-only `github` flag that `check` and `lint` compute from
+  their already-validated `--format`. `CliRuntime` is shared invocation state, and a mutable
+  format field on it would let one command's selection be observed by every other consumer.
+- **The encoder moves to a leaf module.** `cli/output.py` imports the tool-error exit code from
+  `cli/errors.py`, so the boundary could not import the encoder back from `output` without a
+  cycle. `escape_github_message`, `escape_github_property`, `github_annotation`,
+  `warn_unattachable_annotations`, and the new `write_document_annotation` now live in
+  `cli/github.py`, which reaches only `runtime`, `error_types`, and `path_utils`.
+
+**Output contract.** Under `--format github`, a `DocumentError` emits its annotation on stdout
+against `runtime.annotation_root(exc.source)`, with the error code in the title and
+`exception_details(exc)` -- message plus notes, the same text stderr carries -- as the message.
+The annotation is emitted **before** the stderr diagnostic, which AD-40 makes load-bearing rather
+than cosmetic: a stdout that refuses the write raises `PipeClosed` out of the handler and reaches
+the silent 141 with nothing printed, while a stderr that refuses one is answered in place, so an
+annotation already written survives and the exit code stays 2 either way. The
+unattachable report the finding renderers make is owed here too, and for a sharper reason: this
+run emits exactly one annotation, so a document outside the base leaves the gate failing with
+nothing on the diff and no other line explaining it.
+
+**Consequences:** A frontmatter or read failure under `--format github` now names the file in the
+pull-request diff instead of only in the job log. Message text, stderr grammar, and exit codes are
+unchanged for every non-annotating renderer and for every failure with no single document behind
+it. The cost is that the two document-scoped types can no longer be constructed from a message
+alone, which is a compile-time break for any caller that did so, and that one more CLI module is
+in the import graph.

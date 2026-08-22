@@ -19,6 +19,7 @@ import doc_lattice.cli.runtime as runtime_module
 from doc_lattice import __version__
 from doc_lattice.cli import app
 from doc_lattice.cli.errors import EXIT_TOOL_ERROR
+from doc_lattice.cli.github import escape_github_property
 from doc_lattice.cli.runtime import default_runtime
 from doc_lattice.error_types import ConfigError
 from doc_lattice.path_utils import format_path_for_display
@@ -945,6 +946,173 @@ def test_multi_line_frontmatter_diagnostic_carries_its_code_on_the_header(
         "  bogus: Extra inputs are not permitted (accepted keys: authority, "
         "derives_from, id, layer, tickets, title)",
     ]
+
+
+# ---------------------------------------------------------------------------
+# GTX-204: a document-scoped failure is annotated on the document it names.
+#
+# Parameterized over both annotating commands rather than pinned to one: the rule lives in the
+# shared `exit_on_project_error` boundary, and a test that only ran `check` would pass on an
+# implementation that wired the flag into one adapter and forgot the other.
+
+_ANNOTATING_COMMANDS = ("check", "lint")
+
+_BOGUS_KEY_DETAIL = (
+    "  bogus: Extra inputs are not permitted (accepted keys: authority, derives_from, id, "
+    "layer, tickets, title)"
+)
+
+
+def _broken_frontmatter_project(root: Path) -> Path:
+    """Write a project whose only document fails NodeMeta validation.
+
+    Returns:
+        The document that fails, for the diagnostic the caller asserts on.
+    """
+    (root / ".doc-lattice.yml").write_text("docs_roots: [docs]\n", encoding="utf-8")
+    doc = root / "docs" / "a.md"
+    doc.parent.mkdir()
+    doc.write_text("---\nid: doc-a\nbogus: 1\n---\n# A\n", encoding="utf-8")
+    return doc
+
+
+@pytest.mark.parametrize("command", _ANNOTATING_COMMANDS)
+def test_github_format_annotates_a_document_whose_frontmatter_is_broken(
+    command: str, tmp_path: Path, monkeypatch
+):
+    # Before GTX-204 this exited 2 with a stderr line and no annotation at all, so a pull request
+    # whose gate failed on a frontmatter defect showed nothing on the diff.
+    doc = _broken_frontmatter_project(tmp_path)
+    monkeypatch.setenv("GITHUB_WORKSPACE", str(tmp_path))
+    monkeypatch.chdir(tmp_path)
+
+    result = runner.invoke(app, [command, "--format", "github"])
+
+    assert result.exit_code == 2
+    assert result.stdout == (
+        "::error file=docs/a.md,title=doc-lattice FRONTMATTER_ERROR::"
+        f"invalid lattice frontmatter in '{doc}':%0A{_BOGUS_KEY_DETAIL}\n"
+    )
+
+
+@pytest.mark.parametrize("command", _ANNOTATING_COMMANDS)
+def test_github_annotated_failure_keeps_its_stderr_diagnostic_and_exit_code(
+    command: str, tmp_path: Path, monkeypatch
+):
+    # The annotation is an addition, not a replacement: a human reading the job log still gets
+    # the coded diagnostic, and a caller matching on exit 2 is unaffected.
+    doc = _broken_frontmatter_project(tmp_path)
+    monkeypatch.setenv("GITHUB_WORKSPACE", str(tmp_path))
+    monkeypatch.chdir(tmp_path)
+
+    result = runner.invoke(app, [command, "--format", "github"])
+
+    assert result.exit_code == 2
+    assert result.stderr.splitlines() == [
+        f"error (FRONTMATTER_ERROR): invalid lattice frontmatter in '{doc}':",
+        _BOGUS_KEY_DETAIL,
+    ]
+
+
+@pytest.mark.parametrize("command", _ANNOTATING_COMMANDS)
+def test_github_annotation_resolves_against_a_nested_annotation_root(
+    command: str, tmp_path: Path, monkeypatch
+):
+    # The same base selection drift findings use: invoked from a subdirectory, the annotation is
+    # still workspace-relative, which is the only spelling GitHub attaches to a diff.
+    _broken_frontmatter_project(tmp_path)
+    nested = tmp_path / "tools" / "scripts"
+    nested.mkdir(parents=True)
+    monkeypatch.setenv("GITHUB_WORKSPACE", str(tmp_path))
+    monkeypatch.chdir(nested)
+
+    result = runner.invoke(
+        app, [command, "--config", "../../.doc-lattice.yml", "--format", "github"]
+    )
+
+    assert result.exit_code == 2
+    assert result.stdout.startswith("::error file=docs/a.md,title=doc-lattice FRONTMATTER_ERROR::")
+
+
+@pytest.mark.parametrize("command", _ANNOTATING_COMMANDS)
+def test_github_format_annotates_an_unreadable_document(command: str, tmp_path: Path, monkeypatch):
+    # The rule is the document-scoped base, not the frontmatter type: an unreadable document is
+    # equally a per-document defect and is annotated by the same branch.
+    (tmp_path / ".doc-lattice.yml").write_text("docs_roots: [docs]\n", encoding="utf-8")
+    doc = tmp_path / "docs" / "a.md"
+    doc.parent.mkdir()
+    doc.write_text("---\nid: doc-a\n# A\n", encoding="utf-8")
+    monkeypatch.setenv("GITHUB_WORKSPACE", str(tmp_path))
+    monkeypatch.chdir(tmp_path)
+
+    result = runner.invoke(app, [command, "--format", "github"])
+
+    assert result.exit_code == 2
+    assert result.stdout == (
+        "::error file=docs/a.md,title=doc-lattice UNREADABLE_DOC::"
+        f"unclosed YAML frontmatter in '{doc}': add a closing '---' fence\n"
+    )
+
+
+@pytest.mark.parametrize("command", _ANNOTATING_COMMANDS)
+@pytest.mark.parametrize("fmt", ["human", "json"])
+def test_a_non_annotating_format_writes_nothing_to_stdout_on_a_document_failure(
+    command: str, fmt: str, tmp_path: Path, monkeypatch
+):
+    # The pre-GTX-204 shape for every renderer that is not the annotation channel: stderr only,
+    # exit 2, and an empty stdout a JSON consumer can still tell apart from an empty report.
+    doc = _broken_frontmatter_project(tmp_path)
+    monkeypatch.setenv("GITHUB_WORKSPACE", str(tmp_path))
+    monkeypatch.chdir(tmp_path)
+
+    result = runner.invoke(app, [command, "--format", fmt])
+
+    assert result.exit_code == 2
+    assert result.stdout == ""
+    assert result.stderr.splitlines() == [
+        f"error (FRONTMATTER_ERROR): invalid lattice frontmatter in '{doc}':",
+        _BOGUS_KEY_DETAIL,
+    ]
+
+
+@pytest.mark.parametrize("command", _ANNOTATING_COMMANDS)
+def test_github_format_does_not_annotate_a_failure_with_no_document_subject(
+    command: str, tmp_path: Path, monkeypatch
+):
+    # A config defect names no document, so there is nothing for GitHub to attach an annotation
+    # to; emitting one against an arbitrary base would put the failure on the wrong file.
+    monkeypatch.setenv("GITHUB_WORKSPACE", str(tmp_path))
+    monkeypatch.chdir(tmp_path)
+
+    result = runner.invoke(app, [command, "--config", "missing.yml", "--format", "github"])
+
+    assert result.exit_code == 2
+    assert result.stdout == ""
+    assert "CONFIG_ERROR" in result.stderr
+
+
+@pytest.mark.parametrize("command", _ANNOTATING_COMMANDS)
+def test_an_unattachable_failure_annotation_is_reported_on_stderr(
+    command: str, tmp_path: Path, monkeypatch
+):
+    # This run's only annotation is the failure's, so an absolute path GitHub drops leaves the
+    # gate failing with nothing on the diff. The findings renderers already warn about that; the
+    # failure path owes the same report or the case is undiagnosable from the workflow log.
+    (tmp_path / ".doc-lattice.yml").write_text("docs_roots: [docs]\n", encoding="utf-8")
+    doc = tmp_path / "docs" / "a.md"
+    doc.parent.mkdir()
+    doc.write_text("---\nid: doc-a\nbogus: 1\n---\n# A\n", encoding="utf-8")
+    nested = tmp_path / "tools"
+    nested.mkdir()
+    monkeypatch.delenv("GITHUB_WORKSPACE", raising=False)
+    monkeypatch.chdir(nested)
+
+    result = runner.invoke(app, [command, "--config", "../.doc-lattice.yml", "--format", "github"])
+
+    assert result.exit_code == 2
+    assert result.stdout.startswith(f"::error file={escape_github_property(str(doc))},")
+    assert "1 annotated document(s) fall outside" in result.stderr
+    assert "FRONTMATTER_ERROR" in result.stderr
 
 
 def test_single_line_diagnostic_carries_its_code_beside_the_severity(tmp_path: Path, monkeypatch):

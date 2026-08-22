@@ -44,7 +44,7 @@ from doc_lattice.cli.commands.reconcile import (
     _report_recovery,
     _report_recovery_problems,
 )
-from doc_lattice.cli.output import github_annotation, warn_unattachable_annotations
+from doc_lattice.cli.github import github_annotation, warn_unattachable_annotations
 from doc_lattice.cli.runtime import CliRuntime
 from doc_lattice.config import DEFAULT_CONFIG_NAME, load_config
 from doc_lattice.constants import (

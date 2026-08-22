@@ -82,7 +82,9 @@ def _unreadable(path: Path, exc: OSError | UnicodeDecodeError) -> UnreadableDocE
     Centralizing the message is what lets the cached load path (byte read, decode, stat)
     produce byte-identical errors to an uncached read.
     """
-    return UnreadableDocError(f"cannot read doc {format_path_for_display(path)}: {exc}")
+    return UnreadableDocError(
+        f"cannot read doc {format_path_for_display(path)}: {exc}", source=path
+    )
 
 
 def read_doc_bytes(path: Path) -> bytes:

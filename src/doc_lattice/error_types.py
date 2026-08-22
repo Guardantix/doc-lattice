@@ -1,5 +1,7 @@
 """Custom exception types."""
 
+from pathlib import Path
+
 from .constants import ErrorCode
 
 
@@ -63,18 +65,43 @@ class BrokenRefError(ProjectError):
         super().__init__(message, code="BROKEN_REF")
 
 
-class UnreadableDocError(ProjectError):
+class DocumentError(ProjectError):
+    """Base for a failure whose whole subject is one document, carried as structured data.
+
+    Every sibling in this module takes a pre-formatted message and nothing else, which is the
+    right shape for a failure with no single document behind it: a bad config value, a broken
+    ref spanning two files, a transaction that cannot be persisted. A frontmatter defect and an
+    unreadable document are the two that do have one, and a renderer that wants to attach a
+    GitHub annotation to the offending file needs that path as a value rather than as a phrase
+    inside the message it is about to print. See AD-41 for why the capability is a required base
+    class rather than an optional attribute on ``ProjectError``.
+
+    ``source`` is stored exactly as the raiser spelled it. Discovery deliberately keeps each
+    document's unresolved path as its identity, and ``CliRuntime.annotation_root`` matches
+    against it lexically, so resolving it here would silently change which base an annotation is
+    rendered against.
+
+    Attributes:
+        source: The document the failure is about, in the spelling discovery gave it.
+    """
+
+    def __init__(self, message: str, *, source: Path, code: ErrorCode = "UNKNOWN") -> None:
+        super().__init__(message, code=code)
+        self.source: Path = source
+
+
+class UnreadableDocError(DocumentError):
     """A doc cannot be read as UTF-8 or its YAML cannot be parsed."""
 
-    def __init__(self, message: str) -> None:
-        super().__init__(message, code="UNREADABLE_DOC")
+    def __init__(self, message: str, *, source: Path) -> None:
+        super().__init__(message, source=source, code="UNREADABLE_DOC")
 
 
-class FrontmatterError(ProjectError):
+class FrontmatterError(DocumentError):
     """A doc's frontmatter fails schema validation or declares lattice intent with no id."""
 
-    def __init__(self, message: str) -> None:
-        super().__init__(message, code="FRONTMATTER_ERROR")
+    def __init__(self, message: str, *, source: Path) -> None:
+        super().__init__(message, source=source, code="FRONTMATTER_ERROR")
 
 
 class LinearError(ProjectError):
@@ -140,7 +167,8 @@ def escalated_warning_error(exc: Warning) -> EscalatedWarningError:
     boundary's rendering does, because ``cli/errors.py`` reaches ``cli/runtime.py`` and through
     it the whole engine and its dependencies. The entry point has to be able to report a warning
     escalated while importing exactly that chain, so the message it prints then cannot be built
-    by it. This module imports only ``constants``, which imports only ``typing``.
+    by it. This module imports only ``constants``, which imports only ``typing``, plus
+    ``pathlib`` from the standard library for ``DocumentError.source``.
 
     The category name leads the message even though ``CliRuntime._render_warning`` deliberately
     discards it for a displayed warning. The two diagnostics answer different questions: a

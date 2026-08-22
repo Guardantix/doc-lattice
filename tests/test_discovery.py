@@ -266,3 +266,25 @@ def test_discovery_skips_symlink_escaping_project(tmp_path: Path):
     names = [path.name for path in found]
     assert "keep.md" in names
     assert "leak.md" not in names  # skipped, but loudly (not silently)
+
+
+# ---------------------------------------------------------------------------
+# GTX-204: the shared read boundary carries the document it failed on.
+
+
+def test_every_read_failure_carries_the_document_as_structured_data(tmp_path: Path):
+    # One helper builds the error for every read and stat failure here, so proving the path is
+    # attached at each entry point proves the whole boundary rather than one caller.
+    missing = tmp_path / "gone.md"
+    undecodable = tmp_path / "bad.md"
+    undecodable.write_bytes(b"\xff\xfe not utf-8\n")
+
+    for call, source in (
+        (lambda: read_doc(missing), missing),
+        (lambda: read_doc_bytes(missing), missing),
+        (lambda: read_doc_bytes_and_stat(missing), missing),
+        (lambda: decode_doc(undecodable, undecodable.read_bytes()), undecodable),
+    ):
+        with pytest.raises(UnreadableDocError) as exc:
+            call()
+        assert exc.value.source == source
