@@ -37,7 +37,8 @@ breaking, so the window is open again as a fact rather than by choice, and the n
 Admission is unchanged and still narrow on purpose: an item belongs here only if it is breaking,
 or if it has to be true at the moment a major ships. Everything else waits for 6.x, which is what
 keeps this release from staying open indefinitely. Applying that rule admitted nine here rather
-than three, six of them moved back in from the minor train.
+than three, six of them moved back in from the minor train, and a tenth moved forward from 7.0
+on 2026-08-22 once its direction settled on a breaking refusal rather than a Git-root resolution.
 
 Six of those nine have since landed and wait in `## [Unreleased]` beside GTX-212 and GTX-214:
 reconcile's lock diagnostics (GTX-238, which GTX-212's own review spawned into this section),
@@ -45,14 +46,23 @@ reconcile's lock diagnostics (GTX-238, which GTX-212's own review spawned into t
 (GTX-221), the journal's own validation diagnostic (GTX-227), and the codes `init` reports for a
 value it rejects before writing anything (GTX-216). One was canceled rather than worked:
 reconcile's post-load re-parse warning (GTX-200), which the PR that spawned it had already fixed.
-Two are still open -- GTX-113 below, and GTX-213, the sweep this document's inventory now rests
-on, which closes with that sweep and so is not carried below as pending work.
+Three are still open -- GTX-153 and GTX-113 below, and GTX-213, the sweep this document's
+inventory now rests on, which closes with that sweep and so is not carried below as pending work.
 
-- Make README describe what 6.0 actually prints and enforces (GTX-113). This still lands last, and
-  it is now unblocked: GTX-216 was the last open issue in front of it, on the rule that the README
-  pass cannot land ahead of the behavior it documents, and it has landed with the rest. All
-  sixteen of GTX-113's blockers are satisfied history -- each either shipped in 5.0.0, waits in
-  `## [Unreleased]`, or was canceled with GTX-200.
+- Decouple fetching `init`'s printed snippets from its directory-sensitive config write, and stop
+  it scaffolding a nested `.doc-lattice.yml` when run from a subdirectory (GTX-153). The
+  print-only half is additive. The other half is what admits the issue here: ordinary `init` run
+  from a subdirectory of a repository whose root already holds a config refuses instead of
+  writing, and a run that used to exit 0 and write now exits 2, which is a zero-config behavior
+  change and so belongs in a major. The refusal keeps `init`'s current-directory contract and
+  resolves no Git root, so it needs no ARCHITECTURE decision, only a CHANGELOG migration note
+  and the README changes the issue lists. The issue's thread records the direction.
+- Make README describe what 6.0 actually prints and enforces (GTX-113). This still lands last, on
+  the rule that the README pass cannot land ahead of the behavior it documents. All sixteen of
+  its recorded blockers are satisfied history -- each either shipped in 5.0.0, waits in
+  `## [Unreleased]`, or was canceled with GTX-200 -- and GTX-153 above is the one item now in
+  front of it, since it changes what `init` does and what README's command table and Upgrading
+  section say about it.
 
 ## 6.x: make the honor-system rules mechanical
 
@@ -111,15 +121,11 @@ cheap.
 
 ## 7.0: the next behavior window
 
-Opened when there is enough batched behavior change to justify a major, not on a schedule. Two
-items sit here today. Each is large, each carries an unresolved decision rather than a known fix,
-and neither should be allowed to hold 6.0 open.
+Opened when there is enough batched behavior change to justify a major, not on a schedule. One
+item sits here today. It is large, it carries an unresolved decision rather than a known fix, and
+it should not be allowed to hold 6.0 open. GTX-153 sat beside it until 2026-08-22, when its
+direction settled and it moved into 6.0 above.
 
-- Decouple fetching `init`'s printed snippets from its directory-sensitive config write, and stop
-  it scaffolding a nested `.doc-lattice.yml` when run from a subdirectory (GTX-153). The
-  print-only half is additive and could be split forward into 6.x if adopters need it sooner;
-  resolving the Git root in the ordinary branch changes zero-config behavior and needs this
-  window.
 - Decide whether doc-lattice tracks its own maintained documents as a lattice (GTX-168). The
   decision is the deliverable and is recorded as an AD either way. GTX-130 lands first, because
   the decline path hands the link-checking question back to it.
