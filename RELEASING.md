@@ -338,6 +338,71 @@ Adopters can subscribe to Releases and security alerts specifically through the 
 **Watch** menu, under **Custom**. That is worth telling them once external adoption starts,
 since watching everything is what makes people stop watching.
 
+## Keeping the action pins current
+
+A pinned action is pinned to a commit SHA, so it cannot tell you it has gone stale. Two stock
+GitHub signals do that instead: Dependabot opens a pull request when an upstream publishes a newer
+release, and the `Action runtime audit` workflow goes red when the runner annotates a completed run
+about a deprecated runtime. AD-42 in [ARCHITECTURE.md](ARCHITECTURE.md) records why those two and
+not a manifest auditor. This section owns what to do when either one fires.
+
+### A Dependabot pull request
+
+A pull request bumping `actions/upload-artifact`, `actions/download-artifact`,
+`pypa/gh-action-pypi-publish`, or `anthropics/claude-code-action` is a workflow-only bump. Read the
+upstream release notes for changed or removed inputs, confirm nothing this repository sets moved
+underneath it, and merge on green.
+
+A pull request in the `shipped-pins` group, `actions/checkout` and `astral-sh/setup-uv`, is
+different, because those two pins are also shipped to adopters. It arrives **red** on
+`test_shipped_action_pins_match_the_pins_this_repository_runs`, and that red is the notice rather
+than a defect: Dependabot has edited the workflows and the copies have not followed. Check out its
+branch and push the rest of the coupled edit.
+
+| File | What changes |
+|------|--------------|
+| `.github/workflows/ci.yml`, `.github/workflows/claude.yml` | Already done by Dependabot: the `uses:` SHA and its trailing `# vX.Y.Z` comment |
+| `src/doc_lattice/constants.py` | `CHECKOUT_REF` and `CHECKOUT_VERSION`, or `SETUP_UV_REF` and `SETUP_UV_VERSION` |
+| `MANAGED_CI.md` | The two pinned `uses:` lines in the published workflow |
+| `tests/cli/test_init.py` | The deliberately spelled-out copies of the rendered snippet |
+| `tests/test_constants.py` | The expected constant values |
+| `CHANGELOG.md` | An entry under `## [Unreleased]` naming any input default the new releases changed |
+
+The derived comparisons in `tests/test_workflow_pinning.py`, `tests/test_managed_ci_recipe.py`, and
+`tests/test_scaffold.py` follow from those and need no edit of their own. The changelog entry is the
+one step with judgment in it: the model is the pin-bump entry GTX-170 wrote in
+[CHANGELOG.md](CHANGELOG.md), which names each version moved and then names the input defaults that
+changed underneath, so an adopter who added inputs of their own can tell whether the bump reaches
+them.
+
+Dependabot stops rebasing a pull request once a human pushes to it. The branch is yours from that
+point, so rebase it onto `main` yourself if it falls behind.
+
+### A red `Action runtime audit` run
+
+`Action runtime audit` runs after every completed CI or Claude Code run and reads that run's job
+annotations through the API. A red `audit` job means the runner told one of those jobs that an
+action it executed targets a deprecated runtime. The job summary names the source workflow, the job
+that carried the annotation, the action and SHA the annotation named, and its text. Read the summary
+first: the failure line alone does not say which pin is at fault.
+
+It is a notice, not a pull-request check. A `workflow_run` workflow runs on the default branch and
+does not attach to the run that triggered it, so nothing is blocked and no branch turns red.
+Someone has to look. An action only the release path uses is therefore noticed on the release run
+itself, after publication.
+
+Any completed run can be re-read on demand, which is how you confirm a fix or check a run from
+before the workflow existed:
+
+```bash
+gh workflow run "Action runtime audit" -f run_id=<run-id>
+gh run list --workflow "Action runtime audit"
+```
+
+The fix is a version bump rather than a workflow change. Find the newest release of the action the
+summary names and take it through the procedure above: the open Dependabot pull request if there is
+one, or the same coupled edit by hand for a `shipped-pins` action if there is not.
+
 ## Accounts and access
 
 Every control below has an owner, a place its settings live, a behavior on rename or transfer,
@@ -495,9 +560,9 @@ Run the full verification set from [CLAUDE.md](CLAUDE.md), adding `--locked` to 
 then:
 
 ```bash
-uv run --locked --group dev ruff check scripts/release_gate.py
-uv run --locked --group dev ruff format --check scripts/release_gate.py
-uv run --locked --group dev ty check scripts/release_gate.py
+uv run --locked --group dev ruff check scripts/release_gate.py scripts/audit_action_runtimes.py
+uv run --locked --group dev ruff format --check scripts/release_gate.py scripts/audit_action_runtimes.py
+uv run --locked --group dev ty check scripts/release_gate.py scripts/audit_action_runtimes.py
 ```
 
 Build and validate exactly the expected artifacts, then smoke-test the wheel in a fresh Python

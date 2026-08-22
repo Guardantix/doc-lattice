@@ -91,9 +91,11 @@ cheap.
 - Close the reconcile follow-ons the v2 journal unblocks: an operator remediation that works for
   the lost-journal double failure (GTX-146), and the provenance-guard simplification (GTX-127)
   with the sink-guard scope question sequenced behind it (GTX-128).
-- Decide how a stale or deprecated action pin gets noticed at all (GTX-181) before building the
-  narrower check that resolves each pinned SHA against its version comment (GTX-180), since the
-  chosen mechanism may subsume it.
+- Decide whether to resolve each pinned SHA against its version comment (GTX-180), now narrowed by
+  AD-42: Dependabot authors the SHA and its comment as a pair, and the parity tests force every
+  copy to equal that pair, so a wrong comment can only enter by hand edit. What is left is small
+  enough to be a `workflow_dispatch` run after a manual bump, or to be declined outright with that
+  reasoning recorded.
 - Simplify the recipe now that 5.0 has rewritten it: a first-class Linear credential check, so
   an installation stops reading that answer out of a feature meant for something else (GTX-172),
   and step 6's run identification (GTX-171). GTX-175 named the gate-activation step in README and

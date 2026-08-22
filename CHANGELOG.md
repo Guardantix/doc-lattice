@@ -32,6 +32,32 @@ derives from `ProjectError`. Catching either type, or `ProjectError`, is unaffec
 `DocumentError` is the new way to catch exactly the failures that name one document. Error codes,
 message text, and exit codes are unchanged. See **Fixed** below and AD-41 in ARCHITECTURE.md.
 
+### Added
+
+- Dependabot now watches this repository's GitHub Actions pins. `.github/dependabot.yml` checks the
+  six actions `.github/workflows/ci.yml` and `.github/workflows/claude.yml` reference once a month
+  and opens one pull request per action, because a SHA-pinned action cannot report on its own that
+  a newer release exists. `actions/checkout` and `astral-sh/setup-uv` are grouped as `shipped-pins`
+  and travel as a single pull request: they are the two pins `init` and MANAGED_CI.md ship to
+  adopters, so bumping either is a coupled edit across the workflows, `constants.py`, the published
+  recipe, and the spelled-out copies in the suite. Such a pull request arrives red on the
+  shipped-pin parity test by design, since Dependabot edits the workflows and nothing else, and
+  that red is the notice that the rest of the edit is owed. RELEASING.md owns the procedure for
+  finishing it.
+- A new `Action runtime audit` workflow reads the annotations GitHub's runner attaches to the jobs
+  of a completed CI or Claude Code run and fails when any warning or failure annotation mentions a
+  deprecation. That is how a runtime deprecation announces itself, and it covers the actions that
+  actually executed, nested composite steps included. `scripts/audit_action_runtimes.py` holds the
+  logic and writes a job summary naming the source workflow, the job, and the action and SHA the
+  annotation named. It is a notice rather than a gate: a `workflow_run` workflow runs on the
+  default branch and does not attach to the run that triggered it, so a red audit blocks nothing
+  and someone has to look. Any completed run can be re-read on demand with
+  `gh workflow run "Action runtime audit" -f run_id=<run-id>`, and the 5.0.0 release run already
+  trips it, because `actions/upload-artifact` and `actions/download-artifact` are still pinned to
+  releases that target Node.js 20. No shipped pin moves in this change: both mechanisms report, and
+  every pin stays exactly where it was. AD-42 in ARCHITECTURE.md records the decision, including
+  why a manifest-fetching auditor and a tail job inside `ci.yml` were both rejected.
+
 ### Changed
 
 - A reconcile commit that loses its journal to a failed committed marker, and then cannot restore
