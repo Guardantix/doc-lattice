@@ -30,6 +30,10 @@ _PROCEED = "steps.gate.outputs.proceed == 'true'"
 _TAG_STEP = "Create and push the tag"
 _SMOKE_FIXTURE = "tests/fixtures/release-smoke/.doc-lattice.yml"
 _PACKAGE_URL = "git+https://github.com/Guardantix/doc-lattice"
+# A final release: numeric segments and nothing else. Everything PEP 440 admits beyond this --
+# `*`, `a`/`b`/`rc`, `.post`, `.dev`, an `N!` epoch, a `+local` -- compares by its own rules and
+# names something other than a single release, which is what a floor cell has to pin.
+_FINAL_RELEASE = re.compile(r"\d+(?:\.\d+)*")
 # `name=value`, which `_invocations` hands back as one word. The value half is re-read rather
 # than matched as a string, so a command reached through flags or extra spacing still counts.
 _ASSIGNMENT = re.compile(r"^(\w+)=(.*)$")
@@ -62,16 +66,23 @@ _AGGREGATORS = {
     "tests-result": ("Tests", "tests"),
     "yaml-compatibility-result": ("YAML parser compatibility", "yaml-compatibility"),
 }
+# The one runtime dependency AD-26 gives a compatibility matrix of its own.
+_YAML_MATRIX_DEPENDENCY = "ruamel.yaml"
 # GTX-119: the runtime dependencies whose declared floor the `runtime-floor` matrix does not have
-# to carry a cell for, and why each is exempt. Every other floor-declared runtime dependency needs
-# one, so adding a ranged dependency without either a cell or an entry here fails the correlation
-# guard rather than shipping an unverified span.
-_FLOOR_EXEMPT = {
-    # AD-13 pins this exact, so there is no span beneath a floor to verify.
+# to carry a cell for, and where each one is exercised instead. Membership routes a floor to
+# another job; it never waives the correlation between what a job installs and what
+# `pyproject.toml` declares, which every floor owes somewhere. Every other floor-declared runtime
+# dependency needs a cell here, so adding a ranged dependency without either a cell or an entry
+# fails the correlation guard rather than shipping an unverified span.
+_RUNTIME_FLOOR_MATRIX_EXEMPT = {
+    # AD-13 pins this exact, so `_declared_floors` never reports it and there is no span beneath a
+    # floor to verify. Named anyway, so the reason is already here if that pin ever widens.
     "markdown-it-py": "pinned exact",
-    # AD-26 already verifies this across its whole range, at both ends and with and without the
-    # optional C accelerator, in the `yaml-compatibility` matrix.
-    "ruamel.yaml": "verified by the yaml-compatibility matrix",
+    # AD-26 runs this across its whole range, at both ends and with and without the optional C
+    # accelerator, in the `yaml-compatibility` matrix. That matrix owns the execution only;
+    # GTX-273 gives the correlation between its floor cell and the declaration its own test
+    # below, since routing the execution elsewhere left the two free to drift apart.
+    _YAML_MATRIX_DEPENDENCY: "execution owned by the yaml-compatibility matrix",
 }
 
 
@@ -95,6 +106,29 @@ def _declared_floors() -> dict[str, str]:
                 assert name not in floors, f"{name} declares more than one floor: {requirement!r}"
                 floors[name] = specifier.strip().removeprefix(">=").strip()
     return floors
+
+
+def _release(version: str) -> tuple[int, ...]:
+    """Return a final release's numeric segments, without the trailing zeros padding would add.
+
+    PyPA compares two releases by zero-padding the shorter one, so `0.18` and `0.18.0` are the
+    same release while `(0, 18) != (0, 18, 0)` in Python. Trimming trailing zeros from both is
+    that same relation without the padding step, which is what lets a floor declared as `>=0.18`
+    correlate with a matrix cell pinned `==0.18.0` on the version rather than on the spelling.
+
+    Only final-release text is accepted. A wildcard, prerelease, postrelease, developmental
+    release, epoch, or local version each carries comparison semantics of its own and names a
+    span or a variant rather than the one release an exact floor cell has to install, so a series
+    such as `0.18.*` is refused here instead of standing in for the floor it resolves above.
+    """
+    assert _FINAL_RELEASE.fullmatch(version), (
+        f"{version!r} is not a final release, so it does not name one installable version to "
+        "correlate a floor with. Spell the floor as an exact numeric release."
+    )
+    segments = [int(segment) for segment in version.split(".")]
+    while len(segments) > 1 and segments[-1] == 0:
+        segments.pop()
+    return tuple(segments)
 
 
 def _step_index(job: dict, name: str) -> int:
@@ -784,13 +818,15 @@ def test_the_runtime_floor_matrix_covers_every_declared_floor():
         installed[name] = version
 
     expected = {
-        name: floor for name, floor in _declared_floors().items() if name not in _FLOOR_EXEMPT
+        name: floor
+        for name, floor in _declared_floors().items()
+        if name not in _RUNTIME_FLOOR_MATRIX_EXEMPT
     }
     assert installed == expected, (
         f"the runtime-floor matrix installs {installed}, but pyproject.toml declares {expected}. "
         "The matrix exists to test the oldest supported version of each dependency, so the two "
-        "move together or it tests nothing. A dependency that genuinely needs no cell belongs in "
-        "_FLOOR_EXEMPT with the reason."
+        "move together or it tests nothing. A dependency exercised by a matrix of its own belongs "
+        "in _RUNTIME_FLOOR_MATRIX_EXEMPT with the reason, and still owes a correlation test there."
     )
 
 
@@ -836,6 +872,59 @@ def test_the_runtime_floor_matrix_runs_the_whole_suite_on_every_supported_interp
     assert runs == [["uv", "run", "--no-sync", "pytest"]], (
         f"expected the whole suite and no re-sync, found {runs}. `--no-sync` is load-bearing: "
         "`uv run` without it restores the locked version and the overlaid floor never runs."
+    )
+
+
+def test_the_yaml_compatibility_matrix_installs_the_declared_ruamel_floor():
+    """GTX-273: the dedicated matrix is a floor check only while its cell is the declared floor.
+
+    `_RUNTIME_FLOOR_MATRIX_EXEMPT` routes `ruamel.yaml` around the `runtime-floor` correlation
+    because AD-26 gives it a job that runs the whole suite at both ends of the declared range.
+    That routing decides where the floor executes and settles nothing about which floor executes:
+    with no assertion here, raising the declaration to `>=0.19` would leave this leg installing
+    `0.18.0` and reporting green on a release the project no longer claims to support -- the
+    exact drift GTX-119 closed for every other floor, reintroduced by the exemption that was
+    meant only to say the execution happens elsewhere.
+
+    The floor cell is selected by shape rather than by position, so reordering the matrix or
+    adding a mid-range cell cannot quietly point the assertion at the ceiling, and the ceiling
+    stays a series without having to be named here.
+
+    The install command is asserted alongside the cell because the matrix data alone is not the
+    claim. `runtime-floor` proves separately that its install step consumes `${{ matrix.floor }}`
+    (a hardcoded version there would drift behind a correct matrix); this job owes the same
+    proof, or a correlated cell could sit beside a step installing some other release. The
+    optional `ruamel.yaml.clib` overlay is a different distribution on its own axis and is
+    filtered out rather than counted.
+    """
+    job = _WORKFLOW["jobs"]["yaml-compatibility"]
+    cells = list(job["strategy"]["matrix"]["ruamel"])
+    exact = [cell for cell in cells if _FINAL_RELEASE.fullmatch(cell)]
+    assert len(exact) == 1, (
+        f"expected exactly one exact release among the ruamel cells {cells}, found {exact}. The "
+        "floor is the cell pinned to a single release and the ceiling is a series, so a second "
+        "exact cell leaves it ambiguous which one this correlation is about."
+    )
+
+    declared = _declared_floors()[_YAML_MATRIX_DEPENDENCY]
+    assert _release(exact[0]) == _release(declared), (
+        f"the yaml-compatibility matrix installs {_YAML_MATRIX_DEPENDENCY} {exact[0]}, but "
+        f"pyproject.toml declares a floor of {declared}. The floor cell and the declaration name "
+        "one release or the leg verifies a span the project does not offer."
+    )
+
+    commands = [shlex.split(step["run"]) for step in job["steps"] if "run" in step]
+    installs = [argv for argv in commands if argv[:3] == ["uv", "pip", "install"]]
+    floor_installs = [
+        argv
+        for argv in installs
+        if len(argv) > 3 and argv[3].partition("==")[0] == _YAML_MATRIX_DEPENDENCY
+    ]
+    expected = ["uv", "pip", "install", f"{_YAML_MATRIX_DEPENDENCY}==${{{{ matrix.ruamel }}}}"]
+    assert floor_installs == [expected], (
+        f"expected exactly one overlay installing the cell's own version, found {floor_installs}."
+        " A second install, or a hardcoded version, decouples the job from the matrix value this "
+        "test correlates and the correlation stops describing what CI runs."
     )
 
 
