@@ -440,6 +440,40 @@ def test_markdown_link_still_reports_its_containing_block(tmp_path):
     assert message.startswith("'README.md':3:")
 
 
+def test_trailing_space_in_a_raw_href_is_stripped(tmp_path):
+    # A URL parser strips C0-control-or-space from both ends, so this targets GUIDE.md.
+    # urlsplit keeps the trailing half on purpose, which would look up a filename ending in
+    # a space and fail a working link in a mandatory hook.
+    _write(tmp_path, "README.md", '# Readme\n\n<a href="GUIDE.md ">x</a>\n')
+    _write(tmp_path, "GUIDE.md", "# Guide\n")
+
+    assert check_repository_links(tmp_path) == []
+
+
+def test_surrounding_whitespace_in_a_raw_href_and_fragment_is_stripped(tmp_path):
+    # Stripping the whole destination rather than its path is what reaches the fragment.
+    _write(tmp_path, "README.md", '# Readme\n\n<a href="  GUIDE.md#guide  ">x</a>\n')
+    _write(tmp_path, "GUIDE.md", "# Guide\n")
+
+    assert check_repository_links(tmp_path) == []
+
+
+def test_interior_tab_in_a_raw_href_is_removed(tmp_path):
+    _write(tmp_path, "README.md", '# Readme\n\n<a href="GUI\tDE.md">x</a>\n')
+    _write(tmp_path, "GUIDE.md", "# Guide\n")
+
+    assert check_repository_links(tmp_path) == []
+
+
+def test_an_encoded_space_still_names_a_file_that_ends_in_one(tmp_path):
+    # %20 is not whitespace here. Stripping must not reach it, or a file deliberately named
+    # with a trailing space would become unaddressable.
+    _write(tmp_path, "README.md", "# Readme\n\n[x](<GUIDE%20.md>)\n")
+    _write(tmp_path, "GUIDE .md", "# Guide\n")
+
+    assert check_repository_links(tmp_path) == []
+
+
 def test_external_html_anchor_destination_is_out_of_scope(tmp_path):
     _write(tmp_path, "README.md", '# Readme\n\n<a href="https://example.com/x.md">x</a>\n')
 

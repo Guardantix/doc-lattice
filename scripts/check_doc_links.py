@@ -47,6 +47,10 @@ _MARKDOWN_TARGET_SUFFIXES = frozenset(
 _SINGLE_DOT_SEGMENTS = frozenset({".", "%2e"})
 _DOUBLE_DOT_SEGMENTS = frozenset({"..", ".%2e", "%2e.", "%2e%2e"})
 _ESCAPING_SOURCE_MESSAGE = "maintained document leaves the repository through a symlink"
+# U+0000 through U+0020: the WHATWG URL Standard's "C0 control or space", which its parser
+# strips from both ends of a URL before reading it. ``urlsplit`` strips only the leading half
+# and keeps the trailing half on purpose, so the rest is applied here.
+_C0_CONTROL_OR_SPACE = "".join(chr(code) for code in range(0x00, 0x20 + 1))
 
 
 @dataclass(frozen=True, slots=True)
@@ -303,7 +307,17 @@ def _fragment_message(
 
 
 def _split_destination(href: str) -> SplitResult | None:
-    """Split a destination, or return None when it carries a malformed authority.
+    """Split a destination the way a URL parser reads it, or None when it is malformed.
+
+    Surrounding C0-control-or-space is stripped first. A URL parser removes it from both ends
+    before reading, and ``urlsplit`` deliberately keeps the trailing half -- its own comment
+    says applications rely on that -- so ``href="GUIDE.md "`` would otherwise be looked up as
+    a filename that ends in a space and a working link would fail the hook. Only a raw HTML
+    anchor can carry one: markdown-it drops trailing space from a Markdown destination even in
+    the ``<...>`` form, and a space meant to be kept survives as ``%20``, which is not
+    whitespace here and still names a file that really ends in one. Stripping the whole
+    destination rather than its path also covers a fragment, which the same rule reaches.
+    Interior tab, newline and carriage return are removed by ``urlsplit`` already.
 
     ``urlsplit`` raises rather than answering for an unparseable authority such as
     ``http://[`` or ``//[oops]/x``. Only a raw HTML anchor reaches here carrying one, because
@@ -323,7 +337,7 @@ def _split_destination(href: str) -> SplitResult | None:
         The split destination, or None when it is not well formed enough to classify.
     """
     try:
-        return urlsplit(href)
+        return urlsplit(href.strip(_C0_CONTROL_OR_SPACE))
     except ValueError:
         return None
 
