@@ -89,8 +89,9 @@ and repository hygiene checks. If a hook changes a file, re-stage it before comm
   maintained documents, which it takes as the sorted root `*.md` files. A target may be any
   repository-contained relative path, `docs/` staging included; absolute and external
   destinations are out of scope. Write destinations as Markdown links: a raw HTML anchor is
-  reported rather than resolved, because reading its `href` means parsing HTML and a silent
-  skip would leave the gate green on the one link form it cannot see. Fragments resolve through
+  reported rather than resolved, because markdown-it normalizes a Markdown destination and an
+  attribute value arrives with none of that done, so resolving one means owning URL and HTML
+  attribute semantics this gate does not take on. Fragments resolve through
   `markdown_compat.github_heading_ids`, so renaming a heading or moving a file fails the hook
   and the CI code-quality job rather than breaking a deep link silently. Use that helper for
   GitHub heading ids: `github_slug` is a base slug with no deduplication, and `anchor_ids`

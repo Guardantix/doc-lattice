@@ -3,23 +3,43 @@
 from pathlib import Path
 from runpy import run_path
 
-from ruamel.yaml import YAML
+import pytest
 from workflow_helpers import _commands, _invocations, _invokes, _load_workflow
 
 _ROOT = Path(__file__).resolve().parents[1]
 _SCRIPT = run_path(str(_ROOT / "scripts" / "check_doc_links.py"))
 check_repository_links = _SCRIPT["check_repository_links"]
 maintained_documents = _SCRIPT["maintained_documents"]
-extract_links = _SCRIPT["extract_links"]
+_links_in = _SCRIPT["_links_in"]
+_PARSER = _SCRIPT["_PARSER"]
+_anchor_hrefs = _SCRIPT["_anchor_hrefs"]
+_split_destination = _SCRIPT["_split_destination"]
 
 _SCRIPT_PATH = "scripts/check_doc_links.py"
 
 
-def _write(root: Path, name: str, text: str) -> Path:
+def _links(markdown: str) -> list:
+    """Return the links of a Markdown string, for tests that drive the scan from text."""
+    return _links_in(_PARSER.parse(markdown))
+
+
+def _write(root: Path, name: str, text: str) -> None:
     path = root / name
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(text, encoding="utf-8")
-    return path
+
+
+def _only_message(root: Path) -> str:
+    """Return the single message the check reports, asserting there is exactly one.
+
+    The "exactly one" half is the load-bearing claim in most of these cases -- a bad
+    destination must not also cascade a fragment message -- so it is stated once here rather
+    than restated in every test.
+    """
+    messages = check_repository_links(root)
+
+    assert len(messages) == 1, messages
+    return messages[0]
 
 
 def test_valid_relative_link_passes(tmp_path):
@@ -32,11 +52,9 @@ def test_valid_relative_link_passes(tmp_path):
 def test_missing_file_target_names_the_source_and_the_link(tmp_path):
     _write(tmp_path, "README.md", "# Readme\n\nSee [gone](MISSING.md).\n")
 
-    messages = check_repository_links(tmp_path)
-
-    assert len(messages) == 1
-    assert "README.md" in messages[0]
-    assert "MISSING.md" in messages[0]
+    message = _only_message(tmp_path)
+    assert "README.md" in message
+    assert "MISSING.md" in message
 
 
 def test_valid_anchor_passes(tmp_path):
@@ -50,12 +68,10 @@ def test_anchor_matching_no_heading_names_the_source_and_the_link(tmp_path):
     _write(tmp_path, "README.md", "# Readme\n\n[ad](ARCHITECTURE.md#ad-99-ghost).\n")
     _write(tmp_path, "ARCHITECTURE.md", "# Architecture\n\n## AD-25 scanner\n\nbody\n")
 
-    messages = check_repository_links(tmp_path)
-
-    assert len(messages) == 1
-    assert "README.md" in messages[0]
-    assert "ad-99-ghost" in messages[0]
-    assert "ARCHITECTURE.md" in messages[0]
+    message = _only_message(tmp_path)
+    assert "README.md" in message
+    assert "ad-99-ghost" in message
+    assert "ARCHITECTURE.md" in message
 
 
 def test_duplicate_headings_resolve_with_a_document_order_suffix(tmp_path):
@@ -79,28 +95,22 @@ def test_third_duplicate_heading_beyond_the_document_is_still_rejected(tmp_path)
     _write(tmp_path, "CHANGELOG.md", "# Changelog\n\n### Fixed\n\na\n\n### Fixed\n\nb\n")
     _write(tmp_path, "README.md", "# Readme\n\n[third](CHANGELOG.md#fixed-2).\n")
 
-    messages = check_repository_links(tmp_path)
-
-    assert len(messages) == 1
-    assert "fixed-2" in messages[0]
+    message = _only_message(tmp_path)
+    assert "fixed-2" in message
 
 
 def test_missing_target_does_not_also_report_a_missing_anchor(tmp_path):
     _write(tmp_path, "README.md", "# Readme\n\n[gone](MISSING.md#whatever).\n")
 
-    messages = check_repository_links(tmp_path)
-
-    assert len(messages) == 1
-    assert "MISSING.md" in messages[0]
+    message = _only_message(tmp_path)
+    assert "MISSING.md" in message
 
 
 def test_reference_style_link_is_checked(tmp_path):
     _write(tmp_path, "README.md", "# Readme\n\nSee [arch][ref].\n\n[ref]: MISSING.md\n")
 
-    messages = check_repository_links(tmp_path)
-
-    assert len(messages) == 1
-    assert "MISSING.md" in messages[0]
+    message = _only_message(tmp_path)
+    assert "MISSING.md" in message
 
 
 def test_link_like_text_inside_code_is_not_a_link(tmp_path):
@@ -117,11 +127,9 @@ def test_link_like_text_inside_code_is_not_a_link(tmp_path):
 def test_fragment_only_link_resolves_against_the_source_document(tmp_path):
     _write(tmp_path, "README.md", "# Readme\n\n[here](#install) and [gone](#nope).\n\n## Install\n")
 
-    messages = check_repository_links(tmp_path)
-
-    assert len(messages) == 1
-    assert "nope" in messages[0]
-    assert "README.md" in messages[0]
+    message = _only_message(tmp_path)
+    assert "nope" in message
+    assert "README.md" in message
 
 
 def test_explicit_marker_heading_resolves_under_its_github_id(tmp_path):
@@ -129,10 +137,8 @@ def test_explicit_marker_heading_resolves_under_its_github_id(tmp_path):
     _write(tmp_path, "README.md", "# Readme\n\n[a](GUIDE.md#notes-n) [b](GUIDE.md#n).\n")
     _write(tmp_path, "GUIDE.md", "# Guide\n\n## Notes {#n}\n\nbody\n")
 
-    messages = check_repository_links(tmp_path)
-
-    assert len(messages) == 1
-    assert "'#n'" in messages[0]
+    message = _only_message(tmp_path)
+    assert "'#n'" in message
 
 
 def test_external_and_root_absolute_links_are_ignored(tmp_path):
@@ -149,10 +155,8 @@ def test_external_and_root_absolute_links_are_ignored(tmp_path):
 def test_target_escaping_the_repository_is_reported(tmp_path):
     _write(tmp_path, "README.md", "# Readme\n\n[out](../outside.md)\n")
 
-    messages = check_repository_links(tmp_path)
-
-    assert len(messages) == 1
-    assert "../outside.md" in messages[0]
+    message = _only_message(tmp_path)
+    assert "../outside.md" in message
 
 
 def test_fragment_on_a_non_markdown_target_is_existence_checked_only(tmp_path):
@@ -181,10 +185,8 @@ def test_query_string_is_not_part_of_the_target_path(tmp_path):
 def test_missing_target_is_still_reported_when_a_query_is_present(tmp_path):
     _write(tmp_path, "README.md", "# Readme\n\n[plain](MISSING.md?plain=1)\n")
 
-    messages = check_repository_links(tmp_path)
-
-    assert len(messages) == 1
-    assert "MISSING.md?plain=1" in messages[0]
+    message = _only_message(tmp_path)
+    assert "MISSING.md?plain=1" in message
 
 
 def test_fragment_is_not_heading_checked_when_the_destination_carries_a_query(tmp_path):
@@ -202,19 +204,15 @@ def test_percent_encoded_separator_is_not_a_path_separator(tmp_path):
     # component, which discards the repository root entirely.
     _write(tmp_path, "README.md", "# Readme\n\n[x](%2Fetc%2Fpasswd)\n")
 
-    messages = check_repository_links(tmp_path)
-
-    assert len(messages) == 1
-    assert "%2Fetc%2Fpasswd" in messages[0]
+    message = _only_message(tmp_path)
+    assert "%2Fetc%2Fpasswd" in message
 
 
 def test_percent_encoded_dot_segment_does_not_climb_out(tmp_path):
     _write(tmp_path, "README.md", "# Readme\n\n[x](%2E%2E/outside.md)\n")
 
-    messages = check_repository_links(tmp_path)
-
-    assert len(messages) == 1
-    assert "outside.md" in messages[0]
+    message = _only_message(tmp_path)
+    assert "outside.md" in message
 
 
 def test_encoded_single_dot_segment_normalizes(tmp_path):
@@ -249,19 +247,15 @@ def test_encoded_backslash_does_not_create_path_structure(tmp_path):
     # fail on a contributor's machine.
     _write(tmp_path, "README.md", "# Readme\n\n[x](%2E%2E%5Coutside.md)\n")
 
-    messages = check_repository_links(tmp_path)
-
-    assert len(messages) == 1
-    assert "does not resolve inside the repository" in messages[0]
+    message = _only_message(tmp_path)
+    assert "does not resolve inside the repository" in message
 
 
 def test_encoded_drive_letter_does_not_create_path_structure(tmp_path):
     _write(tmp_path, "README.md", "# Readme\n\n[x](%43%3A%5CWindows%5Csystem.ini)\n")
 
-    messages = check_repository_links(tmp_path)
-
-    assert len(messages) == 1
-    assert "does not resolve inside the repository" in messages[0]
+    message = _only_message(tmp_path)
+    assert "does not resolve inside the repository" in message
 
 
 def test_same_document_plain_view_link_is_not_heading_checked(tmp_path):
@@ -278,10 +272,8 @@ def test_ordinary_query_still_validates_the_fragment(tmp_path):
     _write(tmp_path, "README.md", "# Readme\n\n[x](GUIDE.md?utm_source=docs#no-such-heading)\n")
     _write(tmp_path, "GUIDE.md", "# Guide\n\n## Section\n")
 
-    messages = check_repository_links(tmp_path)
-
-    assert len(messages) == 1
-    assert "no-such-heading" in messages[0]
+    message = _only_message(tmp_path)
+    assert "no-such-heading" in message
 
 
 def test_ordinary_query_accepts_a_resolving_fragment(tmp_path):
@@ -304,10 +296,8 @@ def test_symlink_leaving_the_repository_is_reported(tmp_path):
     (repo / "docs" / "OUT.md").symlink_to(outside)
     _write(repo, "README.md", "# Readme\n\n[x](docs/OUT.md#secret-heading)\n")
 
-    messages = check_repository_links(repo)
-
-    assert len(messages) == 1
-    assert "docs/OUT.md" in messages[0]
+    message = _only_message(repo)
+    assert "docs/OUT.md" in message
 
 
 def test_symlink_staying_inside_the_repository_resolves(tmp_path):
@@ -350,10 +340,8 @@ def test_source_symlinked_to_an_undecodable_file_is_reported_rather_than_raised(
     blob.write_bytes(b"\xff\xfe\x00binary")
     (repo / "BIN.md").symlink_to(blob)
 
-    messages = check_repository_links(repo)
-
-    assert len(messages) == 1
-    assert "leaves the repository through a symlink" in messages[0]
+    message = _only_message(repo)
+    assert "leaves the repository through a symlink" in message
 
 
 def test_source_symlinked_inside_the_repository_is_still_checked(tmp_path):
@@ -364,11 +352,9 @@ def test_source_symlinked_inside_the_repository_is_still_checked(tmp_path):
     _write(repo, "docs/staged.md", "# Staged\n\n[gone](MISSING.md)\n")
     (repo / "ALIAS.md").symlink_to(repo / "docs" / "staged.md")
 
-    messages = check_repository_links(repo)
-
-    assert len(messages) == 1
-    assert messages[0].startswith("'ALIAS.md':3:")
-    assert "MISSING.md" in messages[0]
+    message = _only_message(repo)
+    assert message.startswith("'ALIAS.md':3:")
+    assert "MISSING.md" in message
 
 
 def test_raw_html_anchor_is_reported_as_unchecked(tmp_path):
@@ -376,30 +362,211 @@ def test_raw_html_anchor_is_reported_as_unchecked(tmp_path):
     # extraction. Reporting it keeps the gap loud instead of silently green.
     _write(tmp_path, "README.md", '# Readme\n\nSee <a href="MISSING.md">guide</a>.\n')
 
-    messages = check_repository_links(tmp_path)
-
-    assert len(messages) == 1
-    assert "README.md" in messages[0]
-    assert "HTML anchor" in messages[0]
+    message = _only_message(tmp_path)
+    assert message.startswith("'README.md':3:")
+    assert "HTML anchor" in message
 
 
-def test_raw_html_anchor_in_a_block_is_reported(tmp_path):
+def test_raw_html_anchor_is_reported_even_when_its_target_exists(tmp_path):
+    # The destination is not resolved either way, so an anchor naming a real file is still
+    # reported. Reporting is about the form, not about whether this one would have worked.
+    _write(tmp_path, "README.md", '# Readme\n\n<a href="GUIDE.md">g</a>\n')
+    _write(tmp_path, "GUIDE.md", "# Guide\n")
+
+    assert "HTML anchor" in _only_message(tmp_path)
+
+
+def test_raw_html_anchor_in_a_block_reports_its_own_line(tmp_path):
+    # The anchor sits on line 5, three lines into the html_block that opens on line 3.
     _write(
         tmp_path,
         "README.md",
         '# Readme\n\n<details>\n<summary>x</summary>\n<a href="MISSING.md">g</a>\n</details>\n',
     )
 
+    message = _only_message(tmp_path)
+    assert message.startswith("'README.md':5:")
+    assert "HTML anchor" in message
+
+
+def test_inline_anchor_reports_its_containing_block(tmp_path):
+    # Markdown-it records no source position for an inline child, so the anchor on line 4
+    # reports the paragraph's line 3. Locating it by searching the paragraph's source was
+    # tried and withdrawn: see the cases below that such a search gets wrong.
+    _write(tmp_path, "README.md", '# Readme\n\npara\n<a href="MISSING.md">x</a>\n')
+
+    message = _only_message(tmp_path)
+    assert message.startswith("'README.md':3:")
+    assert "HTML anchor" in message
+
+
+def test_decoded_text_does_not_displace_a_later_raw_anchor(tmp_path):
+    # The text child decodes to exactly the raw tag on the next line while being absent from
+    # its own source position. A cursor advanced by non-verbatim content would consume the
+    # real tag and report it a line early; the block line is unaffected by either.
+    _write(
+        tmp_path,
+        "README.md",
+        '# Readme\n\n&lt;a href="MISSING.md"&gt;\n<a href="MISSING.md">y</a>\n',
+    )
+
+    message = _only_message(tmp_path)
+    assert message.startswith("'README.md':3:")
+
+
+def test_reference_link_title_does_not_displace_a_raw_anchor(tmp_path):
+    # A reference link's title lives in the definition, not in the paragraph, so searching
+    # the paragraph for it found the real tag instead and stepped over it.
+    _write(
+        tmp_path,
+        "README.md",
+        '# Readme\n\n[x][ref]\n<a href=MISSING.md>y</a>\n\n[ref]: GUIDE.md "<a href=MISSING.md>"\n',
+    )
+    _write(tmp_path, "GUIDE.md", "# Guide\n")
+
+    message = _only_message(tmp_path)
+    assert message.startswith("'README.md':3:")
+
+
+def test_anchor_inside_an_inline_script_is_not_reported(tmp_path):
+    # Markdown-it splits the opening tag, the script's content and the closing tag into
+    # separate html_inline tokens. A fresh parser per token leaves the CDATA mode the opening
+    # tag entered, and the string literal reads as a live anchor.
+    _write(
+        tmp_path,
+        "README.md",
+        "# Readme\n\nbefore <script>const x = '<a href=\"MISSING.md\">';</script> after\n",
+    )
+
+    assert check_repository_links(tmp_path) == []
+
+
+def test_markdown_link_still_reports_its_containing_block(tmp_path):
+    # A link_open carries no content to locate, so its documented contract is unchanged: the
+    # line the containing block starts on, here line 3 rather than the link's own line 4.
+    _write(tmp_path, "README.md", "# Readme\n\npara\n[x](MISSING.md)\n")
+
+    message = _only_message(tmp_path)
+    assert message.startswith("'README.md':3:")
+
+
+# _split_destination is the URL-normalizing boundary. Neither behaviour below is reachable
+# through a maintained document now that a raw anchor's href is reported rather than resolved:
+# markdown-it hands over a destination it has already trimmed and percent-encoded. They are
+# kept and tested directly, because a boundary that claims to split a URL the way a parser
+# does should do so whatever reaches it.
+@pytest.mark.parametrize(
+    ("href", "expected_path", "expected_fragment"),
+    [
+        # urlsplit lstrips only, and says so: applications rely on a kept trailing space.
+        ("GUIDE.md ", "GUIDE.md", ""),
+        ("  GUIDE.md  ", "GUIDE.md", ""),
+        # Stripping the whole destination rather than its path is what reaches a fragment.
+        ("  GUIDE.md#guide  ", "GUIDE.md", "guide"),
+        # Interior tab, newline and CR are removed by urlsplit already.
+        ("GUI\tDE.md", "GUIDE.md", ""),
+        ("GUIDE.md\n", "GUIDE.md", ""),
+        # %20 is not whitespace, so a file that really ends in a space stays addressable.
+        ("GUIDE%20.md", "GUIDE%20.md", ""),
+    ],
+)
+def test_split_destination_applies_the_url_whitespace_rules(href, expected_path, expected_fragment):
+    parts = _split_destination(href)
+
+    assert parts is not None
+    assert parts.path == expected_path
+    assert parts.fragment == expected_fragment
+
+
+@pytest.mark.parametrize("href", ["http://[", "https://[oops]/x", "//[", "//[oops]/x"])
+def test_split_destination_refuses_a_malformed_authority(href):
+    # urlsplit raises rather than answering. Every spelling that can raise has an authority
+    # and is external either way, so None reaches the verdict _is_out_of_scope would.
+    assert _split_destination(href) is None
+
+
+def test_an_encoded_space_still_names_a_file_that_ends_in_one(tmp_path):
+    # %20 is not whitespace here. Stripping must not reach it, or a file deliberately named
+    # with a trailing space would become unaddressable.
+    _write(tmp_path, "README.md", "# Readme\n\n[x](<GUIDE%20.md>)\n")
+    _write(tmp_path, "GUIDE .md", "# Guide\n")
+
+    assert check_repository_links(tmp_path) == []
+
+
+def test_an_unparseable_document_does_not_end_the_run(tmp_path):
+    # A character reference wider than the interpreter's integer-conversion limit makes the
+    # parsers raise rather than answer. AAA.md sorts first, so ZZZ.md is only reached if the
+    # run reports and steps over it.
+    reference = "&#" + "9" * 5000 + ";"
+    _write(tmp_path, "AAA.md", f'# A\n\n<a href="{reference}">x</a>\n')
+    _write(tmp_path, "ZZZ.md", "# Z\n\n[later](ALSO-MISSING.md)\n")
+
     messages = check_repository_links(tmp_path)
 
-    assert len(messages) == 1
-    assert "HTML anchor" in messages[0]
+    assert len(messages) == 2
+    assert messages[0] == "'AAA.md': maintained document could not be parsed for destinations"
+    assert messages[1].startswith("'ZZZ.md':3:")
+
+
+def test_an_undecodable_source_does_not_end_the_run(tmp_path):
+    # The read is inside the same refusal: UnicodeDecodeError is a ValueError, so a root
+    # document that will not decode is reported rather than ending the run on a traceback.
+    (tmp_path / "AAA.md").write_bytes(b"# A\n\xff\xfe\x00binary\n")
+    _write(tmp_path, "ZZZ.md", "# Z\n\n[later](ALSO-MISSING.md)\n")
+
+    messages = check_repository_links(tmp_path)
+
+    assert len(messages) == 2
+    assert messages[0] == "'AAA.md': maintained document could not be parsed for destinations"
+    assert messages[1].startswith("'ZZZ.md':3:")
+
+
+def test_an_unreadable_target_is_reported_rather_than_raised(tmp_path):
+    # A target is read for its heading ids outside the source refusal, and the target set is
+    # the wider of the two: any repository-contained path, staging included. Without the same
+    # guard there, a fragment on an undecodable target ends the run and leaves ZZZ.md
+    # unchecked.
+    _write(tmp_path, "README.md", "# Readme\n\n[x](docs/BIN.md#nope)\n")
+    (tmp_path / "docs").mkdir()
+    (tmp_path / "docs" / "BIN.md").write_bytes(b"# T\n\xff\xfe\x00binary\n")
+    _write(tmp_path, "ZZZ.md", "# Z\n\n[later](ALSO-MISSING.md)\n")
+
+    messages = check_repository_links(tmp_path)
+
+    assert len(messages) == 2
+    assert (
+        messages[0] == "'README.md':3: link target 'docs/BIN.md' could not be read for its headings"
+    )
+    assert messages[1].startswith("'ZZZ.md':3:")
 
 
 def test_html_anchor_without_an_href_is_not_reported(tmp_path):
     # A bare <a name="..."> names a destination rather than carrying one, so there is nothing
     # to verify and nothing to complain about.
     _write(tmp_path, "README.md", '# Readme\n\n<a name="top"></a>\n')
+
+    assert check_repository_links(tmp_path) == []
+
+
+def test_html_anchor_with_an_empty_href_is_not_reported(tmp_path):
+    # An empty destination names nothing, exactly as an empty Markdown destination does.
+    _write(tmp_path, "README.md", '# Readme\n\n<a href="">x</a>\n')
+
+    assert check_repository_links(tmp_path) == []
+
+
+def test_an_empty_first_href_suppresses_a_duplicate(tmp_path):
+    # A repeated attribute is a parse error and the later one is dropped, so a browser reads
+    # this as a same-document link and never sees MISSING.md. Validating the duplicate would
+    # fail a mandatory gate on a link that works.
+    _write(tmp_path, "README.md", '# Readme\n\n<a href="" href="MISSING.md">x</a>\n')
+
+    assert check_repository_links(tmp_path) == []
+
+
+def test_a_valueless_first_href_suppresses_a_duplicate(tmp_path):
+    _write(tmp_path, "README.md", '# Readme\n\n<a href href="MISSING.md">x</a>\n')
 
     assert check_repository_links(tmp_path) == []
 
@@ -415,11 +582,9 @@ def test_control_bytes_in_a_source_filename_are_neutralized(tmp_path):
     # ESC in one could forge or erase an earlier pre-commit line. AD-34's boundary.
     _write(tmp_path, "A\x1b[2KB.md", "# Evil\n\n[x](MISSING.md)\n")
 
-    messages = check_repository_links(tmp_path)
-
-    assert len(messages) == 1
-    assert "\x1b" not in messages[0]
-    assert "\\x1b" in messages[0]
+    message = _only_message(tmp_path)
+    assert "\x1b" not in message
+    assert "\\x1b" in message
 
 
 def test_control_bytes_in_a_fragment_are_neutralized(tmp_path):
@@ -427,20 +592,16 @@ def test_control_bytes_in_a_fragment_are_neutralized(tmp_path):
     _write(tmp_path, "README.md", "# Readme\n\n[x](GUIDE.md#%1b[2K)\n")
     _write(tmp_path, "GUIDE.md", "# Guide\n")
 
-    messages = check_repository_links(tmp_path)
-
-    assert len(messages) == 1
-    assert "\x1b" not in messages[0]
+    message = _only_message(tmp_path)
+    assert "\x1b" not in message
 
 
 def test_control_bytes_in_a_target_filename_are_neutralized(tmp_path):
     _write(tmp_path, "README.md", "# Readme\n\n[x](A%1B%5B2KB.md#nope)\n")
     _write(tmp_path, "A\x1b[2KB.md", "# Target\n")
 
-    messages = check_repository_links(tmp_path)
-
-    assert len(messages) == 1
-    assert "\x1b" not in messages[0]
+    message = _only_message(tmp_path)
+    assert "\x1b" not in message
 
 
 def test_percent_encoded_nul_is_reported_rather_than_raised(tmp_path):
@@ -473,6 +634,32 @@ def test_anchor_inside_a_script_block_is_not_reported(tmp_path):
     assert check_repository_links(tmp_path) == []
 
 
+def test_raw_text_state_does_not_carry_across_a_block_boundary(tmp_path):
+    # A known limit, pinned rather than fixed. A blank line ends the type-6 ``html_block`` at
+    # ``<script>``, so markdown-it emits the opening tag as a block and the string literal as a
+    # paragraph of ``html_inline`` children. Each token gets its own parser, the CDATA mode the
+    # opening tag entered is lost, and the literal is read as a live anchor.
+    #
+    # Carrying one parser across the whole document would close it, and would also make
+    # ``getpos()`` cumulative over the fed text, which is what reports an anchor at its own
+    # line inside a ``<details>`` block. The trade buys an unreachable case -- GitHub strips
+    # ``<script>`` from rendered Markdown, so such a block is already inert in the only place
+    # these documents are read -- at the cost of a working one, and the failure is a loud false
+    # positive rather than the silent truncation this gate exists to prevent. Should the
+    # attribution question ever be settled, this test is the one that says so.
+    _write(
+        tmp_path,
+        "README.md",
+        "# Readme\n\n<details>\n<script>\n\nvar s = '<a href=\"MISSING.md\">';\n"
+        "</script>\n</details>\n",
+    )
+
+    assert check_repository_links(tmp_path) == [
+        "'README.md':6: raw HTML anchor carries a destination this check cannot resolve; "
+        "write it as a Markdown link"
+    ]
+
+
 def test_directory_target_is_accepted(tmp_path):
     _write(tmp_path, "README.md", "# Readme\n\n[vendor](vendor/)\n")
     (tmp_path / "vendor").mkdir()
@@ -501,10 +688,8 @@ def test_uppercase_markdown_suffix_is_still_fragment_checked(tmp_path):
     _write(tmp_path, "README.md", "# Readme\n\n[x](GUIDE.MD#no-such-heading)\n")
     _write(tmp_path, "GUIDE.MD", "# Guide\n\n## Section\n")
 
-    messages = check_repository_links(tmp_path)
-
-    assert len(messages) == 1
-    assert "no-such-heading" in messages[0]
+    message = _only_message(tmp_path)
+    assert "no-such-heading" in message
 
 
 def test_alternate_markdown_suffix_is_fragment_checked(tmp_path):
@@ -513,10 +698,8 @@ def test_alternate_markdown_suffix_is_fragment_checked(tmp_path):
     _write(tmp_path, "README.md", "# Readme\n\n[x](GUIDE.markdown#no-such-heading)\n")
     _write(tmp_path, "GUIDE.markdown", "# Guide\n\n## Section\n")
 
-    messages = check_repository_links(tmp_path)
-
-    assert len(messages) == 1
-    assert "no-such-heading" in messages[0]
+    message = _only_message(tmp_path)
+    assert "no-such-heading" in message
 
 
 def test_alternate_markdown_suffix_accepts_a_resolving_fragment(tmp_path):
@@ -536,7 +719,8 @@ def test_fragment_on_a_differently_rendered_suffix_is_not_heading_checked(tmp_pa
 
 
 def test_links_and_raw_anchors_are_ordered_by_line_within_a_document(tmp_path):
-    # Collecting every link message before every anchor message would print line 7 first.
+    # One scan collects both forms, so they interleave by position rather than being grouped
+    # by kind. Collecting anchors in a second pass would print line 7 first.
     _write(
         tmp_path,
         "README.md",
@@ -550,6 +734,35 @@ def test_links_and_raw_anchors_are_ordered_by_line_within_a_document(tmp_path):
     assert "HTML anchor" in messages[0]
     assert messages[1].startswith("'README.md':7:")
     assert "ALSO-MISSING.md" in messages[1]
+
+
+# The duplicate-attribute rule lives in the tokenizer's attribute-name state: a repeated
+# name is a parse error and the *new* attribute is dropped, so the first wins whatever it
+# holds. These cases are the anchor-shaped equivalents of the html5lib-tests tokenizer
+# expectations (MIT), which pin the rule directly:
+#   test1.test  <h a='b' a='d'>            -> {"a": "b"}
+#   test3.test  <a a A> / <a a a>          -> {"a": ""}
+#   test3.test  <a a=''A> / <a a=''a>      -> {"a": ""}
+#   test4.test  <x x=1 x=2 X=3>            -> {"x": "1"}   (names case-fold first)
+#   test4.test  </x x x>                   -> end tag, attributes dropped entirely
+_DUPLICATE_ATTRIBUTE_CASES = [
+    ('<a href="b" href="d">x</a>', ["b"]),
+    ("<a href HREF>x</a>", []),
+    ("<a href href>x</a>", []),
+    ("<a href=''HREF>x</a>", []),
+    ("<a href=''href>x</a>", []),
+    ("<a href=1 href=2 HREF=3>x</a>", ["1"]),
+    # The case that actually discriminates the fold: an implementation matching the literal
+    # name would skip HREF and resolve B.md, which no browser would navigate to.
+    ('<a HREF="A.md" href="B.md">x</a>', ["A.md"]),
+    ('<A HREF="OK.md">x</A>', ["OK.md"]),
+    ('</a href="M.md">', []),
+]
+
+
+@pytest.mark.parametrize(("html", "expected"), _DUPLICATE_ATTRIBUTE_CASES)
+def test_first_href_attribute_wins(html, expected):
+    assert [href for _, href in _anchor_hrefs(html)] == expected
 
 
 def test_maintained_documents_are_the_sorted_root_markdown_files(tmp_path):
@@ -568,14 +781,14 @@ def test_staged_docs_are_not_link_sources_but_may_be_targets(tmp_path):
     assert check_repository_links(tmp_path) == []
 
 
-def test_extract_links_reports_the_line_of_the_containing_block():
-    links = extract_links("# Title\n\npara\n\nSee [a](one.md)\nand [b](two.md)\n")
+def test_links_are_reported_at_the_line_of_the_containing_block():
+    links = _links("# Title\n\npara\n\nSee [a](one.md)\nand [b](two.md)\n")
 
     assert [(link.href, link.line) for link in links] == [("one.md", 5), ("two.md", 5)]
 
 
-def test_extract_links_ignores_an_empty_destination():
-    assert extract_links("[a]()\n") == []
+def test_a_link_with_an_empty_destination_is_ignored():
+    assert _links("[a]()\n") == []
 
 
 def test_repository_maintained_documents_have_no_broken_links():
@@ -583,7 +796,7 @@ def test_repository_maintained_documents_have_no_broken_links():
 
 
 def test_pre_commit_runs_the_link_check():
-    config = YAML(typ="safe").load((_ROOT / ".pre-commit-config.yaml").read_text(encoding="utf-8"))
+    config = _load_workflow(_ROOT / ".pre-commit-config.yaml")
     entries = [
         hook["entry"] for repo in config["repos"] for hook in repo["hooks"] if "entry" in hook
     ]
