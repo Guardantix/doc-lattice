@@ -354,6 +354,50 @@ def test_init_skips_existing_config_but_still_prints(tmp_path: Path, monkeypatch
     assert "'.doc-lattice.yml' already exists, leaving it untouched" in result.stderr
 
 
+# A long name that passes the branch-name policy, so the branch record is wider than the pinned
+# console on its own and the externally controlled token is unambiguously the thing that would
+# hard-wrap. Both tests below use it.
+_LONG_DEFAULT_BRANCH = "release/very-long-integration-branch-name-for-wrapping"
+
+
+def test_init_keeps_the_wrote_and_branch_records_on_one_line_at_any_width(
+    tmp_path: Path, monkeypatch
+):
+    # Same one-record-per-line contract reconcile carries at
+    # test_reconcile_keeps_every_record_on_one_line_at_any_width: a status record stays on one
+    # physical line at any terminal width rather than hard-wrapping mid-token into a fragment.
+    # Only the first two stderr lines are pinned: the placement guidance that follows is prose
+    # and is meant to wrap, so asserting it here would freeze the wrong contract.
+    monkeypatch.setenv("COLUMNS", "20")
+    monkeypatch.chdir(tmp_path)
+
+    result = runner.invoke(app, ["init", "--default-branch", _LONG_DEFAULT_BRANCH])
+
+    assert result.exit_code == 0
+    assert result.stderr.splitlines()[:2] == [
+        "wrote '.doc-lattice.yml'",
+        f"workflow triggers on branch {_LONG_DEFAULT_BRANCH} (--default-branch)",
+    ]
+
+
+def test_init_keeps_the_already_exists_and_branch_records_on_one_line_at_any_width(
+    tmp_path: Path, monkeypatch
+):
+    # The already-exists and wrote records are the `except` and `else` arms of one create
+    # attempt, so no single run reaches both and this second run is what covers the other arm.
+    monkeypatch.setenv("COLUMNS", "20")
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / ".doc-lattice.yml").write_text("SENTINEL\n", encoding="utf-8")
+
+    result = runner.invoke(app, ["init", "--default-branch", _LONG_DEFAULT_BRANCH])
+
+    assert result.exit_code == 0
+    assert result.stderr.splitlines()[:2] == [
+        "'.doc-lattice.yml' already exists, leaving it untouched",
+        f"workflow triggers on branch {_LONG_DEFAULT_BRANCH} (--default-branch)",
+    ]
+
+
 def test_init_reports_a_staging_collision_as_a_failure_not_an_existing_config(
     tmp_path: Path, monkeypatch
 ):
