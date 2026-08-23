@@ -354,14 +354,23 @@ def _scaffold_config(runtime: CliRuntime, config_text: str) -> None:
     # CONFIG_ERROR: the defect is in the directory being scaffolded, and init never reads
     # .doc-lattice.yml, so naming config sent the user to a file that had nothing to do with
     # the failure.
+    # Both arms print with soft_wrap=True for the one-record-per-line contract every other
+    # renderer and adapter carries: a status record stays on one physical line at any terminal
+    # width rather than hard-wrapping mid-token into a fragment. That is a property of being a
+    # record, not of the token being externally controlled -- `target.name` is always
+    # DEFAULT_CONFIG_NAME here. The placement guidance at `_print_unmanaged_guidance` is prose
+    # and is deliberately left to wrap; the baseline guidance beside it already opts out.
     except DestinationExistsError:
         runtime.stderr.print(
-            f"{escape(format_path_for_display(target.name))} already exists, leaving it untouched"
+            f"{escape(format_path_for_display(target.name))} already exists, leaving it untouched",
+            soft_wrap=True,
         )
     except OSError as exc:
         raise _init_persistence_error(target.name, exc) from exc
     else:
-        runtime.stderr.print(f"wrote {escape(format_path_for_display(target.name))}")
+        runtime.stderr.print(
+            f"wrote {escape(format_path_for_display(target.name))}", soft_wrap=True
+        )
 
 
 def register_init(app: typer.Typer) -> None:
@@ -435,6 +444,12 @@ def register_init(app: typer.Typer) -> None:
                 gitignore_text = scaffold.gitignore_text
                 precommit_text = scaffold.precommit_text
                 ci_text = scaffold.ci_text
-            runtime.stderr.print(f"workflow triggers on branch {escape(branch)} ({branch_source})")
+            # A record, and the one here whose token is externally controlled: --default-branch
+            # or the origin/HEAD probe supplies `branch`, and a name long enough to exceed the
+            # console would otherwise split mid-token into something no reader can match against
+            # the workflow the run just rendered.
+            runtime.stderr.print(
+                f"workflow triggers on branch {escape(branch)} ({branch_source})", soft_wrap=True
+            )
             _print_artifacts(runtime, gitignore_text, precommit_text, ci_text)
         raise typer.Exit(0)
