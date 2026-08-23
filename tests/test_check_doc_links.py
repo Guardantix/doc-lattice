@@ -517,18 +517,37 @@ def test_percent_encoded_backslash_is_not_a_separator(tmp_path):
     assert "does not resolve inside the repository" in message
 
 
-def test_anchor_repeated_inside_a_link_title_reports_its_own_line(tmp_path):
+# The anchor's label is deliberately the same as the link's label. Stepping over the title at
+# link_open instead of link_close overshoots: the label child then matches this second `x`
+# rather than the one in brackets, pushing the cursor past the raw tag so the search fails and
+# the anchor falls back to line 1. A different label would pass either way.
+_TITLE_REPEAT = '[x](GUIDE.md "<a href=MISSING.md>")\n<a href=MISSING.md>x</a>\n'
+
+
+@pytest.mark.parametrize("label", ["x", "y"])
+def test_anchor_repeated_inside_a_link_title_reports_its_own_line(tmp_path, label):
     # A link's title is source text with no child of its own. Without stepping over it the
     # search matches the copy inside the title and reports the anchor on line 1.
-    _write(
-        tmp_path,
-        "README.md",
-        '[x](GUIDE.md "<a href=MISSING.md>")\n<a href=MISSING.md>y</a>\n',
-    )
+    _write(tmp_path, "README.md", _TITLE_REPEAT.replace(">x</a>", f">{label}</a>"))
     _write(tmp_path, "GUIDE.md", "# Guide\n")
 
     message = _only_message(tmp_path)
     assert message.startswith("'README.md':2:")
+
+
+def test_an_unparseable_document_does_not_end_the_run(tmp_path):
+    # A character reference wider than the interpreter's integer-conversion limit makes the
+    # parsers raise rather than answer. AAA.md sorts first, so ZZZ.md is only reached if the
+    # run reports and steps over it.
+    reference = "&#" + "9" * 5000 + ";"
+    _write(tmp_path, "AAA.md", f'# A\n\n<a href="{reference}">x</a>\n')
+    _write(tmp_path, "ZZZ.md", "# Z\n\n[later](ALSO-MISSING.md)\n")
+
+    messages = check_repository_links(tmp_path)
+
+    assert len(messages) == 2
+    assert messages[0] == "'AAA.md': maintained document could not be parsed for destinations"
+    assert messages[1].startswith("'ZZZ.md':3:")
 
 
 def test_external_html_anchor_destination_is_out_of_scope(tmp_path):

@@ -47,6 +47,7 @@ _MARKDOWN_TARGET_SUFFIXES = frozenset(
 _SINGLE_DOT_SEGMENTS = frozenset({".", "%2e"})
 _DOUBLE_DOT_SEGMENTS = frozenset({"..", ".%2e", "%2e.", "%2e%2e"})
 _ESCAPING_SOURCE_MESSAGE = "maintained document leaves the repository through a symlink"
+_UNPARSEABLE_SOURCE_MESSAGE = "maintained document could not be parsed for destinations"
 # U+0000 through U+0020: the WHATWG URL Standard's "C0 control or space", which its parser
 # strips from both ends of a URL before reading it. ``urlsplit`` strips only the leading half
 # and keeps the trailing half on purpose, so the rest is applied here.
@@ -104,12 +105,19 @@ def _walk(tokens: list[Token]) -> Iterator[tuple[int, Token]]:
         if token.type != "inline" or token.children is None:
             continue
         cursor = 0
+        title: object = None
         for child in token.children:
             # A link's title is source text with no child of its own, so nothing else moves
             # the cursor past it and a later fragment repeated inside one would be matched
-            # there instead of at its own position.
+            # there instead of at its own position. It is stepped over at ``link_close``,
+            # not at ``link_open``: the source order is ``[label](dest "title")``, so
+            # skipping it first would put the cursor past the label its own children still
+            # have to match, and each would then re-synchronize on a later repeat.
             if child.type == "link_open":
-                cursor = _skip_past(token.content, cursor, child.attrGet("title"))
+                title = child.attrGet("title")
+            elif child.type == "link_close":
+                cursor = _skip_past(token.content, cursor, title)
+                title = None
             # A child whose content is not a verbatim slice -- a code span with its newline
             # folded to a space, text with an entity decoded -- is simply not found, and the
             # cursor waits for the next child that does re-synchronize it.
@@ -532,7 +540,16 @@ def check_repository_links(repo_root: Path) -> list[str]:
             # nobody checks is the silent green this gate exists to prevent.
             messages.append(f"{source}: {_ESCAPING_SOURCE_MESSAGE}")
             continue
-        for link in extract_links(document.read_text(encoding="utf-8")):
+        try:
+            links = extract_links(document.read_text(encoding="utf-8"))
+        except ValueError:
+            # A character reference wider than the interpreter's integer-conversion limit
+            # makes the parsers raise rather than answer. Reported and stepped over, so one
+            # document's content cannot end the run and leave every later document
+            # unchecked -- the failure the NUL and malformed-authority refusals also close.
+            messages.append(f"{source}: {_UNPARSEABLE_SOURCE_MESSAGE}")
+            continue
+        for link in links:
             message = _link_message(link, document, root, cache)
             if message is not None:
                 messages.append(f"{source}:{link.line}: {message}")
