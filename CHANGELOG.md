@@ -180,6 +180,19 @@ hand-written file, and the diagnostic says so. See **Added** and **Changed** bel
   a directory carrying that name no longer counts as a config at either end of the walk, and the
   repository marker is tested without following symlinks, so a worktree whose `.git` link has lost
   its target still bounds the search.
+- `init`'s printed guidance now names the step it was already ordering against. Its baseline line
+  told an adopter to reconcile "before enabling the gates" while nothing in the same output said
+  what enabling them is, so a terminal-only adoption was handed an ordering constraint and no act
+  to order against. A new line after the baseline states that adding the pre-commit block installs
+  no Git hook, gives the `uv tool install pre-commit` and `uv tool run pre-commit install` pair --
+  or plain `pre-commit install` where a durable runner already exists -- and carries the ordering
+  with it: on an initial adoption only after the baseline and after `check` and `lint` are clean,
+  while an established installation enables the gates immediately. It is conditioned on the clone
+  not already being gated, because the same narration is emitted by `init --print-only`, the
+  documented upgrade path, where replacing a block needs no reactivation. Placement, baseline, and
+  activation stay three separate lines on purpose: appending an unconditional "then install" to
+  the placement sentence is the shape that would put the ordering failure back. README.md already
+  owned every one of these rules and is unchanged.
 - The release smoke test now runs `init --print-only` in its throwaway directory and asserts the
   config is absent afterwards, before the ordinary `init` run whose write it then asserts. The
   read-only mode needed an observer, since nothing else in that step reads the directory back, and

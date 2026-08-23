@@ -44,6 +44,35 @@ _BASELINE_GUIDANCE = (
     "remain findings, so this does not by itself make CI green."
 )
 
+# The referent for _BASELINE_GUIDANCE's "before enabling the gates". Without it the CLI asserted
+# an ordering constraint while leaving the act it orders against undefined in its own output,
+# which is the terminal-only half of the gap GTX-175 closed in README.md and MANAGED_CI.md.
+#
+# Placement and activation stay distinct sentences on purpose. The pasted block is inert until a
+# per-clone hook is installed, and an initial adoption must delay that until the baseline is
+# acknowledged and check and lint are clean, so a terse unconditional "then install" appended to
+# the placement line would reintroduce exactly the ordering failure GTX-175 fixed.
+#
+# Scoped to a clone that is not already gated, because the same narration is emitted by
+# --print-only, which is the documented upgrade path: replacing an existing block needs no
+# reactivation, since the installed hook re-reads .pre-commit-config.yaml on every commit.
+#
+# README.md owns the rule and states it at length, including why the uv tool pair is preferred
+# over uvx; this is the short form the terminal can carry. Changing it means editing README.md
+# and this string, and tests/cli/test_init.py holds the only mechanically enforced copy.
+#
+# Printed with soft_wrap=True for the same reason as the baseline line: default wrapping would
+# split a command across a real line break, which survives redirection and breaks it on copy.
+_ACTIVATION_GUIDANCE = (
+    "Enabling the gates is that separate step, and adding the pre-commit block does not perform "
+    "it: both hooks stay inert until pre-commit writes `.git/hooks/pre-commit` in this clone. If "
+    "this clone is not already gated, run `uv tool install pre-commit` and then "
+    "`uv tool run pre-commit install`, or plain `pre-commit install` when a durable runner is "
+    "already available. On an initial adoption do that only after the baseline above, and after "
+    "`doc-lattice check` and `doc-lattice lint` are clean; an established installation enables "
+    "them immediately."
+)
+
 
 # Narrated on stderr next to the generated workflow so a wrong probe result is visible when it
 # happens, rather than buried in YAML nobody re-reads. The probe is a local hint that cannot
@@ -202,7 +231,12 @@ def _is_repository_marker(path: Path) -> bool:
 
 
 def _print_unmanaged_guidance(runtime: CliRuntime, ci_text: str) -> None:
-    """Print the ordinary workflow and the instructions for placing every printed block."""
+    """Print the ordinary workflow, where every printed block goes, and how to activate them.
+
+    Placement, the first-adoption baseline, and activation are three separate lines because they
+    are three separate acts in a fixed order. Collapsing any pair would either lose the ordering
+    constraint or state it without naming the act it orders against.
+    """
     runtime.write_stdout("# ===== .github/workflows/doc-lattice.yml (new file) =====")
     runtime.write_stdout(ci_text)
     runtime.stderr.print(
@@ -213,6 +247,7 @@ def _print_unmanaged_guidance(runtime: CliRuntime, ci_text: str) -> None:
         "snippets resolve."
     )
     runtime.stderr.print(_BASELINE_GUIDANCE, soft_wrap=True)
+    runtime.stderr.print(_ACTIVATION_GUIDANCE, soft_wrap=True)
 
 
 def _print_artifacts(
@@ -222,9 +257,9 @@ def _print_artifacts(
 
     The one site that prints the three blocks, reached by both modes, so block order and the
     headers around them cannot differ between an ordinary run and ``--print-only``. It also
-    carries the placement and baseline guidance that accompanies them on stderr, by way of
-    ``_print_unmanaged_guidance``; the branch narration is the other shared output and is
-    emitted by the caller. What the two modes still choose independently is where those three
+    carries the placement, baseline, and activation guidance that accompanies them on stderr,
+    by way of ``_print_unmanaged_guidance``; the branch narration is the other shared output and
+    is emitted by the caller. What the two modes still choose independently is where those three
     texts came from, which is why ``tests/cli/test_init.py`` pins their exact bytes against each
     other rather than trusting this function alone.
 
