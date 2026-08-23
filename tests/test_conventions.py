@@ -1814,7 +1814,7 @@ _MODULE_PATH_BEARING_NAMES: dict[str, frozenset[str]] = {
     # `target.name` is `DEFAULT_CONFIG_NAME`, a compile-time constant that carries no
     # user-controlled byte, so classifying it buys no safety today; it is classified anyway
     # because the alternative is unenforceable. Display exemptions are keyed by (module,
-    # qualified function, expression), and `register_init.init` interpolated `target.name`
+    # qualified function, expression), and `_scaffold_config` interpolated `target.name`
     # three times -- once as a staged-file prefix and twice into human messages -- so a single
     # exemption written for the prefix would have covered both human sinks with it. The prefix
     # now spells `DEFAULT_CONFIG_NAME` directly instead, leaving `target` classified and every
@@ -2148,6 +2148,7 @@ def _display_guard_scan(
         ("config.py", "config_path"),
         ("config.py", "entry"),
         ("config.py", "safe"),
+        ("cli/commands/init.py", "ancestor"),
         ("cli/commands/init.py", "root"),
         ("cli/commands/init.py", "target"),
         ("cli/commands/init.py", "target_name"),

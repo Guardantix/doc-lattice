@@ -267,9 +267,11 @@ only the config this mode does not render.
 
 Because `init` writes into the current directory and every lattice-loading command selects its
 config from *its* current directory, a run from a subdirectory of a repository whose root is
-already configured refuses rather than scaffolding a second, nested config that nothing would
-read. The diagnostic names the configuration it found and points at both ways forward: run `init`
-in that directory, or pass `--print-only` here. A deliberately nested lattice is still supported
+already configured refuses rather than scaffolding a second, nested config. That nested file
+would not be inert: commands run from that subdirectory would load it, while every run from the
+configured directory carried on reading the original, which is a silently divergent second
+lattice rather than a harmless extra file. The diagnostic names the configuration it found and
+points at both ways forward: run `init` in that directory, or pass `--print-only` here. A deliberately nested lattice is still supported
 and is one hand-written file, since the exact bytes `init` writes are printed under
 [Configuration](#configuration) below. The refusal is bounded to the repository: the search walks
 up from the current directory to the nearest `.git` entry, inclusive, so a config above your
@@ -279,6 +281,9 @@ has no Git prerequisite; under `GIT_DIR`, `GIT_CEILING_DIRECTORIES`, or
 `GIT_DISCOVERY_ACROSS_FILESYSTEM` it can therefore disagree with Git's own idea of where the
 repository begins. The cost of that is one refusal too many or one too few, never a file written
 in the wrong place, because the boundary bounds only the refusal and never selects a destination.
+An entry the search cannot read at all is outside that trade: rather than assume it away, `init`
+declines with `INIT_PERSISTENCE` and names the entry, since whether you are standing inside an
+already-configured lattice is not something to guess at in either direction.
 
 Pass `--indent N` with JSON output on `check`, `lint`, `impact`, or `linear` to pretty-print the
 JSON with `N` spaces per level. JSON output is selected uniformly by `--format json`; `--indent`
@@ -969,7 +974,7 @@ documented migration surface.
 | `RECONCILE_IN_PROGRESS` | A reconcile could not establish or keep an exclusive claim on the project root: either another process already holds the lock, so the run refuses rather than writing alongside it, or the directory the run locked is no longer the one at that path, because the project root was renamed, replaced, or removed while the run held it. Every mutating step revalidates the claim first, so that second case refuses before writing anything. |
 | `RECONCILE_CONFLICT` | A reconcile destination's bytes changed between validation and the write, so the transaction was refused and rolled back rather than applied over an edit it never read. |
 | `RECONCILE_PERSISTENCE` | A reconcile transaction could not be durably written, its rollback could not be completed, or `--recover` could not safely finish an interrupted one. It also covers lock setup failing and a platform with no POSIX advisory locking. Wherever there is a transaction to recover, the message names the recovery step to run; the rest describe the condition without one. |
-| `INIT_PERSISTENCE` | `init` could not write `.doc-lattice.yml` into the working directory. |
+| `INIT_PERSISTENCE` | `init` could not write `.doc-lattice.yml` into the working directory, or could not read an entry it has to check before writing one. |
 | `WARNING_AS_ERROR` | A warning filter (`PYTHONWARNINGS=error`, or `-W error`) turned an advisory into an exception, ending a run that would otherwise have continued past it. |
 
 The `init` inputs checked before anything is written, all of them `VALIDATION_ERROR`, are a

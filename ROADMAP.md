@@ -24,7 +24,9 @@ Neither of those is a hand assertion. Both are swept against the live tracker: t
 named here against its open set, and every stated order against the blocker relations in both
 directions. That open set is every non-terminal issue carrying this repository's tracker label,
 which is what an item acquires on leaving Triage, at the same time it is given a project. Last
-swept 2026-08-20 against 28 open issues, with the evidence recorded on GTX-213.
+swept 2026-08-20 against 28 open issues, with the evidence recorded on GTX-213. Two entries
+postdate that sweep and are recorded from the changes that made them rather than from it:
+GTX-153's move into 6.0 and GTX-279's filing, both on 2026-08-22. The next sweep subsumes them.
 
 ## 6.0: close the behavior window 5.0 left open
 
@@ -42,7 +44,7 @@ GTX-153 moved forward from 7.0 once its direction settled on a breaking refusal 
 Git-root resolution, and GTX-279 was filed because the README pass had already landed when the
 window was held open.
 
-Eight of those nine have since landed and wait in `## [Unreleased]` beside GTX-212 and GTX-214:
+Eight of those eleven have since landed and wait in `## [Unreleased]` beside GTX-212 and GTX-214:
 reconcile's lock diagnostics (GTX-238, which GTX-212's own review spawned into this section),
 `PYTHONWARNINGS=error` (GTX-202), the broken stderr pipe (GTX-201), the load-cache write warning
 (GTX-221), the journal's own validation diagnostic (GTX-227), the codes `init` reports for a

@@ -33,14 +33,18 @@ derives from `ProjectError`. Catching either type, or `ProjectError`, is unaffec
 message text, and exit codes are unchanged. See **Fixed** below and AD-41 in ARCHITECTURE.md.
 
 A third thing to act on, and the only one that changes what a zero-config run does. `init` run
-from a subdirectory of a repository whose root already holds `.doc-lattice.yml` now refuses,
-exiting 2 with `VALIDATION_ERROR`, where it used to exit 0 having written a second, nested config
-carrying default settings. That nested file was never read by anything: `check`, `lint`,
-`impact`, `reconcile`, `graph`, and `linear` all select a default config from their own current
-directory, so the run reported success for a configuration no later command would ever load. If
-you have a script that runs `init` from a subdirectory, either move it to the directory holding
-the config or, when it only wanted the printed blocks, switch it to `init --print-only`, which is
-new in this release and writes nothing at all.
+from a subdirectory of a repository where an ancestor directory inside the same repository
+already holds `.doc-lattice.yml` now refuses, exiting 2 with `VALIDATION_ERROR`, where it used to
+exit 0 having written a second, nested config carrying default settings. It is the nearest such
+ancestor that counts, not only the repository root, so an intermediate directory's config refuses
+just as a root one does. That nested file was not inert, which is what made the old behavior
+worth changing: `check`, `lint`, `impact`, `reconcile`, `graph`, and `linear` all select a default
+config from their own current directory and never walk up, so commands run from that subdirectory
+would have loaded it while every run from the configured directory carried on reading the
+original. The result was a silently divergent second lattice, reported as success. If you have a
+script that runs `init` from a subdirectory, either move it to the directory holding the config
+or, when it only wanted the printed blocks, switch it to `init --print-only`, which is new in this
+release and writes nothing at all.
 
 Two bounds on that refusal are worth knowing before you read an exit 2 as a bug. The search walks
 up only as far as the nearest `.git` entry, inclusive, so a config above your checkout does not
@@ -139,9 +143,9 @@ hand-written file, and the diagnostic says so. See **Added** and **Changed** bel
 ### Changed
 
 - `init` refuses to scaffold a config into a directory that has none when an ancestor inside the
-  same repository already holds one, instead of writing a nested config nothing reads. The
-  diagnostic names the configuration it found and both ways forward: run `init` in that directory,
-  or pass `--print-only` here. It is reported as `VALIDATION_ERROR`, with the other inputs `init`
+  same repository already holds one, instead of writing a nested config that only commands run
+  from that same subdirectory would ever load. The diagnostic names the configuration it found and
+  both ways forward: run `init` in that directory, or pass `--print-only` here. It is reported as `VALIDATION_ERROR`, with the other inputs `init`
   checks before writing anything, because the directory is the input in question -- not
   `CONFIG_ERROR`, which would name a file `init` found but still never reads, and not
   `INIT_PERSISTENCE`, which stays exactly "an I/O failure happened". The boundary is a filesystem
@@ -153,6 +157,17 @@ hand-written file, and the diagnostic says so. See **Added** and **Changed** bel
   probe can disagree about where the repository begins, which costs one refusal too many or one
   too few and never a file written in the wrong place, because the boundary bounds only the
   refusal and never selects a destination. See **Migration** above.
+- An entry that walk cannot read is a refusal rather than a guess, reported as
+  `INIT_PERSISTENCE` and naming the entry. The predicate this rests on is deliberately not
+  `Path.exists`, which is not stable across the supported Python versions: 3.13 re-raises an
+  `OSError` outside its ignored set while 3.14 answers False for every one of them, so the same
+  run against the same filesystem crashed with an uncoded error on one interpreter and silently
+  scaffolded the nested config on the other. Only "not found", "not a directory", and a symlink
+  loop mean absence now; anything else means the question cannot be answered, and `init` declines
+  to scaffold rather than assume either way. A configuration entry must also be a regular file, so
+  a directory carrying that name no longer counts as a config at either end of the walk, and the
+  repository marker is tested without following symlinks, so a worktree whose `.git` link has lost
+  its target still bounds the search.
 - The release smoke test now runs `init --print-only` in its throwaway directory and asserts the
   config is absent afterwards, before the ordinary `init` run whose write it then asserts. The
   read-only mode needed an observer, since nothing else in that step reads the directory back, and

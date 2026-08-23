@@ -268,6 +268,16 @@ receives the resolved name as a required keyword argument, and precedence and na
 in the `init` adapter. There are no
 mutable module-level consoles and no mutations of Typer color globals.
 
+One other place decides where a repository begins, and it deliberately does not live here. The
+`init` adapter bounds its ancestor-config refusal by walking to the nearest `.git` entry, which
+is a filesystem check and not a Git query, so it stays in `cli/commands/init.py` rather than in
+this module: routing it through Git would re-create the top-level resolution contract retired
+above and give `init` the Git prerequisite it does not have. The two can therefore disagree
+under `GIT_DIR`, `GIT_CEILING_DIRECTORIES`, or `GIT_DISCOVERY_ACROSS_FILESYSTEM`, which the
+subprocess honors and the walk does not. That is accepted rather than reconciled, because the
+walk bounds only a refusal and never selects a write destination. `git_repository.py` remains
+the sole owner of the Git subprocess boundary either way.
+
 Both contracts resolve the Git executable before running it, through two independent rejections.
 A `PATH` lookup that returns a relative result is refused outright, because the result is the
 matched name joined onto the entry it came from, so a relative result means the entry was

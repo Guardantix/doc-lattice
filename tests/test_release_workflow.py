@@ -16,6 +16,8 @@ from pathlib import Path
 from ruamel.yaml import YAML
 from workflow_helpers import _commands, _invocations, _invokes, _named_step, _uncommented
 
+from doc_lattice.config import DEFAULT_CONFIG_NAME
+
 _ROOT = Path(__file__).resolve().parents[1]
 _WORKFLOW_TEXT = (_ROOT / ".github/workflows/ci.yml").read_text(encoding="utf-8")
 _WORKFLOW = YAML(typ="safe").load(_WORKFLOW_TEXT)
@@ -164,6 +166,17 @@ def _runs_subcommand(argv: list[str], program: str, subcommand: str) -> bool:
 def _expands(word: str, name: str) -> bool:
     """Report whether a word expands the shell variable `name`, in either spelling."""
     return word in {f"${name}", f"${{{name}}}"}
+
+
+def _expands_under(word: str, name: str, child: str) -> bool:
+    """Report whether a word names `child` inside the directory `name` holds, either spelling.
+
+    The sibling of `_expands` for an operand rather than a `cd` target. Both spellings are
+    accepted for the same reason every other helper here accepts more than one: the assertion
+    is about which directory the workflow probes, and `$workdir` and `${workdir}` probe the
+    same one.
+    """
+    return word in {f"${name}/{child}", f"${{{name}}}/{child}"}
 
 
 def _makes_throwaway_dir(value: str) -> bool:
@@ -343,11 +356,34 @@ def _throwaway_dir_runs(text: str, program: str, subcommand: str) -> list[list[s
     it. That bounds the hole rather than closing it: a launcher pointed at another program
     still satisfies it, and no argv-shaped check can tell that from the real thing.
     """
+    return [words for _name, words in _throwaway_dir_run_targets(text, program, subcommand)]
+
+
+def _throwaway_dir_run_targets(
+    text: str, program: str, subcommand: str
+) -> list[tuple[str, list[str]]]:
+    """Return each matched command paired with the throwaway variable its `cd` named.
+
+    The scan `_throwaway_dir_runs` is the argv-only view of. It is kept as one implementation
+    because the name and the command are decided together: the `cd` that reaches is the same
+    event that identifies the directory, and re-deriving the pairing from a second pass would
+    be a second rule that could disagree with this one. An assertion about what observes the
+    directory the run used needs that name, since "some throwaway directory" is satisfied by a
+    probe of a different one.
+
+    Args:
+        text: The step's command text.
+        program: The program the command must run.
+        subcommand: The subcommand it must run.
+
+    Returns:
+        One `(variable name, argv)` pair per matched command, in the order they run.
+    """
     workdirs: dict[str, int] = {}
     opened = itertools.count(1)
     matched = []
     for line in text.splitlines():
-        shells, moved, moved_at = [0], None, -1
+        shells, moved, moved_at, target = [0], None, -1, ""
         commands = _separated_commands(line)
         for index, (joined_by, argv) in enumerate(commands):
             words, enclosing = _unnested(argv, shells, opened)
@@ -360,16 +396,52 @@ def _throwaway_dir_runs(text: str, program: str, subcommand: str) -> list[list[s
                 moved = None
             if words[:1] == ["cd"]:
                 joins = commands[index + 1][0] if index + 1 < len(commands) else ""
-                reaches = joins in _SEQUENCING and any(
-                    _expands(word, name)
+                reached = [
+                    name
                     for word in words[1:]
                     for name, assigned_in in workdirs.items()
-                    if assigned_in in enclosing
-                )
+                    if assigned_in in enclosing and _expands(word, name)
+                ]
+                reaches = joins in _SEQUENCING and bool(reached)
                 moved, moved_at = (enclosing[-1], index) if reaches else (None, -1)
+                target = reached[0] if reaches else ""
             elif moved is not None and _launches(words, program, subcommand):
-                matched.append(words)
+                matched.append((target, words))
     return matched
+
+
+def _config_probes(text: str, names: set[str], child: str) -> list[tuple[int, bool]]:
+    """Locate each `test`/`[` probe of `child` inside one of the named directories.
+
+    Matching the parsed command rather than the literal line is what binds the observer to the
+    directory the runs actually used. A line-equality check passes just as happily when the
+    probe names a directory nothing ran in, which makes the CI step vacuous while the test
+    stays green. Both `test` and `[` are accepted, and so is either variable spelling, for the
+    same reason `_flag_value` accepts an attached value: the contract is what gets probed.
+
+    Args:
+        text: The step's command text.
+        names: The directory variables a probe may name.
+        child: The entry inside that directory the probe must name.
+
+    Returns:
+        One `(line index, negated)` pair per probe, in the order they run.
+    """
+    probes = []
+    for index, line in enumerate(text.splitlines()):
+        for _joined_by, argv in _separated_commands(line):
+            words = argv[:-1] if argv[:1] == ["["] and argv[-1:] == ["]"] else argv
+            if words[:1] not in (["test"], ["["]):
+                continue
+            operands = words[1:]
+            negated = operands[:1] == ["!"]
+            if negated:
+                operands = operands[1:]
+            if operands[:1] != ["-e"]:
+                continue
+            if any(_expands_under(word, name, child) for word in operands[1:] for name in names):
+                probes.append((index, negated))
+    return probes
 
 
 def _fetches_tags(argv: list[str]) -> bool:
@@ -553,6 +625,20 @@ def test_smoke_step_runs_the_packaged_cli_against_the_release_fixture():
     # assertions about it -- absent after the print-only run, present after the scaffolding one.
     # Asserting both is what keeps the addition from quietly retiring the packaged write path,
     # which is the coverage the throwaway directory has carried since GTX-142.
+    #
+    # The probes are matched through the throwaway names rather than by line text, so pointing
+    # either run at a second `mktemp -d` while the probes keep naming the first one fails here
+    # instead of leaving a green test in front of a CI check that observes a directory nothing
+    # ran in.
+    targets = {name for name, _argv in _throwaway_dir_run_targets(commands, "doc-lattice", "init")}
+    assert len(targets) == 1, (
+        "both init runs have to share one throwaway directory, or the probes below observe a "
+        f"directory the other run never touched; got {sorted(targets)}"
+    )
+    probes = _config_probes(commands, targets, DEFAULT_CONFIG_NAME)
+    assert [negated for _index, negated in probes] == [True, False], (
+        f"expected exactly two probes of the throwaway config, absent then present, got {probes}"
+    )
     lines = [line.strip() for line in commands.splitlines()]
 
     def _sole_line(predicate) -> int:
@@ -561,9 +647,8 @@ def test_smoke_step_runs_the_packaged_cli_against_the_release_fixture():
         return matches[0]
 
     printing = _sole_line(lambda line: "--print-only" in line)
-    absent = _sole_line(lambda line: line == 'test ! -e "${workdir}/.doc-lattice.yml"')
     scaffolding = _sole_line(lambda line: "doc-lattice init" in line and "--print-only" not in line)
-    present = _sole_line(lambda line: line == 'test -e "${workdir}/.doc-lattice.yml"')
+    (absent, _), (present, _) = probes
     assert printing < absent < scaffolding < present
     assert _step_index(release, "Smoke-test the commit") < _step_index(release, _TAG_STEP)
 

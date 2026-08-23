@@ -41,6 +41,7 @@ from doc_lattice.cli.commands.init import (
     _init_persistence_error,
     _nested_scaffold_error,
     _validate_init_flags,
+    _walk_unreadable_error,
 )
 from doc_lattice.cli.commands.reconcile import (
     _print_reconcile_lines,
@@ -1016,6 +1017,19 @@ class TestInitSinks:
 
         message = str(error)
         assert format_path_for_display(ancestor) in message
+        leaked = sorted(char for char in CONTROLS if char in message)
+        assert not leaked, f"the refusal leaked raw control bytes {leaked!r}: {message!r}"
+
+    def test_unreadable_walk_entry_refusal_names_the_entry(self, tmp_path: Path):
+        # The walk's other diagnostic, and a path from the same directory scan, so it takes the
+        # same treatment: the entry it could not stat is named, and a hostile directory name
+        # reaches this message exactly as it reaches the nested refusal beside it.
+        entry = tmp_path / HOSTILE / DEFAULT_CONFIG_NAME
+
+        error = _walk_unreadable_error(entry, PermissionError("Permission denied"))
+
+        message = str(error)
+        assert format_path_for_display(entry) in message
         leaked = sorted(char for char in CONTROLS if char in message)
         assert not leaked, f"the refusal leaked raw control bytes {leaked!r}: {message!r}"
 

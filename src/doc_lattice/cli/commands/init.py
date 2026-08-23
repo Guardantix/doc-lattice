@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import errno
+import stat
 from pathlib import Path
 from typing import Annotated
 
@@ -55,6 +57,13 @@ _BRANCH_SOURCE_FALLBACK = "fallback"
 # linked worktree and a submodule checkout carry. It is a filesystem marker and not a Git query;
 # `_find_ancestor_config` records why, and what that costs.
 _REPOSITORY_MARKER = ".git"
+
+# The errnos that answer "not here" rather than "cannot tell". Everything else leaves the walk
+# unable to decide, and `_walk_entry_mode` refuses instead of guessing. ENAMETOOLONG is
+# deliberately absent: a name too long to stat cannot name an existing entry, but reading that as
+# absence means inferring a filesystem fact from a length limit, and refusing is the safe side of
+# a case no real invocation reaches.
+_ABSENT_ERRNOS = frozenset({errno.ENOENT, errno.ENOTDIR, errno.ELOOP})
 
 
 def _resolve_default_branch(default_branch: str | None, cwd: Path) -> tuple[str, str]:
@@ -125,6 +134,73 @@ def _init_persistence_error(target_name: str, cause: OSError) -> InitPersistence
     return error
 
 
+def _walk_unreadable_error(path: Path, cause: OSError) -> InitPersistenceError:
+    """Wrap one unreadable walk entry, preserving the low-level remediation notes."""
+    error = InitPersistenceError(
+        f"cannot determine whether {format_path_for_display(path)} exists: {cause}. That "
+        "answer decides whether this directory already sits inside a configured lattice, so "
+        "init refuses to scaffold rather than guess. Pass --print-only to obtain the snippets "
+        f"without writing anything, or write {DEFAULT_CONFIG_NAME} here by hand if a nested "
+        "lattice is what you intend."
+    )
+    copy_exception_notes(error, cause)
+    return error
+
+
+def _walk_entry_mode(path: Path, *, follow_symlinks: bool = True) -> int | None:
+    """Read one walk entry's mode, refusing to answer when the filesystem cannot.
+
+    ``Path.exists`` is not a stable predicate across the versions this package supports: 3.13
+    re-raises an ``OSError`` outside its ignored set, while 3.14 delegates to ``os.path.exists``
+    and answers False for every one of them. A guard built on it therefore crashes with an
+    uncoded error on one interpreter and silently scaffolds the nested config it exists to
+    prevent on the other, against the same filesystem. ``Path.stat`` raises on both, which is why
+    the decision is made here rather than delegated: ``_ABSENT_ERRNOS`` means the entry is not
+    there, and anything else means the question is unanswerable, which becomes a coded refusal
+    rather than a guess in either direction.
+
+    Args:
+        path: The entry to stat.
+        follow_symlinks: False to stat the link itself, so a dangling symlink still reads as
+            present. The repository marker wants that; a configuration file does not.
+
+    Returns:
+        The entry's ``st_mode``, or None when the entry is absent.
+
+    Raises:
+        InitPersistenceError: If the entry can be neither confirmed nor ruled out.
+    """
+    try:
+        return path.stat(follow_symlinks=follow_symlinks).st_mode
+    except OSError as exc:
+        if exc.errno in _ABSENT_ERRNOS:
+            return None
+        raise _walk_unreadable_error(path, exc) from exc
+
+
+def _is_config_file(path: Path) -> bool:
+    """Report whether one path is a configuration file rather than absent or a directory.
+
+    Raises:
+        InitPersistenceError: If the entry can be neither confirmed nor ruled out.
+    """
+    mode = _walk_entry_mode(path)
+    return mode is not None and stat.S_ISREG(mode)
+
+
+def _is_repository_marker(path: Path) -> bool:
+    """Report whether one path is the ``.git`` entry that bounds the walk.
+
+    Presence is the whole test, whatever kind of entry it is: a linked worktree and a submodule
+    checkout carry ``.git`` as a regular file, and a dangling symlink still marks a root Git
+    itself would recognize, so the link is stated rather than followed.
+
+    Raises:
+        InitPersistenceError: If the entry can be neither confirmed nor ruled out.
+    """
+    return _walk_entry_mode(path, follow_symlinks=False) is not None
+
+
 def _print_unmanaged_guidance(runtime: CliRuntime, ci_text: str) -> None:
     """Print the ordinary workflow and the instructions for placing every printed block."""
     runtime.write_stdout("# ===== .github/workflows/doc-lattice.yml (new file) =====")
@@ -144,10 +220,13 @@ def _print_artifacts(
 ) -> None:
     """Print the three hand-installed blocks in their fixed order.
 
-    The one printing site both modes reach, so block order and the headers around them cannot
-    differ between an ordinary run and ``--print-only``. What the two modes still choose
-    independently is where those three texts came from, which is why ``tests/cli/test_init.py``
-    pins their exact bytes against each other rather than trusting this function alone.
+    The one site that prints the three blocks, reached by both modes, so block order and the
+    headers around them cannot differ between an ordinary run and ``--print-only``. It also
+    carries the placement and baseline guidance that accompanies them on stderr, by way of
+    ``_print_unmanaged_guidance``; the branch narration is the other shared output and is
+    emitted by the caller. What the two modes still choose independently is where those three
+    texts came from, which is why ``tests/cli/test_init.py`` pins their exact bytes against each
+    other rather than trusting this function alone.
 
     Args:
         runtime: The invocation's output streams.
@@ -167,8 +246,10 @@ def _find_ancestor_config(cwd: Path) -> Path | None:
 
     ``init`` writes into the invocation directory, and every lattice-loading command selects a
     default config from *its* invocation directory, so a run from a subdirectory of a configured
-    repository would otherwise scaffold a second, nested config that the next ``check`` never
-    reads. This is the detection half of the refusal that replaced that write.
+    repository would otherwise scaffold a second, nested config that the configured directory
+    never sees. Only a command launched from that same subdirectory would load it, which is what
+    makes it a silently divergent second lattice rather than an inert file. This is the detection
+    half of the refusal that replaced that write.
 
     The walk is bounded by the nearest ``.git`` entry, inclusive, and yields nothing at all when
     no such entry is found, which is why the nearest config is held rather than returned on
@@ -176,18 +257,24 @@ def _find_ancestor_config(cwd: Path) -> Path | None:
     Scanning to the filesystem root would let one stray config in a home directory refuse every
     new project created under it, and stopping at the first marker means a nested repository or
     submodule beneath a configured root is its own scope and scaffolds normally. The marker is
-    tested for existence rather than for being a directory, because a linked worktree and a
+    tested for presence rather than for being a directory, because a linked worktree and a
     submodule checkout both carry ``.git`` as a regular file and an ``is_dir`` test would walk
-    straight past their roots.
+    straight past their roots. A configuration entry, by contrast, has to be a regular file:
+    a directory of that name configures nothing, and counting it would refuse a scaffold on the
+    strength of a name.
 
     This is a filesystem walk and not a Git query on purpose. ``init`` has no Git prerequisite,
-    and resolving the boundary through Git would re-create the resolver AD-32 retired and make
-    the refusal depend on an executable. One consequence is stated rather than fixed: Git's own
+    and resolving the boundary through Git would re-create the top-level resolution contract
+    ``git_repository.py`` records as retired with the managed commands under AD-32, and make the
+    refusal depend on an executable. One consequence is stated rather than fixed: Git's own
     discovery honors ``GIT_DIR``, ``GIT_CEILING_DIRECTORIES``, and
     ``GIT_DISCOVERY_ACROSS_FILESYSTEM``, so under those settings the default-branch probe and
     this walk can disagree about where the repository begins. The cost is bounded at one refusal
-    too many or one too few, never a write in the wrong place, because this boundary only bounds
-    a refusal and never selects a destination.
+    too many or one too few, never a write to a directory the user did not name, because this
+    boundary only bounds a refusal and never selects a destination; a missed refusal leaves the
+    pre-existing nested-scaffold outcome rather than creating a new one. An entry the filesystem
+    cannot report on is not in that bounded cost and is not guessed at: ``_walk_entry_mode``
+    turns it into a coded refusal.
 
     Args:
         cwd: The invocation directory, whose own config the caller has already ruled out.
@@ -196,15 +283,18 @@ def _find_ancestor_config(cwd: Path) -> Path | None:
         The nearest ancestor's configuration file when the walk reached a repository boundary,
         and None otherwise, which covers both a boundary holding no config and no boundary at
         all.
+
+    Raises:
+        InitPersistenceError: If an entry along the walk can be neither confirmed nor ruled out.
     """
-    if (cwd / _REPOSITORY_MARKER).exists():
+    if _is_repository_marker(cwd / _REPOSITORY_MARKER):
         return None
     nearest: Path | None = None
     for ancestor in cwd.parents:
         candidate = ancestor / DEFAULT_CONFIG_NAME
-        if nearest is None and candidate.exists():
+        if nearest is None and _is_config_file(candidate):
             nearest = candidate
-        if (ancestor / _REPOSITORY_MARKER).exists():
+        if _is_repository_marker(ancestor / _REPOSITORY_MARKER):
             return nearest
     return None
 
@@ -214,10 +304,11 @@ def _nested_scaffold_error(ancestor: Path) -> ValidationError:
     return ValidationError(
         f"{format_path_for_display(ancestor)} already configures this repository, and init "
         "writes only into the current directory, so scaffolding here would leave a second, "
-        "nested configuration that check, lint, reconcile, and the rest never read. Run init "
-        "from that directory instead, pass --print-only to obtain the snippets without writing "
-        f"anything, or write {DEFAULT_CONFIG_NAME} here by hand if a nested lattice is what you "
-        "intend."
+        "nested lattice that only commands run from this directory would load, and that check, "
+        "lint, reconcile, and the rest never see when run from the directory holding that "
+        "configuration. Run init from that directory instead, pass --print-only to obtain the "
+        f"snippets without writing anything, or write {DEFAULT_CONFIG_NAME} here by hand if a "
+        "nested lattice is what you intend."
     )
 
 
@@ -232,11 +323,12 @@ def _scaffold_config(runtime: CliRuntime, config_text: str) -> None:
         ValidationError: If the directory holds no config of its own but an ancestor inside the
             same repository does. It is checked here, with the other inputs ``init`` refuses
             before writing anything, because the directory is the input in question.
-        InitPersistenceError: If the file could not be written, or a failed staging cleanup left
-            an orphan behind.
+        InitPersistenceError: If an entry the guard has to read can be neither confirmed nor
+            ruled out, if the file could not be written, or if a failed staging cleanup left an
+            orphan behind.
     """
     target = runtime.cwd / DEFAULT_CONFIG_NAME
-    if not target.exists():
+    if not _is_config_file(target):
         ancestor = _find_ancestor_config(runtime.cwd)
         if ancestor is not None:
             raise _nested_scaffold_error(ancestor)
@@ -247,8 +339,8 @@ def _scaffold_config(runtime: CliRuntime, config_text: str) -> None:
             # The staged filename, not text: spelled from the constant `target` was
             # built from rather than from `target.name`, so this machine construction
             # needs no exemption shared with the human messages below. Display
-            # exemptions are keyed by (module, function, expression), so one written
-            # for this line would have covered those two sinks as well.
+            # exemptions are keyed by (module, qualified function, expression), so one
+            # written for this line would have covered those two sinks as well.
             prefix=f"{DEFAULT_CONFIG_NAME}.",
         )
     # A bare FileExistsError means the destination already existed and the staged file
