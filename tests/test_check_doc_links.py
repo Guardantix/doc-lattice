@@ -3,6 +3,7 @@
 from pathlib import Path
 from runpy import run_path
 
+import pytest
 from workflow_helpers import _commands, _invocations, _invokes, _load_workflow
 
 _ROOT = Path(__file__).resolve().parents[1]
@@ -10,6 +11,7 @@ _SCRIPT = run_path(str(_ROOT / "scripts" / "check_doc_links.py"))
 check_repository_links = _SCRIPT["check_repository_links"]
 maintained_documents = _SCRIPT["maintained_documents"]
 extract_links = _SCRIPT["extract_links"]
+_anchor_hrefs = _SCRIPT["_anchor_hrefs"]
 
 _SCRIPT_PATH = "scripts/check_doc_links.py"
 
@@ -407,6 +409,37 @@ def test_malformed_protocol_relative_authority_is_out_of_scope(tmp_path):
     assert check_repository_links(tmp_path) == []
 
 
+def test_inline_anchor_after_a_soft_break_reports_its_own_line(tmp_path):
+    # Markdown-it gives an inline child no source map, so the anchor would otherwise inherit
+    # the paragraph's opening line. It sits on line 4, one soft break in.
+    _write(tmp_path, "README.md", '# Readme\n\npara\n<a href="MISSING.md">x</a>\n')
+
+    message = _only_message(tmp_path)
+    assert message.startswith("'README.md':4:")
+
+
+def test_inline_anchor_after_a_code_span_crossing_a_break_reports_its_own_line(tmp_path):
+    # The code span folds its newline to a space and emits no softbreak, so counting break
+    # children would place the anchor a line early. It sits on line 5.
+    _write(
+        tmp_path,
+        "README.md",
+        '# Readme\n\nfirst `code\nspan` then\n<a href="MISSING.md">x</a>\n',
+    )
+
+    message = _only_message(tmp_path)
+    assert message.startswith("'README.md':5:")
+
+
+def test_markdown_link_still_reports_its_containing_block(tmp_path):
+    # A link_open carries no content to locate, so its documented contract is unchanged: the
+    # line the containing block starts on, here line 3 rather than the link's own line 4.
+    _write(tmp_path, "README.md", "# Readme\n\npara\n[x](MISSING.md)\n")
+
+    message = _only_message(tmp_path)
+    assert message.startswith("'README.md':3:")
+
+
 def test_external_html_anchor_destination_is_out_of_scope(tmp_path):
     _write(tmp_path, "README.md", '# Readme\n\n<a href="https://example.com/x.md">x</a>\n')
 
@@ -591,6 +624,35 @@ def test_links_and_raw_anchors_are_ordered_by_line_within_a_document(tmp_path):
     assert "MISSING.md" in messages[0]
     assert messages[1].startswith("'README.md':7:")
     assert "ALSO-MISSING.md" in messages[1]
+
+
+# The duplicate-attribute rule lives in the tokenizer's attribute-name state: a repeated
+# name is a parse error and the *new* attribute is dropped, so the first wins whatever it
+# holds. These cases are the anchor-shaped equivalents of the html5lib-tests tokenizer
+# expectations (MIT), which pin the rule directly:
+#   test1.test  <h a='b' a='d'>            -> {"a": "b"}
+#   test3.test  <a a A> / <a a a>          -> {"a": ""}
+#   test3.test  <a a=''A> / <a a=''a>      -> {"a": ""}
+#   test4.test  <x x=1 x=2 X=3>            -> {"x": "1"}   (names case-fold first)
+#   test4.test  </x x x>                   -> end tag, attributes dropped entirely
+_DUPLICATE_ATTRIBUTE_CASES = [
+    ('<a href="b" href="d">x</a>', ["b"]),
+    ("<a href HREF>x</a>", []),
+    ("<a href href>x</a>", []),
+    ("<a href=''HREF>x</a>", []),
+    ("<a href=''href>x</a>", []),
+    ("<a href=1 href=2 HREF=3>x</a>", ["1"]),
+    # The case that actually discriminates the fold: an implementation matching the literal
+    # name would skip HREF and resolve B.md, which no browser would navigate to.
+    ('<a HREF="A.md" href="B.md">x</a>', ["A.md"]),
+    ('<A HREF="OK.md">x</A>', ["OK.md"]),
+    ('</a href="M.md">', []),
+]
+
+
+@pytest.mark.parametrize(("html", "expected"), _DUPLICATE_ATTRIBUTE_CASES)
+def test_first_href_attribute_wins(html, expected):
+    assert [href for _, href in _anchor_hrefs(html)] == expected
 
 
 def test_maintained_documents_are_the_sorted_root_markdown_files(tmp_path):

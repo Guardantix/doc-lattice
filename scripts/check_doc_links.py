@@ -61,8 +61,15 @@ def _walk(tokens: list[Token]) -> Iterator[tuple[int, Token]]:
     """Yield every token with the 1-based line its containing block starts on.
 
     Flattening block tokens and their inline children into one sequence keeps the destination
-    scan a single loop and the line-attribution rule in one place. An inline token's children
-    inherit its line, which is the only line the token stream records for them.
+    scan a single loop and the line-attribution rule in one place.
+
+    Markdown-it gives an inline child no source map, so a child's line has to be derived from
+    the parent. A raw HTML child is located within the parent's raw source, because its
+    content is a verbatim slice of it, and the newlines before that slice give its own line --
+    counting ``softbreak`` children instead would under-count, since a code span crossing a
+    soft break consumes the newline without emitting one. A ``link_open`` carries no content
+    to locate and keeps the line its containing block starts on, which stays the only line the
+    token stream records for it.
 
     Args:
         tokens: A parsed token stream.
@@ -73,9 +80,20 @@ def _walk(tokens: list[Token]) -> Iterator[tuple[int, Token]]:
     for token in tokens:
         line = token.map[0] + 1 if token.map is not None else 1
         yield line, token
-        if token.type == "inline" and token.children is not None:
-            for child in token.children:
-                yield line, child
+        if token.type != "inline" or token.children is None:
+            continue
+        cursor = 0
+        for child in token.children:
+            # A child whose content is not a verbatim slice -- a code span with its newline
+            # folded to a space, text with an entity decoded -- is simply not found, and the
+            # cursor waits for the next child that does re-synchronize it.
+            index = token.content.find(child.content, cursor) if child.content else -1
+            offset = 0
+            if index >= 0:
+                cursor = index + len(child.content)
+                if child.type == "html_inline":
+                    offset = token.content.count("\n", 0, index)
+            yield line + offset, child
 
 
 def _destinations_in(tokens: list[Token]) -> list[Link]:
