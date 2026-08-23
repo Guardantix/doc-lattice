@@ -34,6 +34,18 @@ _EXPECTED_BASELINE_GUIDANCE = (
     "remain findings, so this does not by itself make CI green."
 )
 
+# The referent for the line above's "before enabling the gates", spelled out here for the same
+# reason: a wording change has to fail this test rather than be followed silently.
+_EXPECTED_ACTIVATION_GUIDANCE = (
+    "Enabling the gates is that separate step, and adding the pre-commit block does not perform "
+    "it: both hooks stay inert until pre-commit writes `.git/hooks/pre-commit` in this clone. If "
+    "this clone is not already gated, run `uv tool install pre-commit` and then "
+    "`uv tool run pre-commit install`, or plain `pre-commit install` when a durable runner is "
+    "already available. On an initial adoption do that only after the baseline above, and after "
+    "`doc-lattice check` and `doc-lattice lint` are clean; an established installation enables "
+    "them immediately."
+)
+
 
 def _shared_guidance(version: str) -> str:
     return (
@@ -155,6 +167,8 @@ def test_init_delegates_create_only_write_to_shared_persistence(tmp_path: Path, 
         # One unwrapped line: soft_wrap keeps Rich from splitting `doc-lattice reconcile --all`
         # across a hard newline, which would break the command on copy and in redirection.
         f"{_EXPECTED_BASELINE_GUIDANCE}\n"
+        # Unwrapped for the same reason, and it carries three commands rather than one.
+        f"{_EXPECTED_ACTIVATION_GUIDANCE}\n"
     )
 
 
@@ -305,6 +319,53 @@ def test_baseline_guidance_is_scoped_and_does_not_promise_green_ci():
     assert "initial adoption with no established baseline" in guidance
     assert "doc-lattice reconcile --all" in guidance
     assert "does not by itself make CI green" in guidance
+
+
+def test_init_names_the_activation_step_the_baseline_guidance_orders_against(
+    tmp_path: Path, monkeypatch
+):
+    # _BASELINE_GUIDANCE orders reconciliation "before enabling the gates". GTX-175 gave that
+    # phrase a referent in README.md and MANAGED_CI.md and left init's own output out of scope,
+    # so the CLI went on asserting an ordering constraint while never naming the act it orders
+    # against. This is that half.
+    monkeypatch.chdir(tmp_path)
+
+    result = runner.invoke(app, ["init"])
+
+    assert result.exit_code == 0
+    # Its own unwrapped line: soft_wrap keeps the three commands it carries copyable, and a
+    # separate line is what keeps placement, baseline, and activation three distinct acts.
+    assert f"\n{_EXPECTED_ACTIVATION_GUIDANCE}\n" in result.stderr
+    narration = " ".join(result.stderr.split())
+    placement_at = narration.index("Append the .gitignore block")
+    baseline_at = narration.index(_EXPECTED_BASELINE_GUIDANCE)
+    activation_at = narration.index(_EXPECTED_ACTIVATION_GUIDANCE)
+    assert placement_at < baseline_at < activation_at
+    # The placement sentence stays placement-only. Appending an unconditional "then install" to
+    # it is the shape that would reintroduce the ordering failure GTX-175 fixed.
+    assert "pre-commit install" not in narration[placement_at:baseline_at]
+
+
+def test_activation_guidance_has_one_owner():
+    # init prints the module-level constant verbatim, so the narration cannot drift from it.
+    assert " ".join(init_command._ACTIVATION_GUIDANCE.split()) == _EXPECTED_ACTIVATION_GUIDANCE
+
+
+def test_activation_guidance_scopes_the_install_it_names():
+    # Three properties the wording has to keep. Pasting the block installs no Git hook, so
+    # activation is a real act rather than a restatement of pasting. An initial adoption enables
+    # the gates only after the baseline, because `check` exits 1 on the unreconciled state that
+    # adoption commits and gates enabled during setup would refuse it. And the same narration is
+    # emitted by `--print-only`, the documented upgrade path, where a clone that is already gated
+    # needs no reactivation -- so the instruction is conditioned rather than unconditional.
+    guidance = " ".join(init_command._ACTIVATION_GUIDANCE.split())
+
+    assert "stay inert" in guidance
+    assert "uv tool install pre-commit" in guidance
+    assert "uv tool run pre-commit install" in guidance
+    assert "not already gated" in guidance
+    assert "only after the baseline above" in guidance
+    assert "established installation enables them immediately" in guidance
 
 
 def test_init_prints_gitignore_guidance_before_other_snippets_and_preserves_existing_file(
@@ -619,6 +680,9 @@ def test_init_print_only_prints_exactly_what_an_ordinary_run_prints(tmp_path: Pa
     assert "wrote" not in printed.stderr
     assert "workflow triggers on branch main (fallback)\n" in printed.stderr
     assert _EXPECTED_BASELINE_GUIDANCE in " ".join(printed.stderr.split())
+    # The upgrade path emits the activation guidance too, which is why it is conditioned on the
+    # clone not already being gated rather than telling every re-fetch to reinstall the hook.
+    assert _EXPECTED_ACTIVATION_GUIDANCE in " ".join(printed.stderr.split())
 
 
 def test_init_print_only_leaves_the_directory_byte_identical(tmp_path: Path, monkeypatch):
