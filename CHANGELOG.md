@@ -98,8 +98,12 @@ hand-written file, and the diagnostic says so. See **Added** and **Changed** bel
   not a link. A destination written as a raw HTML anchor is reported rather than resolved, since
   markdown-it normalizes a Markdown destination and an attribute value arrives with none of that
   done, so resolving one means owning URL and HTML attribute semantics wider than this gate's
-  contract; the anchor is reported at its own line, which for one several lines into a
-  `<details>` block is not the line the block opens on. Containment is settled twice, once
+  contract. An anchor inside a `<details>` block is reported at its own line within that block
+  rather than the line the block opens on, and an inline one at the line of the block
+  containing it, which is the only line the token stream records for it. Anchor-shaped text
+  inside a comment, a code fence or a raw-text element such as `<script>` is not an anchor,
+  including where the element is inline and the parser has to carry its state across the
+  separate tokens markdown-it splits it into. Containment is settled twice, once
   lexically on the destination as
   written and once on where the filesystem sends it, so an in-repository symlink keeps working
   while one leaving the repository is refused before its target is opened.

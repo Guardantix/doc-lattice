@@ -383,26 +383,56 @@ def test_raw_html_anchor_in_a_block_reports_its_own_line(tmp_path):
     assert "HTML anchor" in message
 
 
-def test_inline_anchor_after_a_soft_break_reports_its_own_line(tmp_path):
-    # Markdown-it gives an inline child no source map, so the anchor would otherwise inherit
-    # the paragraph's opening line. It sits on line 4, one soft break in.
+def test_inline_anchor_reports_its_containing_block(tmp_path):
+    # Markdown-it records no source position for an inline child, so the anchor on line 4
+    # reports the paragraph's line 3. Locating it by searching the paragraph's source was
+    # tried and withdrawn: see the cases below that such a search gets wrong.
     _write(tmp_path, "README.md", '# Readme\n\npara\n<a href="MISSING.md">x</a>\n')
 
     message = _only_message(tmp_path)
-    assert message.startswith("'README.md':4:")
+    assert message.startswith("'README.md':3:")
+    assert "HTML anchor" in message
 
 
-def test_inline_anchor_after_a_code_span_crossing_a_break_reports_its_own_line(tmp_path):
-    # The code span folds its newline to a space and emits no softbreak, so counting break
-    # children would place the anchor a line early. It sits on line 5.
+def test_decoded_text_does_not_displace_a_later_raw_anchor(tmp_path):
+    # The text child decodes to exactly the raw tag on the next line while being absent from
+    # its own source position. A cursor advanced by non-verbatim content would consume the
+    # real tag and report it a line early; the block line is unaffected by either.
     _write(
         tmp_path,
         "README.md",
-        '# Readme\n\nfirst `code\nspan` then\n<a href="MISSING.md">x</a>\n',
+        '# Readme\n\n&lt;a href="MISSING.md"&gt;\n<a href="MISSING.md">y</a>\n',
     )
 
     message = _only_message(tmp_path)
-    assert message.startswith("'README.md':5:")
+    assert message.startswith("'README.md':3:")
+
+
+def test_reference_link_title_does_not_displace_a_raw_anchor(tmp_path):
+    # A reference link's title lives in the definition, not in the paragraph, so searching
+    # the paragraph for it found the real tag instead and stepped over it.
+    _write(
+        tmp_path,
+        "README.md",
+        '# Readme\n\n[x][ref]\n<a href=MISSING.md>y</a>\n\n[ref]: GUIDE.md "<a href=MISSING.md>"\n',
+    )
+    _write(tmp_path, "GUIDE.md", "# Guide\n")
+
+    message = _only_message(tmp_path)
+    assert message.startswith("'README.md':3:")
+
+
+def test_anchor_inside_an_inline_script_is_not_reported(tmp_path):
+    # Markdown-it splits the opening tag, the script's content and the closing tag into
+    # separate html_inline tokens. A fresh parser per token leaves the CDATA mode the opening
+    # tag entered, and the string literal reads as a live anchor.
+    _write(
+        tmp_path,
+        "README.md",
+        "# Readme\n\nbefore <script>const x = '<a href=\"MISSING.md\">';</script> after\n",
+    )
+
+    assert check_repository_links(tmp_path) == []
 
 
 def test_markdown_link_still_reports_its_containing_block(tmp_path):
@@ -456,24 +486,6 @@ def test_an_encoded_space_still_names_a_file_that_ends_in_one(tmp_path):
     _write(tmp_path, "GUIDE .md", "# Guide\n")
 
     assert check_repository_links(tmp_path) == []
-
-
-# The anchor's label is deliberately the same as the link's label. Stepping over the title at
-# link_open instead of link_close overshoots: the label child then matches this second `x`
-# rather than the one in brackets, pushing the cursor past the raw tag so the search fails and
-# the anchor falls back to line 1. A different label would pass either way.
-_TITLE_REPEAT = '[x](GUIDE.md "<a href=MISSING.md>")\n<a href=MISSING.md>x</a>\n'
-
-
-@pytest.mark.parametrize("label", ["x", "y"])
-def test_anchor_repeated_inside_a_link_title_reports_its_own_line(tmp_path, label):
-    # A link's title is source text with no child of its own. Without stepping over it the
-    # search matches the copy inside the title and reports the anchor on line 1.
-    _write(tmp_path, "README.md", _TITLE_REPEAT.replace(">x</a>", f">{label}</a>"))
-    _write(tmp_path, "GUIDE.md", "# Guide\n")
-
-    message = _only_message(tmp_path)
-    assert message.startswith("'README.md':2:")
 
 
 def test_an_unparseable_document_does_not_end_the_run(tmp_path):

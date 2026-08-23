@@ -68,36 +68,20 @@ class Link:
     line: int
 
 
-def _skip_past(content: str, cursor: int, text: object) -> int:
-    """Advance the cursor past source text a token carries in an attribute, not as a child.
-
-    Args:
-        content: The parent inline token's raw source.
-        cursor: The current position within it.
-        text: The attribute value to step over, if it is a non-empty string present ahead.
-
-    Returns:
-        The position after that text, or the cursor unchanged when it is not found.
-    """
-    if not isinstance(text, str) or not text:
-        return cursor
-    index = content.find(text, cursor)
-    return cursor if index < 0 else index + len(text)
-
-
 def _walk(tokens: list[Token]) -> Iterator[tuple[int, Token]]:
     """Yield every token with the 1-based line its containing block starts on.
 
-    Flattening block tokens and their inline children into one sequence keeps the destination
-    scan a single loop and the line-attribution rule in one place.
+    Flattening block tokens and their inline children into one sequence keeps the scan a
+    single loop and the line-attribution rule in one place. Markdown-it records no source
+    position for an inline child, so a child reports the line its containing block starts on,
+    which is the only line the token stream has for it.
 
-    Markdown-it gives an inline child no source map, so a child's line has to be derived from
-    the parent. A raw HTML child is located within the parent's raw source, because its
-    content is a verbatim slice of it, and the newlines before that slice give its own line --
-    counting ``softbreak`` children instead would under-count, since a code span crossing a
-    soft break consumes the newline without emitting one. A ``link_open`` carries no content
-    to locate and keeps the line its containing block starts on, which stays the only line the
-    token stream records for it.
+    Locating a child by searching the parent's raw source was tried and withdrawn. It is a
+    heuristic, not a position: a child's content is only sometimes a verbatim slice of the
+    source -- an entity is decoded, a code span's newline is folded, a reference link's title
+    is not in the paragraph at all -- and each of those either mis-locates the child or lets
+    it consume a later identical fragment. A documented block line beats a precise-looking
+    line that is sometimes wrong.
 
     Args:
         tokens: A parsed token stream.
@@ -108,32 +92,9 @@ def _walk(tokens: list[Token]) -> Iterator[tuple[int, Token]]:
     for token in tokens:
         line = token.map[0] + 1 if token.map is not None else 1
         yield line, token
-        if token.type != "inline" or token.children is None:
-            continue
-        cursor = 0
-        title: object = None
-        for child in token.children:
-            # A link's title is source text with no child of its own, so nothing else moves
-            # the cursor past it and a later fragment repeated inside one would be matched
-            # there instead of at its own position. It is stepped over at ``link_close``,
-            # not at ``link_open``: the source order is ``[label](dest "title")``, so
-            # skipping it first would put the cursor past the label its own children still
-            # have to match, and each would then re-synchronize on a later repeat.
-            if child.type == "link_open":
-                title = child.attrGet("title")
-            elif child.type == "link_close":
-                cursor = _skip_past(token.content, cursor, title)
-                title = None
-            # A child whose content is not a verbatim slice -- a code span with its newline
-            # folded to a space, text with an entity decoded -- is simply not found, and the
-            # cursor waits for the next child that does re-synchronize it.
-            index = token.content.find(child.content, cursor) if child.content else -1
-            offset = 0
-            if index >= 0:
-                cursor = index + len(child.content)
-                if child.type == "html_inline":
-                    offset = token.content.count("\n", 0, index)
-            yield line + offset, child
+        if token.type == "inline" and token.children is not None:
+            for child in token.children:
+                yield line, child
 
 
 def _links_in(tokens: list[Token]) -> list[Link]:
@@ -151,25 +112,31 @@ def _links_in(tokens: list[Token]) -> list[Link]:
 def _anchor_lines_in(tokens: list[Token]) -> list[int]:
     """Return the lines carrying a raw HTML anchor with a destination, in document order.
 
-    Markdown-it emits raw HTML as ``html_block`` and ``html_inline`` rather than as link
-    tokens, so an anchor's destination never reaches ``_links_in``. It is reported rather than
-    resolved, for the reason the module docstring records, and reporting needs the line rather
-    than the destination -- the ``href`` is read only to tell an anchor that carries one from
-    ``<a name="top">``, which names a destination instead.
+        Markdown-it emits raw HTML as ``html_block`` and ``html_inline`` rather than as link
+        tokens, so an anchor's destination never reaches ``_links_in``. It is reported rather than
+        resolved, for the reason the module docstring records, and reporting needs the line rather
+        than the destination -- the ``href`` is read only to tell an anchor that carries one from
+        ``<a name="top">``, which names a destination instead.
 
-    An anchor's line is resolved within its own HTML, so one several lines into a
-    ``<details>`` block reports that line rather than the line the block opens on.
+    An anchor in an ``html_block`` is located within that block's own HTML, so one several
+        lines into a ``<details>`` block reports that line rather than the line the block opens
+        on. An inline anchor reports its containing block's line, which is the only line the token
+        stream records for it.
 
-    Args:
-        tokens: A parsed token stream.
+        Args:
+            tokens: A parsed token stream.
 
-    Returns:
-        One 1-based line per raw anchor found.
+        Returns:
+            One 1-based line per raw anchor found.
     """
     lines: list[int] = []
-    for line, token in _walk(tokens):
-        if token.type in {"html_block", "html_inline"}:
+    for token in tokens:
+        line = token.map[0] + 1 if token.map is not None else 1
+        if token.type == "html_block":
             lines.extend(line + offset - 1 for offset, _ in _anchor_hrefs(token.content))
+        elif token.type == "inline" and token.children is not None:
+            fragments = [c.content for c in token.children if c.type == "html_inline"]
+            lines.extend(line for _ in _anchor_hrefs(*fragments))
     return lines
 
 
@@ -229,10 +196,25 @@ class _AnchorHrefs(HTMLParser):
                 return
 
 
-def _anchor_hrefs(html: str) -> list[tuple[int, str]]:
-    """Return each raw anchor destination with the 1-based line it sits on inside ``html``."""
+def _anchor_hrefs(*fragments: str) -> list[tuple[int, str]]:
+    """Return each raw anchor destination with the 1-based line it sits on.
+
+    Every fragment is fed to one parser, in order, because raw-text state has to carry across
+    them. Markdown-it splits an inline ``<script>``, its content, and ``</script>`` into
+    separate ``html_inline`` tokens, so a fresh parser per fragment would leave the CDATA mode
+    the opening tag entered and read anchor-shaped text inside the script as a live anchor --
+    failing a mandatory gate on a string literal.
+
+    Args:
+        *fragments: Raw HTML in document order, from one block or one inline token.
+
+    Returns:
+        One entry per anchor carrying a destination, with its 1-based line within the fed
+        text.
+    """
     parser = _AnchorHrefs()
-    parser.feed(html)
+    for fragment in fragments:
+        parser.feed(fragment)
     parser.close()
     return parser.hrefs
 
