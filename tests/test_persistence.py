@@ -9,6 +9,7 @@ from pathlib import Path
 import pytest
 
 from doc_lattice import persistence
+from doc_lattice.error_types import ProjectError
 from doc_lattice.persistence import (
     DestinationExistsError,
     atomic_create_bytes,
@@ -486,3 +487,27 @@ def test_durable_unlink_removes_artifact_and_syncs_parent(tmp_path: Path, monkey
 
     assert not artifact.exists()
     assert synced == [artifact.parent]
+
+
+def test_destination_exists_error_keeps_the_ancestry_its_callers_classify_on():
+    # Both halves are load-bearing rather than incidental, and neither is visible from the
+    # raise site, so they are pinned here the way `PipeClosed` pins its errno-free ancestry.
+    #
+    # Staying a FileExistsError is what lets this be a subclass at all instead of a return
+    # value: `reconcile_transaction.py` classifies a lost journal-create race by that type in
+    # two places, one of which decides *not* to clean transaction artifacts around a
+    # pre-existing journal. Narrowing the base would silently send that branch to the generic
+    # failure path.
+    #
+    # Staying outside ProjectError is what keeps it from becoming a diagnostic. It is a benign
+    # outcome the caller answers by exiting 0, and `exit_on_project_error` renders anything
+    # deriving from ProjectError as `error (CODE): ...` with exit 2. A ProjectError would also
+    # need its own member of the ErrorCode domain, which `tests/test_error_types.py` requires to
+    # be exactly the set of codes some type raises, and therefore a README table row for a code
+    # no user can ever receive.
+    error = DestinationExistsError(errno.EEXIST, os.strerror(errno.EEXIST))
+
+    assert isinstance(error, FileExistsError)
+    assert isinstance(error, OSError)
+    assert not isinstance(error, ProjectError)
+    assert not issubclass(DestinationExistsError, ProjectError)
