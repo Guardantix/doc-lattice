@@ -428,6 +428,32 @@ def test_html_anchor_with_an_empty_href_is_not_reported(tmp_path):
     assert check_repository_links(tmp_path) == []
 
 
+def test_an_empty_first_href_suppresses_a_duplicate(tmp_path):
+    # A repeated attribute is a parse error and the later one is dropped, so a browser reads
+    # this as a same-document link and never sees MISSING.md. Validating the duplicate would
+    # fail a mandatory gate on a link that works.
+    _write(tmp_path, "README.md", '# Readme\n\n<a href="" href="MISSING.md">x</a>\n')
+
+    assert check_repository_links(tmp_path) == []
+
+
+def test_a_valueless_first_href_suppresses_a_duplicate(tmp_path):
+    _write(tmp_path, "README.md", '# Readme\n\n<a href href="MISSING.md">x</a>\n')
+
+    assert check_repository_links(tmp_path) == []
+
+
+def test_the_first_of_two_real_hrefs_is_the_one_checked(tmp_path):
+    # B.md exists and A.md does not. Only A.md is reported, so the first attribute is the
+    # one resolved rather than merely the first non-empty one.
+    _write(tmp_path, "README.md", '# Readme\n\n<a href="A.md" href="B.md">x</a>\n')
+    _write(tmp_path, "B.md", "# B\n")
+
+    message = _only_message(tmp_path)
+    assert "A.md" in message
+    assert "B.md" not in message
+
+
 def test_html_anchor_inside_code_is_not_reported(tmp_path):
     _write(tmp_path, "README.md", '# Readme\n\n```html\n<a href="MISSING.md">g</a>\n```\n')
 

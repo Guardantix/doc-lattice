@@ -147,15 +147,19 @@ class _AnchorHrefs(HTMLParser):
     def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
         """Record the destination of one anchor carrying a non-empty ``href``.
 
-        The first ``href`` wins, which is what a browser does with a repeated attribute. A
-        valueless or empty one names no destination and is skipped, matching how an empty
-        Markdown destination is skipped.
+        Only the first ``href`` is considered, because that is what the HTML parse rules do
+        with a repeated attribute: the later one is a duplicate-attribute parse error and is
+        dropped from the tag. An empty or valueless first one resolves to the current
+        document rather than naming a target, so it records nothing -- and, crucially, it
+        does not fall through to a duplicate no browser would ever navigate to, which would
+        fail this gate on a link that works.
         """
         if tag != "a":
             return
         for name, value in attrs:
-            if name == "href" and value:
-                self.hrefs.append((self.getpos()[0], value))
+            if name == "href":
+                if value:
+                    self.hrefs.append((self.getpos()[0], value))
                 return
 
 
