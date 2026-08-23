@@ -15,6 +15,28 @@ _NORMALIZED_NAME = re.sub(r"[-_.]+", "_", _PYPROJECT["project"]["name"])
 _DIST_PREFIX = f"{_NORMALIZED_NAME}-{_PYPROJECT['project']['version']}"
 _REQUIREMENT = re.compile(r"^(?P<name>[A-Za-z0-9][A-Za-z0-9._-]*)(?P<specifiers>.*)$")
 
+# The archive-membership denial set: test modules that read repository-only files -- a script
+# under ``scripts/``, a workflow under ``.github/``, or a maintained document the sdist does not
+# carry -- and so cannot run from an unpacked sdist. Each name here must also be excluded by the
+# sdist manifest, which
+# ``test_the_sdist_exclude_list_and_the_archive_denial_set_name_the_same_modules`` enforces.
+_REPOSITORY_ONLY_TESTS = (
+    "tests/test_action_pin_correspondence_workflow.py",
+    "tests/test_action_runtime_audit_workflow.py",
+    "tests/test_audit_action_runtimes.py",
+    "tests/test_bench_sections.py",
+    "tests/test_check_action_pin_correspondence.py",
+    "tests/test_check_doc_links.py",
+    "tests/test_check_version_sync.py",
+    "tests/test_extract_release_notes.py",
+    "tests/test_managed_ci_recipe.py",
+    "tests/test_release_gate.py",
+    "tests/test_release_target.py",
+    "tests/test_release_workflow.py",
+    "tests/test_slugger_generator.py",
+    "tests/test_workflow_pinning.py",
+)
+
 
 def _specifiers(requirement):
     match = _REQUIREMENT.match(requirement)
@@ -27,17 +49,7 @@ def _assert_sdist_members(members, expected_prefix):
     names = [member.name for member in members]
     duplicates = sorted(name for name, count in Counter(names).items() if count > 1)
     assert duplicates == [], f"duplicate sdist members: {duplicates}"
-    repository_only_tests = {
-        f"{expected_prefix}/tests/test_bench_sections.py",
-        f"{expected_prefix}/tests/test_check_doc_links.py",
-        f"{expected_prefix}/tests/test_check_version_sync.py",
-        f"{expected_prefix}/tests/test_extract_release_notes.py",
-        f"{expected_prefix}/tests/test_release_gate.py",
-        f"{expected_prefix}/tests/test_release_target.py",
-        f"{expected_prefix}/tests/test_release_workflow.py",
-        f"{expected_prefix}/tests/test_slugger_generator.py",
-        f"{expected_prefix}/tests/test_workflow_pinning.py",
-    }
+    repository_only_tests = {f"{expected_prefix}/{name}" for name in _REPOSITORY_ONLY_TESTS}
     assert repository_only_tests.isdisjoint(names), (
         f"repository-only tests included: {sorted(repository_only_tests.intersection(names))}"
     )
@@ -96,16 +108,35 @@ def test_sdist_has_an_explicit_minimal_include_set():
         "/pyproject.toml",
     ]
     assert sdist["exclude"] == [
+        "/tests/test_action_pin_correspondence_workflow.py",
+        "/tests/test_action_runtime_audit_workflow.py",
+        "/tests/test_audit_action_runtimes.py",
         "/tests/test_bench_sections.py",
+        "/tests/test_check_action_pin_correspondence.py",
         "/tests/test_check_doc_links.py",
         "/tests/test_check_version_sync.py",
         "/tests/test_extract_release_notes.py",
+        "/tests/test_managed_ci_recipe.py",
         "/tests/test_release_gate.py",
         "/tests/test_release_target.py",
         "/tests/test_release_workflow.py",
         "/tests/test_slugger_generator.py",
         "/tests/test_workflow_pinning.py",
     ]
+
+
+def test_the_sdist_exclude_list_and_the_archive_denial_set_name_the_same_modules():
+    """GTX-251: the manifest and the archive assertion are two halves of one contract.
+
+    A module that reads a repository-only file has to be named twice -- once in the sdist
+    manifest so it is not shipped, and once in ``_REPOSITORY_ONLY_TESTS`` so the built-archive
+    test asserts its absence. Drift in one direction ships a module that cannot run from an
+    unpacked sdist; drift in the other leaves the archive assertion silently checking a shorter
+    list than the manifest excludes, which is the failure that goes unnoticed. Comparing against
+    ``sorted`` also pins the manifest's ordering, so the list stays reviewable as it grows.
+    """
+    sdist = _PYPROJECT["tool"]["hatch"]["build"]["targets"]["sdist"]
+    assert sdist["exclude"] == sorted(f"/{name}" for name in _REPOSITORY_ONLY_TESTS)
 
 
 def test_runtime_dependencies_are_bounded_above():

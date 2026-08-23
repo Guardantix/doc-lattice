@@ -440,6 +440,20 @@ hand-written file, and the diagnostic says so. See **Added** and **Changed** bel
   intact instead of breaking mid-token on a narrow console. The placement guidance printed
   beside them is prose and still wraps, and the baseline guidance had already opted out.
   Styling is unaffected and stdout is unchanged.
+- The test suite shipped in the sdist runs from an unpacked sdist again. Five test modules read
+  files the sdist deliberately does not carry -- `scripts/audit_action_runtimes.py`,
+  `scripts/check_action_pin_correspondence.py`, `.github/workflows`, `RELEASING.md`, and
+  `MANAGED_CI.md` -- and were still being shipped, so unpacking the archive and running `pytest`
+  stopped with two collection errors (both `run_path` modules, raising `FileNotFoundError` before
+  any test ran) and 31 further failures in the other three. The five are now excluded from the
+  sdist alongside the nine repository-only modules already listed there, and
+  `tests/test_package_metadata.py` fails if the manifest's exclude list and its
+  archive-membership denial set ever name different modules. Nothing new is shipped to make these
+  tests portable: `MANAGED_CI.md`, `RELEASING.md`, `scripts/`, and `.github/` all stay out of the
+  archive, since nothing in the distribution reads them. `tests/workflow_helpers.py` and its test
+  stay shipped, because the helper only builds paths at import time and its test drives it
+  entirely from `tmp_path`. The installed package is unchanged -- this is a source-archive
+  contents fix, and the wheel never carried tests at all.
 
 ## [5.0.0] - 2026-08-19
 
