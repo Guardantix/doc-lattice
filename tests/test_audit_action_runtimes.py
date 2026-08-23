@@ -19,6 +19,7 @@ _SCRIPT = run_path(str(_SCRIPT_PATH))
 
 Annotation = _SCRIPT["Annotation"]
 AuditError = _SCRIPT["AuditError"]
+_REPORT_FAILED = _SCRIPT["_REPORT_FAILED"]
 Finding = _SCRIPT["Finding"]
 Job = _SCRIPT["Job"]
 Run = _SCRIPT["Run"]
@@ -433,3 +434,172 @@ def test_script_rejects_a_missing_run_id_at_the_command_line():
 
     assert result.returncode != 0
     assert "--run-id" in result.stderr
+
+
+class _FailsOnceThenWrites:
+    """A text stream that raises `OSError` on its first write and delegates every later one.
+
+    The failure is injected at the stream rather than at the channel on purpose. Every write
+    after the failing one is then a real write through the real stream, so "the remaining
+    channels were still attempted" is asserted against what those channels actually produced
+    rather than against a recording of intent.
+    """
+
+    def __init__(self, stream):
+        self._stream = stream
+        self.failed = False
+
+    def write(self, text: str) -> int:
+        if not self.failed:
+            self.failed = True
+            raise OSError("No space left on device")
+        return self._stream.write(text)
+
+    def flush(self) -> None:
+        self._stream.flush()
+
+
+class _AsciiOnly:
+    """A text stream that refuses non-ASCII, the way a console under an ASCII encoding does.
+
+    `TextIOWrapper.write` raises `UnicodeEncodeError` when its encoding cannot carry the text,
+    and that is a `ValueError`. Reproducing the mechanism rather than injecting a hand-built
+    exception is what keeps this honest about the failure it names.
+    """
+
+    def __init__(self, stream):
+        self._stream = stream
+
+    def write(self, text: str) -> int:
+        text.encode("ascii")
+        return self._stream.write(text)
+
+    def flush(self) -> None:
+        self._stream.flush()
+
+
+def _two_findings_api():
+    """Return a transport over a run whose single job carries two deprecation annotations."""
+    return _fake_api(
+        jobs=[_job_payload(1, "Build release distributions")],
+        annotations={
+            1: [
+                _annotation_payload("warning", _NODE_20_MESSAGE),
+                _annotation_payload("failure", "Deprecation: the runner image is going away."),
+            ]
+        },
+    )
+
+
+def test_a_failed_summary_write_leaves_the_later_channels_attempted(tmp_path, monkeypatch, capsys):
+    # The summary is the first channel, so a guard that gave up on the first `OSError` would cost
+    # the step-summary file too. Only the channel that failed is allowed to be lost.
+    summary_path = tmp_path / "step-summary.md"
+    monkeypatch.setenv("GITHUB_STEP_SUMMARY", str(summary_path))
+    fetch, _calls = _fake_api(
+        jobs=[_job_payload(1, "Tests (3.13)")],
+        annotations={1: [_annotation_payload("warning", _CACHE_MESSAGE)]},
+    )
+    monkeypatch.setattr(sys, "stdout", _FailsOnceThenWrites(sys.stdout))
+
+    code = main(["--repository", _REPOSITORY, "--run-id", str(_RUN_ID)], fetch)
+
+    assert code == 2
+    assert "No deprecation annotations." in summary_path.read_text(encoding="utf-8")
+    assert _REPORT_FAILED in capsys.readouterr().err
+
+
+def test_a_failed_finding_line_leaves_the_later_lines_and_the_file_attempted(
+    tmp_path, monkeypatch, capsys
+):
+    # Two findings, and the first line is the one that fails. A single `try` around the loop --
+    # or a short-circuiting accumulator -- would drop the second line and the file with it, and a
+    # one-finding case could not tell the difference.
+    summary_path = tmp_path / "step-summary.md"
+    monkeypatch.setenv("GITHUB_STEP_SUMMARY", str(summary_path))
+    fetch, _calls = _two_findings_api()
+    monkeypatch.setattr(sys, "stderr", _FailsOnceThenWrites(sys.stderr))
+
+    code = main(["--repository", _REPOSITORY, "--run-id", str(_RUN_ID)], fetch)
+
+    assert code == 1
+    captured = capsys.readouterr()
+    assert "the runner image is going away" in captured.err
+    assert _REPORT_FAILED in captured.err
+    assert "| [Build release distributions]" in summary_path.read_text(encoding="utf-8")
+
+
+def test_a_clean_run_whose_step_summary_write_fails_exits_two(tmp_path, monkeypatch, capsys):
+    # Exit 2, not 1 and not 0: no finding was established, so 1 would name a deprecated runtime
+    # nothing found, and 0 would report a run whose report never landed as a clean one.
+    monkeypatch.setenv("GITHUB_STEP_SUMMARY", str(tmp_path / "absent" / "step-summary.md"))
+    fetch, _calls = _fake_api(
+        jobs=[_job_payload(1, "Tests (3.13)")],
+        annotations={1: [_annotation_payload("warning", _CACHE_MESSAGE)]},
+    )
+
+    code = main(["--repository", _REPOSITORY, "--run-id", str(_RUN_ID)], fetch)
+
+    assert code == 2
+    captured = capsys.readouterr()
+    assert "No deprecation annotations." in captured.out
+    assert _REPORT_FAILED in captured.err
+
+
+def test_a_failed_step_summary_write_never_masks_a_finding(tmp_path, monkeypatch, capsys):
+    # The precedence rule: a finding was established, so it outranks the report failure that
+    # happened alongside it. The stderr lines still carry the finding.
+    monkeypatch.setenv("GITHUB_STEP_SUMMARY", str(tmp_path / "absent" / "step-summary.md"))
+    fetch, _calls = _two_findings_api()
+
+    code = main(["--repository", _REPOSITORY, "--run-id", str(_RUN_ID)], fetch)
+
+    assert code == 1
+    captured = capsys.readouterr()
+    assert "Build release distributions: warning: .github:2:" in captured.err
+    assert _REPORT_FAILED in captured.err
+
+
+def test_a_summary_the_stream_cannot_encode_is_a_failure_not_a_finding(
+    tmp_path, monkeypatch, capsys
+):
+    # `UnicodeEncodeError` is a `ValueError`, not an `OSError`, so a guard on `OSError` alone
+    # would let it escape as an exit-1 traceback -- the findings code -- on a run that found
+    # nothing. Workflow names, branch names, and annotation text are all upstream text, and a
+    # stream under an ASCII encoding cannot carry any of it.
+    summary_path = tmp_path / "step-summary.md"
+    monkeypatch.setenv("GITHUB_STEP_SUMMARY", str(summary_path))
+    fetch, _calls = _fake_api(
+        jobs=[_job_payload(1, "Tests (3.13)")],
+        annotations={1: [_annotation_payload("warning", _CACHE_MESSAGE)]},
+        run={**_RUN_PAYLOAD, "head_branch": "feature/café"},
+    )
+    monkeypatch.setattr(sys, "stdout", _AsciiOnly(sys.stdout))
+    monkeypatch.setattr(sys, "stderr", _AsciiOnly(sys.stderr))
+
+    code = main(["--repository", _REPOSITORY, "--run-id", str(_RUN_ID)], fetch)
+
+    assert code == 2
+    # The file is opened as UTF-8, so only the console channel is lost.
+    assert "café" in summary_path.read_text(encoding="utf-8")
+    # `UnicodeEncodeError` renders the offending character escaped, so the diagnostic is pure
+    # ASCII and still reaches a stream that has just refused the summary.
+    assert _REPORT_FAILED in capsys.readouterr().err
+
+
+def test_a_failed_audit_diagnostic_exits_two_rather_than_on_a_traceback(monkeypatch, capsys):
+    # The one channel with no remaining channels to attempt: `_audit` did not return, so no
+    # report can follow it. Unguarded, this `OSError` escaped as a traceback carrying the
+    # interpreter's exit 1 -- this script's *findings* code -- so a stderr that could not be
+    # written reported as a deprecated runtime.
+    monkeypatch.delenv("GITHUB_STEP_SUMMARY", raising=False)
+
+    def refuse(_path: str) -> object:
+        raise AuditError("gh: Bad credentials (HTTP 401)")
+
+    monkeypatch.setattr(sys, "stderr", _FailsOnceThenWrites(sys.stderr))
+
+    code = main(["--repository", _REPOSITORY, "--run-id", str(_RUN_ID)], refuse)
+
+    assert code == 2
+    assert _REPORT_FAILED in capsys.readouterr().err
