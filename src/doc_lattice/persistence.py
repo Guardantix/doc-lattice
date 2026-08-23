@@ -12,6 +12,28 @@ from .path_utils import format_path_for_display
 _IS_WINDOWS = os.name == "nt"
 
 
+class DestinationExistsError(FileExistsError):
+    """A create-if-absent found the destination already there and left nothing behind.
+
+    Both halves of that are the point. It is raised only when the destination existed *and* the
+    helper-owned stage was cleaned up, which is the one outcome a caller can treat as benign:
+    nothing was written, nothing was replaced, and there is no orphan to report. A collision
+    that also failed to clean its stage keeps the plain ``FileExistsError`` and carries the
+    remediation note, because the orphan is a real failure whatever caused the collision.
+
+    It exists so callers stop inferring that conjunction for themselves. ``init`` used to read
+    it off the *absence of notes*, which answers "did cleanup fail" rather than "did the
+    destination exist", so any other note-free ``FileExistsError`` reaching it -- ``mkstemp``
+    exhausting its candidate names, for one -- was reported to the user as an existing config
+    and exited 0.
+
+    It stays an ``OSError`` subclass rather than a ``ProjectError``: this module raises raw
+    ``OSError`` by contract and the command adapters wrap it. Being a ``FileExistsError`` is
+    also load-bearing rather than incidental, since ``reconcile_transaction.py`` classifies a
+    lost journal-create race by that type and must keep matching.
+    """
+
+
 def sha256_bytes(data: bytes) -> str:
     """Return the full SHA-256 hexadecimal digest of bytes.
 
@@ -86,12 +108,24 @@ def _add_unpublished_stage_cleanup_note(
     primary.add_note(_unpublished_stage_cleanup_note(staged, cleanup_error))
 
 
-def _durable_unlink_preserving_error(staged: Path, primary: OSError) -> None:
-    """Clean a stage without replacing the primary operation error."""
+def _durable_unlink_preserving_error(staged: Path, primary: OSError) -> bool:
+    """Clean a stage without replacing the primary operation error.
+
+    Args:
+        staged: The helper-owned stage to remove.
+        primary: The error the caller will raise, annotated in place when cleanup fails.
+
+    Returns:
+        True when the stage was removed, and False when a noted orphan remains. The caller
+        reads this rather than the note it just attached, so "was an orphan left" stays a
+        returned fact instead of something recovered from the exception afterwards.
+    """
     try:
         durable_unlink(staged)
     except OSError as cleanup_error:
         _add_unpublished_stage_cleanup_note(primary, staged, cleanup_error)
+        return False
+    return True
 
 
 def stage_bytes(destination: Path, data: bytes, *, prefix: str) -> Path:
@@ -184,14 +218,30 @@ def atomic_create_bytes(path: Path, data: bytes, *, prefix: str) -> None:
         prefix: The caller-owned temporary filename prefix.
 
     Raises:
-        OSError: If staging, creation, cleanup, or synchronization fails.
+        DestinationExistsError: If the destination already existed and the stage was cleaned
+            up, which is the benign outcome a caller may treat as "nothing to do".
+        OSError: If staging, creation, cleanup, or synchronization fails. A collision that also
+            orphaned its stage arrives here rather than above, as the plain
+            ``FileExistsError`` carrying the remediation note.
     """
     staged = stage_bytes(path, data, prefix=prefix)
     try:
         os.link(staged, path)
         sync_directory(path.parent)
     except OSError as primary:
-        _durable_unlink_preserving_error(staged, primary)
+        cleaned = _durable_unlink_preserving_error(staged, primary)
+        # `os.link` is the only thing in the block that can raise EEXIST, and it means the
+        # destination is there, so the type alone settles it. Staging runs before the block, so
+        # a `mkstemp` collision is not reachable from here and keeps the plain type. Rebuilt
+        # from the original's fields rather than wrapped, so the rendered message stays exactly
+        # what the failed link produced. Both filenames are carried: `os.link` records the
+        # stage and the destination, and rendering drops the `-> destination` half without the
+        # second one.
+        if cleaned and isinstance(primary, FileExistsError):
+            existing = DestinationExistsError(primary.errno, primary.strerror)
+            existing.filename = primary.filename
+            existing.filename2 = primary.filename2
+            raise existing from primary
         raise
     try:
         durable_unlink(staged)

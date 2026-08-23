@@ -354,6 +354,29 @@ def test_init_skips_existing_config_but_still_prints(tmp_path: Path, monkeypatch
     assert "'.doc-lattice.yml' already exists, leaving it untouched" in result.stderr
 
 
+def test_init_reports_a_staging_collision_as_a_failure_not_an_existing_config(
+    tmp_path: Path, monkeypatch
+):
+    # The benign branch used to be entered by any note-free FileExistsError, because it asked
+    # whether the stage cleanup had failed rather than whether the destination existed.
+    # `mkstemp` raises exactly that shape after exhausting its candidate names, so a staging
+    # collision was reported to the user as an existing config and exited 0 while nothing had
+    # been written. Staging runs before the link, so this is the seam that reaches the handler
+    # without the destination existing at all.
+    def _collide_in_staging(*_args, **_kwargs) -> Path:
+        raise FileExistsError("no usable temporary file name found")
+
+    monkeypatch.setattr(persistence, "stage_bytes", _collide_in_staging)
+    monkeypatch.chdir(tmp_path)
+
+    result = runner.invoke(app, ["init"])
+
+    assert result.exit_code == 2
+    assert "INIT_PERSISTENCE" in result.stderr
+    assert "already exists, leaving it untouched" not in result.stderr
+    assert not (tmp_path / ".doc-lattice.yml").exists()
+
+
 def test_init_existing_config_with_stage_cleanup_failure_exits_2_and_names_orphan(
     tmp_path: Path, monkeypatch
 ):

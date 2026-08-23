@@ -15,7 +15,7 @@ from ...config import DEFAULT_CONFIG_NAME
 from ...error_types import InitPersistenceError, ValidationError, copy_exception_notes
 from ...linear_query import is_valid_team_key
 from ...path_utils import format_path_for_display
-from ...persistence import atomic_create_bytes
+from ...persistence import DestinationExistsError, atomic_create_bytes
 from ...scaffold import build_scaffold, render_ci, render_gitignore, render_precommit
 from ...text_utils import strip_control_chars
 from ..errors import EXIT_TOOL_ERROR, exit_on_project_error
@@ -325,7 +325,8 @@ def _scaffold_config(runtime: CliRuntime, config_text: str) -> None:
             before writing anything, because the directory is the input in question.
         InitPersistenceError: If an entry the guard has to read can be neither confirmed nor
             ruled out, if the file could not be written, or if a failed staging cleanup left an
-            orphan behind.
+            orphan behind. An existing config is not one of these: the boundary reports that
+            as ``DestinationExistsError`` and this reports it and exits 0.
     """
     target = runtime.cwd / DEFAULT_CONFIG_NAME
     if not _is_config_file(target):
@@ -343,21 +344,20 @@ def _scaffold_config(runtime: CliRuntime, config_text: str) -> None:
             # written for this line would have covered those two sinks as well.
             prefix=f"{DEFAULT_CONFIG_NAME}.",
         )
-    # A bare FileExistsError means the destination already existed and the staged file
-    # was cleaned up normally, which is the benign already-exists case. Notes are
-    # attached only when that cleanup also failed and left stray staged evidence, so
-    # treat a noted error as a real failure. Both abnormal branches carry
-    # INIT_PERSISTENCE rather than CONFIG_ERROR: the defect is in the directory being
-    # scaffolded, and init never reads .doc-lattice.yml, so naming config sent the user
-    # to a file that had nothing to do with the failure.
-    except FileExistsError as exc:
-        if not getattr(exc, "__notes__", ()):
-            runtime.stderr.print(
-                f"{escape(format_path_for_display(target.name))} already exists, "
-                "leaving it untouched"
-            )
-        else:
-            raise _init_persistence_error(target.name, exc) from exc
+    # The benign case is the one the boundary names: the destination was already there and
+    # nothing was left behind. It used to be inferred here from a FileExistsError carrying no
+    # notes, which answers "did the stage cleanup fail" rather than "did the destination
+    # exist", so any other note-free FileExistsError escaping the write path was reported as an
+    # existing config and exited 0. A collision that orphaned its stage keeps the plain type
+    # and falls to the arm below with everything else, since the orphan is a real failure
+    # whatever collided. Both abnormal branches carry INIT_PERSISTENCE rather than
+    # CONFIG_ERROR: the defect is in the directory being scaffolded, and init never reads
+    # .doc-lattice.yml, so naming config sent the user to a file that had nothing to do with
+    # the failure.
+    except DestinationExistsError:
+        runtime.stderr.print(
+            f"{escape(format_path_for_display(target.name))} already exists, leaving it untouched"
+        )
     except OSError as exc:
         raise _init_persistence_error(target.name, exc) from exc
     else:

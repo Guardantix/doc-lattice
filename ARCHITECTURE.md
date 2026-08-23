@@ -184,7 +184,13 @@ same durable atomic-replace primitive but remains a disposable, best-effort
 single-file write whose `OSError` is reported once and swallowed. `init` uses durable
 create-if-absent, still refuses to replace an existing config, and never joins a
 reconcile journal. It always prints transaction-artifact `.gitignore` guidance but
-does not modify `.gitignore`.
+does not modify `.gitignore`. The primitive reports the one benign outcome as its own
+type, `DestinationExistsError`, meaning the destination was already there and no
+staged file was orphaned. Callers are told that rather than inferring it: `init` read
+it off the absence of remediation notes, which answers whether cleanup failed and not
+whether the destination existed, so any other note-free `FileExistsError` reaching it
+was reported as an existing config and exited 0. The type stays a `FileExistsError`
+because `reconcile_transaction.py` classifies a lost journal-create race by that type.
 
 ### AD-6: lint is a pure structural check, separate from drift
 
