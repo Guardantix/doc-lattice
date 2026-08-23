@@ -12,6 +12,7 @@ check_repository_links = _SCRIPT["check_repository_links"]
 maintained_documents = _SCRIPT["maintained_documents"]
 extract_links = _SCRIPT["extract_links"]
 _anchor_hrefs = _SCRIPT["_anchor_hrefs"]
+_split_destination = _SCRIPT["_split_destination"]
 
 _SCRIPT_PATH = "scripts/check_doc_links.py"
 
@@ -350,35 +351,27 @@ def test_source_symlinked_inside_the_repository_is_still_checked(tmp_path):
     assert "MISSING.md" in message
 
 
-def test_raw_html_anchor_destination_is_resolved(tmp_path):
+def test_raw_html_anchor_is_reported_as_unchecked(tmp_path):
     # Markdown-it emits html_inline for a raw anchor, so its href never reaches link
-    # extraction. The href is read out of the HTML and resolved like any other destination.
+    # extraction. Reporting it keeps the gap loud instead of silently green.
     _write(tmp_path, "README.md", '# Readme\n\nSee <a href="MISSING.md">guide</a>.\n')
 
     message = _only_message(tmp_path)
     assert message.startswith("'README.md':3:")
-    assert "MISSING.md" in message
+    assert "HTML anchor" in message
 
 
-def test_raw_html_anchor_that_resolves_passes(tmp_path):
-    _write(tmp_path, "README.md", '# Readme\n\nSee <a href="GUIDE.md#guide">guide</a>.\n')
+def test_raw_html_anchor_is_reported_even_when_its_target_exists(tmp_path):
+    # The destination is not resolved either way, so an anchor naming a real file is still
+    # reported. Reporting is about the form, not about whether this one would have worked.
+    _write(tmp_path, "README.md", '# Readme\n\n<a href="GUIDE.md">g</a>\n')
     _write(tmp_path, "GUIDE.md", "# Guide\n")
 
-    assert check_repository_links(tmp_path) == []
-
-
-def test_raw_html_anchor_with_a_dead_fragment_is_reported(tmp_path):
-    _write(tmp_path, "README.md", '# Readme\n\n<a href="GUIDE.md#ghost">g</a>\n')
-    _write(tmp_path, "GUIDE.md", "# Guide\n")
-
-    message = _only_message(tmp_path)
-    assert "ghost" in message
-    assert "GUIDE.md" in message
+    assert "HTML anchor" in _only_message(tmp_path)
 
 
 def test_raw_html_anchor_in_a_block_reports_its_own_line(tmp_path):
-    # The anchor sits on line 5, three lines into the html_block that opens on line 3. The
-    # line is resolved inside the block's own HTML rather than being the line it opens on.
+    # The anchor sits on line 5, three lines into the html_block that opens on line 3.
     _write(
         tmp_path,
         "README.md",
@@ -387,26 +380,7 @@ def test_raw_html_anchor_in_a_block_reports_its_own_line(tmp_path):
 
     message = _only_message(tmp_path)
     assert message.startswith("'README.md':5:")
-    assert "MISSING.md" in message
-
-
-def test_malformed_authority_in_an_anchor_does_not_end_the_run(tmp_path):
-    # urlsplit raises on an unparseable authority. Only a raw anchor can carry one this far,
-    # since markdown-it percent-encodes the bracket, and an unguarded raise would leave every
-    # later document unchecked. AAA.md sorts first, so ZZZ.md is only reached if the run
-    # survives the bad destination.
-    _write(tmp_path, "AAA.md", '# A\n\n<a href="http://[">x</a>\n')
-    _write(tmp_path, "ZZZ.md", "# Z\n\n[later](ALSO-MISSING.md)\n")
-
-    message = _only_message(tmp_path)
-    assert message.startswith("'ZZZ.md':3:")
-    assert "ALSO-MISSING.md" in message
-
-
-def test_malformed_protocol_relative_authority_is_out_of_scope(tmp_path):
-    _write(tmp_path, "README.md", '# Readme\n\n<a href="//[oops]/x">x</a>\n')
-
-    assert check_repository_links(tmp_path) == []
+    assert "HTML anchor" in message
 
 
 def test_inline_anchor_after_a_soft_break_reports_its_own_line(tmp_path):
@@ -440,29 +414,39 @@ def test_markdown_link_still_reports_its_containing_block(tmp_path):
     assert message.startswith("'README.md':3:")
 
 
-def test_trailing_space_in_a_raw_href_is_stripped(tmp_path):
-    # A URL parser strips C0-control-or-space from both ends, so this targets GUIDE.md.
-    # urlsplit keeps the trailing half on purpose, which would look up a filename ending in
-    # a space and fail a working link in a mandatory hook.
-    _write(tmp_path, "README.md", '# Readme\n\n<a href="GUIDE.md ">x</a>\n')
-    _write(tmp_path, "GUIDE.md", "# Guide\n")
+# _split_destination is the URL-normalizing boundary. Neither behaviour below is reachable
+# through a maintained document now that a raw anchor's href is reported rather than resolved:
+# markdown-it hands over a destination it has already trimmed and percent-encoded. They are
+# kept and tested directly, because a boundary that claims to split a URL the way a parser
+# does should do so whatever reaches it.
+@pytest.mark.parametrize(
+    ("href", "expected_path", "expected_fragment"),
+    [
+        # urlsplit lstrips only, and says so: applications rely on a kept trailing space.
+        ("GUIDE.md ", "GUIDE.md", ""),
+        ("  GUIDE.md  ", "GUIDE.md", ""),
+        # Stripping the whole destination rather than its path is what reaches a fragment.
+        ("  GUIDE.md#guide  ", "GUIDE.md", "guide"),
+        # Interior tab, newline and CR are removed by urlsplit already.
+        ("GUI\tDE.md", "GUIDE.md", ""),
+        ("GUIDE.md\n", "GUIDE.md", ""),
+        # %20 is not whitespace, so a file that really ends in a space stays addressable.
+        ("GUIDE%20.md", "GUIDE%20.md", ""),
+    ],
+)
+def test_split_destination_applies_the_url_whitespace_rules(href, expected_path, expected_fragment):
+    parts = _split_destination(href)
 
-    assert check_repository_links(tmp_path) == []
+    assert parts is not None
+    assert parts.path == expected_path
+    assert parts.fragment == expected_fragment
 
 
-def test_surrounding_whitespace_in_a_raw_href_and_fragment_is_stripped(tmp_path):
-    # Stripping the whole destination rather than its path is what reaches the fragment.
-    _write(tmp_path, "README.md", '# Readme\n\n<a href="  GUIDE.md#guide  ">x</a>\n')
-    _write(tmp_path, "GUIDE.md", "# Guide\n")
-
-    assert check_repository_links(tmp_path) == []
-
-
-def test_interior_tab_in_a_raw_href_is_removed(tmp_path):
-    _write(tmp_path, "README.md", '# Readme\n\n<a href="GUI\tDE.md">x</a>\n')
-    _write(tmp_path, "GUIDE.md", "# Guide\n")
-
-    assert check_repository_links(tmp_path) == []
+@pytest.mark.parametrize("href", ["http://[", "https://[oops]/x", "//[", "//[oops]/x"])
+def test_split_destination_refuses_a_malformed_authority(href):
+    # urlsplit raises rather than answering. Every spelling that can raise has an authority
+    # and is external either way, so None reaches the verdict _is_out_of_scope would.
+    assert _split_destination(href) is None
 
 
 def test_an_encoded_space_still_names_a_file_that_ends_in_one(tmp_path):
@@ -472,49 +456,6 @@ def test_an_encoded_space_still_names_a_file_that_ends_in_one(tmp_path):
     _write(tmp_path, "GUIDE .md", "# Guide\n")
 
     assert check_repository_links(tmp_path) == []
-
-
-def test_backslash_separates_segments_in_a_raw_href(tmp_path):
-    # The URL path state reads a backslash as a slash under a special scheme, so this
-    # navigates to docs/GUIDE.md in a browser and the gate has to agree.
-    _write(tmp_path, "README.md", '# Readme\n\n<a href="docs\\GUIDE.md">x</a>\n')
-    _write(tmp_path, "docs/GUIDE.md", "# Guide\n")
-
-    assert check_repository_links(tmp_path) == []
-
-
-def test_backslash_climbing_out_is_still_refused(tmp_path):
-    # Containment is unaffected by the separator: a backslash pops exactly like a slash and
-    # popping past the root still refuses.
-    _write(tmp_path, "README.md", '# Readme\n\n<a href="..\\..\\outside.md">x</a>\n')
-
-    message = _only_message(tmp_path)
-    assert "does not resolve inside the repository" in message
-
-
-def test_leading_backslash_is_out_of_scope(tmp_path):
-    # Read as a leading slash, so this is root-absolute rather than a repository path.
-    _write(tmp_path, "README.md", '# Readme\n\n<a href="\\outside.md">x</a>\n')
-
-    assert check_repository_links(tmp_path) == []
-
-
-def test_doubled_leading_backslash_is_out_of_scope(tmp_path):
-    # The protocol-relative form written with backslashes. Judged before normalization, so
-    # the authority is not mistaken for a repository path called evil.com.
-    _write(tmp_path, "README.md", '# Readme\n\n<a href="\\\\evil.com\\x">x</a>\n')
-
-    assert check_repository_links(tmp_path) == []
-
-
-def test_percent_encoded_backslash_is_not_a_separator(tmp_path):
-    # A percent-encoded separator is a literal character inside one segment, the same rule
-    # that keeps %2F out of the structure, so this names a file with a backslash in it.
-    _write(tmp_path, "README.md", '# Readme\n\n<a href="docs%5CGUIDE.md">x</a>\n')
-    _write(tmp_path, "docs/GUIDE.md", "# Guide\n")
-
-    message = _only_message(tmp_path)
-    assert "does not resolve inside the repository" in message
 
 
 # The anchor's label is deliberately the same as the link's label. Stepping over the title at
@@ -550,12 +491,6 @@ def test_an_unparseable_document_does_not_end_the_run(tmp_path):
     assert messages[1].startswith("'ZZZ.md':3:")
 
 
-def test_external_html_anchor_destination_is_out_of_scope(tmp_path):
-    _write(tmp_path, "README.md", '# Readme\n\n<a href="https://example.com/x.md">x</a>\n')
-
-    assert check_repository_links(tmp_path) == []
-
-
 def test_html_anchor_without_an_href_is_not_reported(tmp_path):
     # A bare <a name="..."> names a destination rather than carrying one, so there is nothing
     # to verify and nothing to complain about.
@@ -584,17 +519,6 @@ def test_a_valueless_first_href_suppresses_a_duplicate(tmp_path):
     _write(tmp_path, "README.md", '# Readme\n\n<a href href="MISSING.md">x</a>\n')
 
     assert check_repository_links(tmp_path) == []
-
-
-def test_the_first_of_two_real_hrefs_is_the_one_checked(tmp_path):
-    # B.md exists and A.md does not. Only A.md is reported, so the first attribute is the
-    # one resolved rather than merely the first non-empty one.
-    _write(tmp_path, "README.md", '# Readme\n\n<a href="A.md" href="B.md">x</a>\n')
-    _write(tmp_path, "B.md", "# B\n")
-
-    message = _only_message(tmp_path)
-    assert "A.md" in message
-    assert "B.md" not in message
 
 
 def test_html_anchor_inside_code_is_not_reported(tmp_path):
@@ -731,7 +655,7 @@ def test_links_and_raw_anchors_are_ordered_by_line_within_a_document(tmp_path):
 
     assert len(messages) == 2
     assert messages[0].startswith("'README.md':3:")
-    assert "MISSING.md" in messages[0]
+    assert "HTML anchor" in messages[0]
     assert messages[1].startswith("'README.md':7:")
     assert "ALSO-MISSING.md" in messages[1]
 

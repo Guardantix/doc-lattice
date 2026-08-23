@@ -12,9 +12,12 @@ grammar the pinned compatibility adapter supports: top-level, column-zero ATX he
 resolve through ``markdown_compat.github_heading_ids``, so a repeated heading is addressable at
 the document-order id GitHub gives it rather than collapsing onto one base slug.
 
-Destinations are read from Markdown link tokens and from the ``href`` of a raw HTML anchor,
-which markdown-it hands over as raw HTML rather than as a link. Both forms resolve through the
-same pipeline, so the gate cannot go green on the one link form it does not model.
+Destinations are read from Markdown link tokens. A destination written as a raw HTML anchor is
+reported rather than resolved. Markdown-it normalizes a Markdown destination -- percent-encoding
+separators and brackets, trimming surrounding whitespace -- and an attribute value arrives with
+none of that done, so resolving one means owning the URL and HTML attribute semantics that
+normalization otherwise supplies. That is a wider contract than this gate takes on; reporting the
+anchor keeps the gap loud rather than leaving the gate green on a link form it does not model.
 """
 
 import sys
@@ -46,6 +49,9 @@ _MARKDOWN_TARGET_SUFFIXES = frozenset(
 # link written with them resolves and this checker has to agree.
 _SINGLE_DOT_SEGMENTS = frozenset({".", "%2e"})
 _DOUBLE_DOT_SEGMENTS = frozenset({"..", ".%2e", "%2e.", "%2e%2e"})
+_HTML_ANCHOR_MESSAGE = (
+    "raw HTML anchor carries a destination this check cannot resolve; write it as a Markdown link"
+)
 _ESCAPING_SOURCE_MESSAGE = "maintained document leaves the repository through a symlink"
 _UNPARSEABLE_SOURCE_MESSAGE = "maintained document could not be parsed for destinations"
 # U+0000 through U+0020: the WHATWG URL Standard's "C0 control or space", which its parser
@@ -130,52 +136,59 @@ def _walk(tokens: list[Token]) -> Iterator[tuple[int, Token]]:
             yield line + offset, child
 
 
-def _destinations_in(tokens: list[Token]) -> list[Link]:
-    """Return every link destination in a parsed document, in document order.
+def _links_in(tokens: list[Token]) -> list[Link]:
+    """Return every Markdown link destination in a parsed document, in document order."""
+    links: list[Link] = []
+    for line, token in _walk(tokens):
+        if token.type != "link_open":
+            continue
+        href = token.attrGet("href")
+        if isinstance(href, str) and href:
+            links.append(Link(href=href, line=line))
+    return links
 
-    Both forms are collected in the one pass, so a Markdown link and a raw anchor interleave
-    by position rather than being grouped by kind and re-sorted afterwards.
 
-    An anchor's line is resolved within its own HTML, so an anchor several lines into a
+def _anchor_lines_in(tokens: list[Token]) -> list[int]:
+    """Return the lines carrying a raw HTML anchor with a destination, in document order.
+
+    Markdown-it emits raw HTML as ``html_block`` and ``html_inline`` rather than as link
+    tokens, so an anchor's destination never reaches ``_links_in``. It is reported rather than
+    resolved, for the reason the module docstring records, and reporting needs the line rather
+    than the destination -- the ``href`` is read only to tell an anchor that carries one from
+    ``<a name="top">``, which names a destination instead.
+
+    An anchor's line is resolved within its own HTML, so one several lines into a
     ``<details>`` block reports that line rather than the line the block opens on.
 
     Args:
         tokens: A parsed token stream.
 
     Returns:
-        One entry per destination, in document order.
+        One 1-based line per raw anchor found.
     """
-    links: list[Link] = []
+    lines: list[int] = []
     for line, token in _walk(tokens):
-        if token.type == "link_open":
-            href = token.attrGet("href")
-            if isinstance(href, str) and href:
-                links.append(Link(href=href, line=line))
-        elif token.type in {"html_block", "html_inline"}:
-            links.extend(
-                Link(href=href, line=line + offset - 1)
-                for offset, href in _anchor_hrefs(token.content)
-            )
-    return links
+        if token.type in {"html_block", "html_inline"}:
+            lines.extend(line + offset - 1 for offset, _ in _anchor_hrefs(token.content))
+    return lines
 
 
 def extract_links(markdown: str) -> list[Link]:
-    """Return every link destination the pinned parser recognizes, in document order.
+    """Return every Markdown link destination the pinned parser recognizes, in document order.
 
-    Destinations come from parsed tokens rather than a text scan, so a reference-style link
-    is followed to its definition and link-like text inside inline or fenced code is not a
-    link at all. Markdown-it classifies a raw ``<a href=...>`` as HTML rather than as a link,
-    so those destinations are read out of the HTML it hands over and reported here too.
+    Destinations come from parsed link tokens rather than a text scan, so a reference-style
+    link is followed to its definition and link-like text inside inline or fenced code is not
+    a link at all. A raw HTML anchor is not a link token and is not returned here; the module
+    docstring records why its destination is reported rather than resolved.
 
     Args:
         markdown: Markdown document text.
 
     Returns:
-        One entry per destination with a non-empty value. A Markdown link reports the line
-        its containing block starts on, which is the only line the token stream records for
-        it; a raw anchor reports its own line.
+        One entry per link with a non-empty destination. The line is where the link's
+        containing block starts, which is what the token stream records.
     """
-    return _destinations_in(_PARSER.parse(markdown))
+    return _links_in(_PARSER.parse(markdown))
 
 
 class _AnchorHrefs(HTMLParser):
@@ -188,8 +201,9 @@ class _AnchorHrefs(HTMLParser):
     ``handle_comment`` and raw-text content to ``handle_data``, neither of which is
     implemented here, so both are ignored by construction rather than by exclusion.
 
-    Parsing also yields the ``href`` itself, so the destination resolves through the same
-    pipeline a Markdown link does rather than being reported as unresolvable.
+    The ``href`` is collected rather than merely counted so that an anchor carrying a
+    destination is told from ``<a name="top">``, which names one. Its value is not resolved:
+    the module docstring records why that stays outside this gate's contract.
     """
 
     def __init__(self) -> None:
@@ -283,14 +297,6 @@ def _contained_parts(base: PurePosixPath, raw_path: str) -> tuple[str, ...] | No
     filesystem is touched at all. It is not the whole containment story: a contained path can
     still be a symlink out of the repository, which ``_escapes_by_symlink`` covers.
 
-    A literal backslash separates segments, because the URL path state treats it as a slash
-    under a special scheme and every destination here resolves under one: ``docs\\GUIDE.md``
-    navigates to ``docs/GUIDE.md`` in a browser. Only a raw HTML anchor can carry one, since
-    markdown-it percent-encodes it in a Markdown destination, and ``%5C`` is deliberately not
-    normalized -- a percent-encoded separator is a literal character inside one segment, the
-    same rule that keeps ``%2F`` out of the structure. Containment is unaffected: a backslash
-    can only descend or pop, and popping past the root still refuses.
-
     Args:
         base: The source document's directory, relative to the repository root.
         raw_path: The still-encoded path component of the destination.
@@ -301,7 +307,7 @@ def _contained_parts(base: PurePosixPath, raw_path: str) -> tuple[str, ...] | No
         because a segment decodes into path structure of its own.
     """
     parts = list(base.parts)
-    for raw_segment in raw_path.replace("\\", "/").split("/"):
+    for raw_segment in raw_path.split("/"):
         folded = raw_segment.lower()
         if raw_segment == "" or folded in _SINGLE_DOT_SEGMENTS:
             continue
@@ -386,22 +392,10 @@ def _is_out_of_scope(parts: SplitResult) -> bool:
     Args:
         parts: The split destination.
 
-    A leading backslash counts as a leading slash. The URL path state reads the two alike in
-    a special scheme, which every destination here resolves under, so ``\\outside.md`` is
-    root-absolute and ``\\\\host/x`` is protocol-relative exactly as their slash spellings
-    are. Judging that here rather than after normalization keeps the authority form from
-    being mistaken for a repository path.
-
     Returns:
-        True for any scheme, for the protocol-relative form, and for a root-absolute path
-        written with either separator.
+        True for any scheme, for the protocol-relative form, and for a root-absolute path.
     """
-    return (
-        bool(parts.scheme)
-        or bool(parts.netloc)
-        or parts.path.startswith("/")
-        or parts.path.startswith("\\")
-    )
+    return bool(parts.scheme) or bool(parts.netloc) or parts.path.startswith("/")
 
 
 def _resolve_target(raw_path: str, document: Path, repo_root: Path) -> Path | None:
@@ -524,10 +518,11 @@ def check_repository_links(repo_root: Path) -> list[str]:
             containment boundary every relative target must stay inside.
 
     Returns:
-        Messages in document order, sources sorted by name. Each names the source document,
-        the line the destination sits on, and the destination as written. A source that leaves
-        the repository carries no line, since it is refused before it is read. An empty list
-        means every relative destination and heading fragment resolves.
+        Messages in document order, sources sorted by name, with unresolvable links and raw
+        HTML anchors interleaved by line rather than grouped by kind. Each names the source
+        document and the line the finding sits on. A source that leaves the repository or
+        cannot be parsed carries no line, since both are refused before their destinations are
+        read. An empty list means every relative destination and heading fragment resolves.
     """
     root = repo_root.resolve()
     cache: dict[Path, frozenset[str]] = {}
@@ -541,7 +536,9 @@ def check_repository_links(repo_root: Path) -> list[str]:
             messages.append(f"{source}: {_ESCAPING_SOURCE_MESSAGE}")
             continue
         try:
-            links = extract_links(document.read_text(encoding="utf-8"))
+            # One parse per document: both kinds of finding read the same token stream.
+            tokens = _PARSER.parse(document.read_text(encoding="utf-8"))
+            links, anchors = _links_in(tokens), _anchor_lines_in(tokens)
         except ValueError:
             # A character reference wider than the interpreter's integer-conversion limit
             # makes the parsers raise rather than answer. Reported and stepped over, so one
@@ -549,10 +546,16 @@ def check_repository_links(repo_root: Path) -> list[str]:
             # unchecked -- the failure the NUL and malformed-authority refusals also close.
             messages.append(f"{source}: {_UNPARSEABLE_SOURCE_MESSAGE}")
             continue
+        found: list[tuple[int, str]] = []
         for link in links:
             message = _link_message(link, document, root, cache)
             if message is not None:
-                messages.append(f"{source}:{link.line}: {message}")
+                found.append((link.line, message))
+        found.extend((line, _HTML_ANCHOR_MESSAGE) for line in anchors)
+        # Stable sort, so a link and an anchor reported on one line keep the order they were
+        # collected in and the two kinds of finding interleave by line rather than by kind.
+        found.sort(key=lambda entry: entry[0])
+        messages.extend(f"{source}:{line}: {message}" for line, message in found)
     return messages
 
 

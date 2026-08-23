@@ -94,11 +94,13 @@ hand-written file, and the diagnostic says so. See **Added** and **Changed** bel
   documents accumulated 36 deep anchor links that a renamed heading would have broken silently.
   Link sources are the sorted root `*.md` files, a target may be any repository-contained
   relative path, and absolute and external destinations stay out of scope. Destinations come from
-  parsed tokens, so reference-style links are followed and link-like text inside code is not
-  a link. A destination written as a raw HTML anchor resolves through the same pipeline:
-  markdown-it classifies it as HTML rather than as a link, so its `href` is read off the parsed
-  HTML, and an anchor several lines into a `<details>` block reports its own line rather than
-  the line the block opens on. Containment is settled twice, once lexically on the destination as
+  parsed link tokens, so reference-style links are followed and link-like text inside code is
+  not a link. A destination written as a raw HTML anchor is reported rather than resolved, since
+  markdown-it normalizes a Markdown destination and an attribute value arrives with none of that
+  done, so resolving one means owning URL and HTML attribute semantics wider than this gate's
+  contract; the anchor is reported at its own line, which for one several lines into a
+  `<details>` block is not the line the block opens on. Containment is settled twice, once
+  lexically on the destination as
   written and once on where the filesystem sends it, so an in-repository symlink keeps working
   while one leaving the repository is refused before its target is opened.
 - Dependabot now watches this repository's GitHub Actions pins. `.github/dependabot.yml` checks the
