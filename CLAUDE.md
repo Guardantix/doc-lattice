@@ -73,8 +73,10 @@ and repository hygiene checks. If a hook changes a file, re-stage it before comm
   Making one a `ProjectError` would give it a code, and `tests/test_error_types.py` requires the
   `ErrorCode` domain to be exactly the codes some type raises, so it would also require a README
   table row for a code nothing can report.
-- Shared string domains use the `Literal` plus `get_args()` plus `frozenset` pattern in
-  `constants.py`. Import those constants instead of duplicating raw values.
+- A string domain that needs both a `Literal` type and a runtime value set keeps one source of
+  truth in `constants.py`: derive the `frozenset` from the type with `get_args()`, and import
+  those declarations instead of duplicating raw values. A domain that needs only the type may
+  stay with the module that owns its semantics.
 - Resolve user-controlled paths with `path_utils.safe_resolve()` at the owning boundary and
   preserve project-root containment. Reconcile destinations and recovery evidence require the
   independent containment checks recorded in [ARCHITECTURE.md](ARCHITECTURE.md).
