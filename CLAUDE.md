@@ -88,9 +88,9 @@ and repository hygiene checks. If a hook changes a file, re-stage it before comm
 - `scripts/check_doc_links.py` resolves every relative Markdown link and `#anchor` in the
   maintained documents, which it takes as the sorted root `*.md` files. A target may be any
   repository-contained relative path, `docs/` staging included; absolute and external
-  destinations are out of scope. Write destinations as Markdown links: a raw HTML anchor is
-  reported rather than resolved, because reading its `href` means parsing HTML and a silent
-  skip would leave the gate green on the one link form it cannot see. Fragments resolve through
+  destinations are out of scope. A destination written as a raw HTML anchor is resolved too:
+  its `href` is read off the parsed HTML markdown-it hands over instead of a link token, so the
+  gate cannot go green on the one link form it does not model. Fragments resolve through
   `markdown_compat.github_heading_ids`, so renaming a heading or moving a file fails the hook
   and the CI code-quality job rather than breaking a deep link silently. Use that helper for
   GitHub heading ids: `github_slug` is a base slug with no deduplication, and `anchor_ids`
