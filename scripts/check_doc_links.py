@@ -280,6 +280,32 @@ def _fragment_message(
     return f"fragment {displayed_fragment} matches no heading in {displayed_target}"
 
 
+def _split_destination(href: str) -> SplitResult | None:
+    """Split a destination, or return None when it carries a malformed authority.
+
+    ``urlsplit`` raises rather than answering for an unparseable authority such as
+    ``http://[`` or ``//[oops]/x``. Only a raw HTML anchor reaches here carrying one, because
+    markdown-it percent-encodes the bracket in a Markdown destination; an unguarded raise
+    would end the run on a traceback and leave every later link in every later document
+    unchecked, which is the failure the percent-encoded NUL refusal already closed once.
+
+    Raising requires parsing an authority, so every destination refused here has a scheme or
+    is protocol-relative, and is external either way. None therefore means the same verdict
+    ``_is_out_of_scope`` would reach: outside this gate's contract, not silently accepted as
+    a repository target.
+
+    Args:
+        href: The destination as written.
+
+    Returns:
+        The split destination, or None when it is not well formed enough to classify.
+    """
+    try:
+        return urlsplit(href)
+    except ValueError:
+        return None
+
+
 def _is_out_of_scope(parts: SplitResult) -> bool:
     """Report whether a destination is external or absolute rather than repository-relative.
 
@@ -384,8 +410,8 @@ def _link_message(
         The diagnostic text without its ``file:line`` prefix, or None.
     """
     href = link.href
-    parts = urlsplit(href)
-    if _is_out_of_scope(parts):
+    parts = _split_destination(href)
+    if parts is None or _is_out_of_scope(parts):
         return None
     # The plain-source view drops the fragment from validation but not the target from
     # existence checking: the file still has to be there for the view to render it.

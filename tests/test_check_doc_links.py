@@ -388,6 +388,25 @@ def test_raw_html_anchor_in_a_block_reports_its_own_line(tmp_path):
     assert "MISSING.md" in message
 
 
+def test_malformed_authority_in_an_anchor_does_not_end_the_run(tmp_path):
+    # urlsplit raises on an unparseable authority. Only a raw anchor can carry one this far,
+    # since markdown-it percent-encodes the bracket, and an unguarded raise would leave every
+    # later document unchecked. AAA.md sorts first, so ZZZ.md is only reached if the run
+    # survives the bad destination.
+    _write(tmp_path, "AAA.md", '# A\n\n<a href="http://[">x</a>\n')
+    _write(tmp_path, "ZZZ.md", "# Z\n\n[later](ALSO-MISSING.md)\n")
+
+    message = _only_message(tmp_path)
+    assert message.startswith("'ZZZ.md':3:")
+    assert "ALSO-MISSING.md" in message
+
+
+def test_malformed_protocol_relative_authority_is_out_of_scope(tmp_path):
+    _write(tmp_path, "README.md", '# Readme\n\n<a href="//[oops]/x">x</a>\n')
+
+    assert check_repository_links(tmp_path) == []
+
+
 def test_external_html_anchor_destination_is_out_of_scope(tmp_path):
     _write(tmp_path, "README.md", '# Readme\n\n<a href="https://example.com/x.md">x</a>\n')
 
