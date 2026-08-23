@@ -24,7 +24,9 @@ Neither of those is a hand assertion. Both are swept against the live tracker: t
 named here against its open set, and every stated order against the blocker relations in both
 directions. That open set is every non-terminal issue carrying this repository's tracker label,
 which is what an item acquires on leaving Triage, at the same time it is given a project. Last
-swept 2026-08-20 against 28 open issues, with the evidence recorded on GTX-213.
+swept 2026-08-20 against 28 open issues, with the evidence recorded on GTX-213. Two entries
+postdate that sweep and are recorded from the changes that made them rather than from it:
+GTX-153's move into 6.0 and GTX-279's filing, both on 2026-08-22. The next sweep subsumes them.
 
 ## 6.0: close the behavior window 5.0 left open
 
@@ -37,22 +39,28 @@ breaking, so the window is open again as a fact rather than by choice, and the n
 Admission is unchanged and still narrow on purpose: an item belongs here only if it is breaking,
 or if it has to be true at the moment a major ships. Everything else waits for 6.x, which is what
 keeps this release from staying open indefinitely. Applying that rule admitted nine here rather
-than three, six of them moved back in from the minor train.
+than three, six of them moved back in from the minor train. Two more were admitted on 2026-08-22:
+GTX-153 moved forward from 7.0 once its direction settled on a breaking refusal rather than a
+Git-root resolution, and GTX-279 was filed because the README pass had already landed when the
+window was held open.
 
-Six of those nine have since landed and wait in `## [Unreleased]` beside GTX-212 and GTX-214:
+Eight of those eleven have since landed and wait in `## [Unreleased]` beside GTX-212 and GTX-214:
 reconcile's lock diagnostics (GTX-238, which GTX-212's own review spawned into this section),
 `PYTHONWARNINGS=error` (GTX-202), the broken stderr pipe (GTX-201), the load-cache write warning
-(GTX-221), the journal's own validation diagnostic (GTX-227), and the codes `init` reports for a
-value it rejects before writing anything (GTX-216). One was canceled rather than worked:
+(GTX-221), the journal's own validation diagnostic (GTX-227), the codes `init` reports for a
+value it rejects before writing anything (GTX-216), the README pass itself (GTX-113, PR
+#301), and `init --print-only` with the nested-scaffold refusal beside it (GTX-153). One was
+canceled rather than worked:
 reconcile's post-load re-parse warning (GTX-200), which the PR that spawned it had already fixed.
-Two are still open -- GTX-113 below, and GTX-213, the sweep this document's inventory now rests
-on, which closes with that sweep and so is not carried below as pending work.
+Two are still open -- GTX-279 below, and GTX-213, the sweep this document's
+inventory now rests on, which closes with that sweep and so is not carried below as pending work.
 
-- Make README describe what 6.0 actually prints and enforces (GTX-113). This still lands last, and
-  it is now unblocked: GTX-216 was the last open issue in front of it, on the rule that the README
-  pass cannot land ahead of the behavior it documents, and it has landed with the rest. All
-  sixteen of GTX-113's blockers are satisfied history -- each either shipped in 5.0.0, waits in
-  `## [Unreleased]`, or was canceled with GTX-200.
+- Make README describe what 6.0 actually prints and enforces at the tag (GTX-279). GTX-113 did
+  this once, and PR #301 landed it, but the window was then held open and behavior has landed
+  since, so the same rule applies again: the README pass cannot land ahead of the behavior it
+  documents, and this one lands last, after anything else admitted before the
+  tag. It audits the `## [Unreleased]` entries merged after GTX-113 rather than repeating it,
+  GTX-153's `--print-only` and nested-scaffold refusal included.
 
 ## 6.x: make the honor-system rules mechanical
 
@@ -111,15 +119,11 @@ cheap.
 
 ## 7.0: the next behavior window
 
-Opened when there is enough batched behavior change to justify a major, not on a schedule. Two
-items sit here today. Each is large, each carries an unresolved decision rather than a known fix,
-and neither should be allowed to hold 6.0 open.
+Opened when there is enough batched behavior change to justify a major, not on a schedule. One
+item sits here today. It is large, it carries an unresolved decision rather than a known fix, and
+it should not be allowed to hold 6.0 open. GTX-153 sat beside it until 2026-08-22, when its
+direction settled and it moved into 6.0 above.
 
-- Decouple fetching `init`'s printed snippets from its directory-sensitive config write, and stop
-  it scaffolding a nested `.doc-lattice.yml` when run from a subdirectory (GTX-153). The
-  print-only half is additive and could be split forward into 6.x if adopters need it sooner;
-  resolving the Git root in the ordinary branch changes zero-config behavior and needs this
-  window.
 - Decide whether doc-lattice tracks its own maintained documents as a lattice (GTX-168). The
   decision is the deliverable and is recorded as an AD either way. GTX-130 lands first, because
   the decline path hands the link-checking question back to it.

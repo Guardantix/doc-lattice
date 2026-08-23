@@ -1,13 +1,17 @@
 """Tests for shared durable filesystem persistence primitives."""
 
+import errno
 import hashlib
+import os
 import stat
 from pathlib import Path
 
 import pytest
 
 from doc_lattice import persistence
+from doc_lattice.error_types import ProjectError
 from doc_lattice.persistence import (
+    DestinationExistsError,
     atomic_create_bytes,
     atomic_replace_bytes,
     durable_unlink,
@@ -348,11 +352,29 @@ def test_atomic_create_bytes_refuses_existing_target_and_cleans_stage(tmp_path: 
     destination.write_bytes(b"original")
     prefix = ".doc.md.create."
 
-    with pytest.raises(FileExistsError):
+    # The benign outcome, and the one the boundary names rather than leaving callers to infer:
+    # the destination was there and no stage was orphaned. Asserted as the specific type, since
+    # `FileExistsError` alone is also what a collision that orphaned its stage raises, and the
+    # two mean opposite things to a caller.
+    with pytest.raises(DestinationExistsError) as caught:
         atomic_create_bytes(destination, b"replacement", prefix=prefix)
 
     assert destination.read_bytes() == b"original"
     assert list(tmp_path.glob(f"{prefix}*.tmp")) == []
+    # Rebuilt from the failed link's own fields, so the rendered message is still the one the
+    # operating system produced rather than a paraphrase of it. Provoked directly rather than
+    # spelled out, since the wording is the platform's to choose.
+    other = tmp_path / "other.md"
+    other.write_bytes(b"other")
+    with pytest.raises(FileExistsError) as raw:
+        os.link(other, destination)
+    assert caught.value.errno == raw.value.errno == errno.EEXIST
+    assert caught.value.strerror == raw.value.strerror
+    # Both filenames survive, so the rendered message keeps its `stage -> destination` shape
+    # rather than naming only the source.
+    assert caught.value.filename2 == str(destination)
+    assert str(caught.value).endswith(f" -> {str(destination)!r}")
+    assert getattr(caught.value, "__notes__", []) == []
 
 
 def test_atomic_create_bytes_preserves_existing_error_when_cleanup_fails(
@@ -381,6 +403,11 @@ def test_atomic_create_bytes_preserves_existing_error_when_cleanup_fails(
     with pytest.raises(FileExistsError) as caught:
         atomic_create_bytes(destination, b"replacement", prefix=prefix)
 
+    # The orphan case keeps the plain type on purpose: the destination did exist, but a stage
+    # was left behind, and that is a real failure whatever collided. Promoting it to
+    # DestinationExistsError would hand the caller a "nothing to do" signal while an orphan sat
+    # on disk, which is the benign branch `init` exits 0 from.
+    assert not isinstance(caught.value, DestinationExistsError)
     assert str(caught.value) == "target exists"
     assert len(link_attempts) == 1
     assert len(cleanup_attempts) == 1
@@ -460,3 +487,27 @@ def test_durable_unlink_removes_artifact_and_syncs_parent(tmp_path: Path, monkey
 
     assert not artifact.exists()
     assert synced == [artifact.parent]
+
+
+def test_destination_exists_error_keeps_the_ancestry_its_callers_classify_on():
+    # Both halves are load-bearing rather than incidental, and neither is visible from the
+    # raise site, so they are pinned here the way `PipeClosed` pins its errno-free ancestry.
+    #
+    # Staying a FileExistsError is what lets this be a subclass at all instead of a return
+    # value: `reconcile_transaction.py` classifies a lost journal-create race by that type in
+    # two places, one of which decides *not* to clean transaction artifacts around a
+    # pre-existing journal. Narrowing the base would silently send that branch to the generic
+    # failure path.
+    #
+    # Staying outside ProjectError is what keeps it from becoming a diagnostic. It is a benign
+    # outcome the caller answers by exiting 0, and `exit_on_project_error` renders anything
+    # deriving from ProjectError as `error (CODE): ...` with exit 2. A ProjectError would also
+    # need its own member of the ErrorCode domain, which `tests/test_error_types.py` requires to
+    # be exactly the set of codes some type raises, and therefore a README table row for a code
+    # no user can ever receive.
+    error = DestinationExistsError(errno.EEXIST, os.strerror(errno.EEXIST))
+
+    assert isinstance(error, FileExistsError)
+    assert isinstance(error, OSError)
+    assert not isinstance(error, ProjectError)
+    assert not issubclass(DestinationExistsError, ProjectError)

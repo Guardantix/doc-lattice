@@ -64,7 +64,15 @@ and repository hygiene checks. If a hook changes a file, re-stage it before comm
   `scripts/check_typing_boundaries.py`. Validate untyped YAML and JSON at those boundaries, then
   pass typed models through the rest of the engine.
 - Custom exceptions extend `ProjectError`, carry a code, and give actionable context. Do not add
-  bare `except Exception` or `except BaseException` catches.
+  bare `except Exception` or `except BaseException` catches. The one exception is a signal type
+  at an I/O boundary whose builtin ancestry is what classifies it: `cli/pipe_policy.py`'s
+  `PipeClosed(BrokenPipeError)` and `persistence.py`'s `DestinationExistsError(FileExistsError)`
+  are matched by Typer's `except OSError` and by `reconcile_transaction.py` respectively, and
+  neither is a diagnostic a user can receive. Such a type stays a builtin subclass, lives with
+  the boundary it serves rather than in `error_types.py`, and pins its ancestry with a test.
+  Making one a `ProjectError` would give it a code, and `tests/test_error_types.py` requires the
+  `ErrorCode` domain to be exactly the codes some type raises, so it would also require a README
+  table row for a code nothing can report.
 - Shared string domains use the `Literal` plus `get_args()` plus `frozenset` pattern in
   `constants.py`. Import those constants instead of duplicating raw values.
 - Resolve user-controlled paths with `path_utils.safe_resolve()` at the owning boundary and

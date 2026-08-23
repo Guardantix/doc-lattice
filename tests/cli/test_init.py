@@ -354,6 +354,29 @@ def test_init_skips_existing_config_but_still_prints(tmp_path: Path, monkeypatch
     assert "'.doc-lattice.yml' already exists, leaving it untouched" in result.stderr
 
 
+def test_init_reports_a_staging_collision_as_a_failure_not_an_existing_config(
+    tmp_path: Path, monkeypatch
+):
+    # The benign branch used to be entered by any note-free FileExistsError, because it asked
+    # whether the stage cleanup had failed rather than whether the destination existed.
+    # `mkstemp` raises exactly that shape after exhausting its candidate names, so a staging
+    # collision was reported to the user as an existing config and exited 0 while nothing had
+    # been written. Staging runs before the link, so this is the seam that reaches the handler
+    # without the destination existing at all.
+    def _collide_in_staging(*_args, **_kwargs) -> Path:
+        raise FileExistsError("no usable temporary file name found")
+
+    monkeypatch.setattr(persistence, "stage_bytes", _collide_in_staging)
+    monkeypatch.chdir(tmp_path)
+
+    result = runner.invoke(app, ["init"])
+
+    assert result.exit_code == 2
+    assert "INIT_PERSISTENCE" in result.stderr
+    assert "already exists, leaving it untouched" not in result.stderr
+    assert not (tmp_path / ".doc-lattice.yml").exists()
+
+
 def test_init_existing_config_with_stage_cleanup_failure_exits_2_and_names_orphan(
     tmp_path: Path, monkeypatch
 ):
@@ -495,3 +518,428 @@ def test_init_crash_during_link_leaves_clean_state(tmp_path: Path, monkeypatch):
     monkeypatch.setattr(os, "link", real_link)
     assert runner.invoke(app, ["init"]).exit_code == 0
     assert (tmp_path / ".doc-lattice.yml").exists()
+
+
+# GTX-153. The two halves are asserted separately on purpose: `--print-only` is additive and is
+# pinned against ordinary output, while the nested refusal changes what an existing zero-config
+# run does and is pinned against the filesystem it declines to touch.
+
+
+def _snapshot(root: Path) -> dict[str, bytes | None]:
+    """Record every path under a directory, with the bytes of each regular file.
+
+    An exit code proves nothing about a read-only path, and neither does a check of the one
+    filename the command would have written: a mode that writes nothing has to be asserted
+    against the whole tree, including a staged temporary it created and removed incompletely.
+    Directories are recorded too, mapped to None, so a directory created or removed with no
+    files in it is still a difference. An emptied one already shows up as its files vanishing.
+
+    Args:
+        root: The directory to walk.
+
+    Returns:
+        Relative POSIX paths mapped to file bytes, or to None for a directory.
+    """
+    return {
+        entry.relative_to(root).as_posix(): None if entry.is_dir() else entry.read_bytes()
+        for entry in sorted(root.rglob("*"))
+    }
+
+
+def test_init_print_only_prints_exactly_what_an_ordinary_run_prints(tmp_path: Path, monkeypatch):
+    # Parity is the whole contract: an adopter re-fetching the pre-commit block on an upgrade
+    # must get the same bytes the scaffolding run prints, or the read-only path is a second
+    # source of truth. Two sibling directories inside the one fixture repository, so both runs
+    # see the same absent remote and resolve the same fallback branch.
+    ordinary_dir = tmp_path / "ordinary"
+    printing_dir = tmp_path / "printing"
+    ordinary_dir.mkdir()
+    printing_dir.mkdir()
+
+    monkeypatch.chdir(ordinary_dir)
+    ordinary = runner.invoke(app, ["init"])
+    monkeypatch.chdir(printing_dir)
+    printed = runner.invoke(app, ["init", "--print-only"])
+
+    assert ordinary.exit_code == 0
+    assert printed.exit_code == 0
+    assert printed.stdout == _legacy_stdout(__version__)
+    assert printed.stdout == ordinary.stdout
+    # The stderr contract is that same narration minus the one line that reports a write. The
+    # branch and its source, the placement instructions, and the baseline guidance all stay.
+    # The oracle is checked before it is used: if the ordinary run ever stops narrating the
+    # write, `replace` becomes a no-op and this assertion quietly degenerates into
+    # `printed.stderr == ordinary.stderr`, which would pass while pinning nothing.
+    assert "wrote '.doc-lattice.yml'\n" in ordinary.stderr
+    assert printed.stderr == ordinary.stderr.replace("wrote '.doc-lattice.yml'\n", "", 1)
+    assert "wrote" not in printed.stderr
+    assert "workflow triggers on branch main (fallback)\n" in printed.stderr
+    assert _EXPECTED_BASELINE_GUIDANCE in " ".join(printed.stderr.split())
+
+
+def test_init_print_only_leaves_the_directory_byte_identical(tmp_path: Path, monkeypatch):
+    before = _snapshot(tmp_path)
+    monkeypatch.chdir(tmp_path)
+
+    result = runner.invoke(app, ["init", "--print-only"])
+
+    assert result.exit_code == 0
+    assert _snapshot(tmp_path) == before
+
+
+def test_init_print_only_never_reaches_the_persistence_boundary(tmp_path: Path, monkeypatch):
+    # The filesystem assertion above cannot distinguish a write that was attempted and undone
+    # from one that never happened, and only the second is what this mode promises.
+    #
+    # Asserted at the effect rather than at the name. Patching `init_command.atomic_create_bytes`
+    # alone would pin only "does not call that module global", which a rebind to
+    # `persistence.atomic_create_bytes(...)` makes vacuous while staying green forever, and which
+    # a write-then-unlink inside the branch satisfies. `os.link` is where a staged file becomes a
+    # real one, so denying it is the same technique
+    # `test_init_crash_during_link_leaves_clean_state` already uses.
+    def refuse(*_args, **_kwargs) -> None:
+        raise AssertionError("--print-only must not reach the write boundary")
+
+    monkeypatch.setattr(init_command, "atomic_create_bytes", refuse)
+    monkeypatch.setattr(os, "link", refuse)
+    monkeypatch.setattr(os, "replace", refuse)
+    monkeypatch.chdir(tmp_path)
+
+    result = runner.invoke(app, ["init", "--print-only"])
+
+    assert result.exit_code == 0
+    assert result.stdout == _legacy_stdout(__version__)
+
+
+def test_init_print_only_honors_the_default_branch_flag(tmp_path: Path, monkeypatch):
+    # The one flag that still has meaning in this mode, so an upgrade can print the workflow it
+    # will actually commit rather than one resolved against the checkout it happened to run in.
+    monkeypatch.chdir(tmp_path)
+
+    result = runner.invoke(app, ["init", "--print-only", "--default-branch", "trunk"])
+
+    assert result.exit_code == 0
+    assert "    branches: [trunk]\n" in result.stdout
+    assert "workflow triggers on branch trunk (--default-branch)\n" in result.stderr
+
+
+def test_init_print_only_rejects_a_branch_outside_the_supported_domain(tmp_path: Path, monkeypatch):
+    # Printing is not a reason to relax the branch policy: a pattern in the filter produces a
+    # workflow that silently gates the wrong pushes, whether or not a config was written.
+    monkeypatch.chdir(tmp_path)
+
+    result = runner.invoke(app, ["init", "--print-only", "--default-branch", "release/*"])
+
+    assert "must be an ASCII Git branch name" in result.stderr
+    _assert_rejected_before_any_write(result, tmp_path)
+
+
+@pytest.mark.parametrize(
+    "flags",
+    [
+        ["--docs-root", "design"],
+        ["--linear-team", "ENG"],
+        ["--docs-root", "design", "--linear-team", "ENG"],
+    ],
+    ids=["docs-root", "linear-team", "both"],
+)
+def test_init_print_only_refuses_the_config_only_flags(tmp_path: Path, monkeypatch, flags):
+    # Both flags feed only the config renderer, and this mode renders no config, so accepting
+    # them would report success for a request nothing acted on. It is a flag combination with no
+    # meaning rather than a value that failed validation, so it stays uncoded, the way
+    # `reconcile --recover` with a selector does. README's error-code table owns that rule.
+    monkeypatch.chdir(tmp_path)
+
+    result = runner.invoke(app, ["init", "--print-only", *flags])
+
+    assert result.exit_code == 2
+    assert result.stdout == ""
+    assert result.stderr == (
+        "error: --print-only cannot be combined with --docs-root or --linear-team\n"
+    )
+    assert "VALIDATION_ERROR" not in result.stderr
+    assert {path.name for path in tmp_path.iterdir()} == {".git"}
+
+
+def test_init_print_only_succeeds_where_an_ordinary_run_is_refused(tmp_path: Path, monkeypatch):
+    # The situation the mode exists for: an adopter in a subdirectory of a configured repository
+    # can still obtain the snippets, and gets exactly the same bytes.
+    (tmp_path / ".doc-lattice.yml").write_text("SENTINEL\n", encoding="utf-8")
+    nested = tmp_path / "docs" / "deep"
+    nested.mkdir(parents=True)
+    monkeypatch.chdir(nested)
+
+    result = runner.invoke(app, ["init", "--print-only"])
+
+    assert result.exit_code == 0
+    assert result.stdout == _legacy_stdout(__version__)
+    assert not (nested / ".doc-lattice.yml").exists()
+    assert (tmp_path / ".doc-lattice.yml").read_text(encoding="utf-8") == "SENTINEL\n"
+
+
+def test_init_refuses_to_scaffold_beneath_an_ancestor_config(tmp_path: Path, monkeypatch):
+    # GTX-153's behavior change. This run used to exit 0 having written a second, nested config
+    # with default settings that no run from the configured root would ever select, because every
+    # lattice-loading command resolves its default config against its own current directory and
+    # never walks up. That is also why the file is not merely inert: a command launched from this
+    # same subdirectory would load it, which makes it a silently divergent second lattice.
+    root_config = tmp_path / ".doc-lattice.yml"
+    root_config.write_text("SENTINEL\n", encoding="utf-8")
+    nested = tmp_path / "docs" / "deep"
+    nested.mkdir(parents=True)
+    monkeypatch.chdir(nested)
+
+    result = runner.invoke(app, ["init"])
+
+    assert result.exit_code == 2
+    assert result.stdout == ""
+    assert result.stderr.startswith("error (VALIDATION_ERROR): ")
+    assert "CONFIG_ERROR" not in result.stderr
+    # The diagnostic has to name the config it found, or the user cannot tell which directory to
+    # run in, and has to name both ways forward from where they are standing.
+    assert format_path_for_display(root_config) in result.stderr
+    assert "--print-only" in result.stderr
+    assert ".doc-lattice.yml here by hand" in result.stderr
+    assert root_config.read_text(encoding="utf-8") == "SENTINEL\n"
+    assert list(nested.iterdir()) == []
+
+
+def test_init_retains_current_directory_behavior_in_a_nested_directory(tmp_path: Path, monkeypatch):
+    # The other half of the pinned behavior: without an ancestor config there is nothing to
+    # collide with, so a subdirectory scaffolds exactly as it always did.
+    nested = tmp_path / "docs" / "deep"
+    nested.mkdir(parents=True)
+    monkeypatch.chdir(nested)
+
+    result = runner.invoke(app, ["init"])
+
+    assert result.exit_code == 0
+    assert (nested / ".doc-lattice.yml").is_file()
+    assert not (tmp_path / ".doc-lattice.yml").exists()
+    assert "wrote '.doc-lattice.yml'" in result.stderr
+
+
+def test_init_still_reports_an_existing_config_here(tmp_path: Path, monkeypatch):
+    # The guard runs only when the target is absent, so the benign already-exists report is
+    # unchanged even at a root that is itself beneath one -- the directory the diagnostic above
+    # tells the user to move to must not then refuse them.
+    outer = tmp_path / "outer"
+    inner = outer / "inner"
+    inner.mkdir(parents=True)
+    (outer / ".doc-lattice.yml").write_text("OUTER\n", encoding="utf-8")
+    (inner / ".doc-lattice.yml").write_text("INNER\n", encoding="utf-8")
+    monkeypatch.chdir(inner)
+
+    result = runner.invoke(app, ["init"])
+
+    assert result.exit_code == 0
+    assert "'.doc-lattice.yml' already exists, leaving it untouched" in result.stderr
+    assert (inner / ".doc-lattice.yml").read_text(encoding="utf-8") == "INNER\n"
+
+
+def test_init_ignores_a_config_outside_the_repository_boundary(tmp_path: Path, monkeypatch):
+    # The bound that keeps an unrelated config from blocking a new project: the invocation
+    # directory is itself a repository root, so nothing above it is in scope at all.
+    (tmp_path / ".doc-lattice.yml").write_text("OUTSIDE\n", encoding="utf-8")
+    inner = tmp_path / "inner"
+    inner.mkdir()
+    (inner / ".git").mkdir()
+    monkeypatch.chdir(inner)
+
+    result = runner.invoke(app, ["init"])
+
+    assert result.exit_code == 0
+    assert (inner / ".doc-lattice.yml").is_file()
+    assert (tmp_path / ".doc-lattice.yml").read_text(encoding="utf-8") == "OUTSIDE\n"
+
+
+def test_init_scaffolds_inside_a_submodule_beneath_a_configured_root(tmp_path: Path, monkeypatch):
+    # A submodule and a linked worktree both record `.git` as a regular file, so a marker test
+    # spelled `is_dir()` would walk straight past this root and refuse a legitimate scaffold.
+    (tmp_path / ".doc-lattice.yml").write_text("OUTER\n", encoding="utf-8")
+    submodule = tmp_path / "vendor" / "library"
+    submodule.mkdir(parents=True)
+    (submodule / ".git").write_text("gitdir: ../../.git/modules/library\n", encoding="utf-8")
+    nested = submodule / "docs"
+    nested.mkdir()
+    monkeypatch.chdir(nested)
+
+    result = runner.invoke(app, ["init"])
+
+    assert result.exit_code == 0
+    assert (nested / ".doc-lattice.yml").is_file()
+
+
+def test_init_finds_the_nearest_ancestor_config_below_the_boundary(tmp_path: Path, monkeypatch):
+    # Two configs in scope: the diagnostic must name the closer one, since that is the directory
+    # whose lattice the user is standing inside.
+    middle = tmp_path / "middle"
+    nested = middle / "nested"
+    nested.mkdir(parents=True)
+    (tmp_path / ".doc-lattice.yml").write_text("ROOT\n", encoding="utf-8")
+    (middle / ".doc-lattice.yml").write_text("MIDDLE\n", encoding="utf-8")
+    monkeypatch.chdir(nested)
+
+    result = runner.invoke(app, ["init"])
+
+    assert result.exit_code == 2
+    assert format_path_for_display(middle / ".doc-lattice.yml") in result.stderr
+    assert format_path_for_display(tmp_path / ".doc-lattice.yml") not in result.stderr
+
+
+def test_ancestor_walk_yields_nothing_without_a_repository_boundary(tmp_path: Path, monkeypatch):
+    # Asserted at the unit rather than through the CLI, because the fixture repository puts a
+    # marker above every temporary directory and the case under test is its absence. Renaming
+    # the marker makes the walk reach the filesystem root, which is what an unbounded scan would
+    # do on a project created under a home directory that happens to hold a stray config. The
+    # answer must be None regardless of what any real ancestor holds.
+    monkeypatch.setattr(init_command, "_REPOSITORY_MARKER", ".doc-lattice-no-such-marker")
+    outer = tmp_path / "outer"
+    nested = outer / "project"
+    nested.mkdir(parents=True)
+    (outer / ".doc-lattice.yml").write_text("STRAY\n", encoding="utf-8")
+
+    assert init_command._find_ancestor_config(nested) is None
+
+
+# GTX-153 review follow-up. The walk's predicates and its behavior when the filesystem cannot
+# answer, which the original change left to `Path.exists()` and therefore left interpreter-
+# dependent. Every test below fails on at least one supported interpreter without the fix.
+
+
+def _stat_denying(target: Path):
+    """Build a `Path.stat` that refuses one exact path and delegates every other.
+
+    Patching `Path.stat` wholesale would break the Git probe and Typer alike, and patching
+    `Path.exists` would test the very call the fix removes. Denying one path is also what makes
+    these tests interpreter-independent: they assert the decision the command makes, not which
+    of the two behaviors the standard library happened to supply.
+
+    Args:
+        target: The path whose stat raises EACCES.
+
+    Returns:
+        A replacement for `Path.stat`.
+    """
+    real = Path.stat
+
+    def fake(self: Path, *args, **kwargs):
+        if self == target:
+            raise PermissionError(errno.EACCES, "Permission denied", str(self))
+        return real(self, *args, **kwargs)
+
+    return fake
+
+
+def test_init_refuses_when_an_ancestor_config_cannot_be_read(tmp_path: Path, monkeypatch):
+    # The blocking defect. `Path.exists()` raises PermissionError on 3.13 and answers False on
+    # 3.14, so this run used to crash with an uncoded `internal error` on one interpreter and,
+    # on the other, silently write the nested config the guard exists to prevent while printing
+    # `wrote`. A guard that guesses is not a guard: an unreadable entry is a coded refusal.
+    ancestor = tmp_path / ".doc-lattice.yml"
+    ancestor.write_text("SENTINEL\n", encoding="utf-8")
+    nested = tmp_path / "docs" / "deep"
+    nested.mkdir(parents=True)
+    monkeypatch.chdir(nested)
+    monkeypatch.setattr(Path, "stat", _stat_denying(ancestor))
+
+    result = runner.invoke(app, ["init"])
+
+    assert result.exit_code == 2
+    assert result.stdout == ""
+    assert result.stderr.startswith("error (INIT_PERSISTENCE): ")
+    assert "internal error" not in result.stderr
+    assert format_path_for_display(ancestor) in result.stderr
+    assert "--print-only" in result.stderr
+    assert not (nested / ".doc-lattice.yml").exists()
+    assert ancestor.read_text(encoding="utf-8") == "SENTINEL\n"
+
+
+def test_init_refuses_when_the_repository_marker_cannot_be_read(tmp_path: Path, monkeypatch):
+    # The same divergence on the other entry the walk reads. An unreadable marker is worse than
+    # an unreadable config, because it decides where the walk stops rather than what it found.
+    marker = tmp_path / ".git"
+    nested = tmp_path / "docs" / "deep"
+    nested.mkdir(parents=True)
+    monkeypatch.chdir(nested)
+    monkeypatch.setattr(Path, "stat", _stat_denying(marker))
+
+    result = runner.invoke(app, ["init"])
+
+    assert result.exit_code == 2
+    assert result.stderr.startswith("error (INIT_PERSISTENCE): ")
+    assert "internal error" not in result.stderr
+    assert format_path_for_display(marker) in result.stderr
+    assert not (nested / ".doc-lattice.yml").exists()
+
+
+def test_init_does_not_let_a_directory_named_like_the_config_skip_the_guard(
+    tmp_path: Path, monkeypatch
+):
+    # `target.exists()` answered True for a directory of that name, so the guard never ran and
+    # the run reported `already exists, leaving it untouched` while nothing was configured here
+    # and the ancestor governed. A directory configures nothing.
+    ancestor = tmp_path / ".doc-lattice.yml"
+    ancestor.write_text("SENTINEL\n", encoding="utf-8")
+    nested = tmp_path / "docs" / "deep"
+    nested.mkdir(parents=True)
+    (nested / ".doc-lattice.yml").mkdir()
+    monkeypatch.chdir(nested)
+
+    result = runner.invoke(app, ["init"])
+
+    assert result.exit_code == 2
+    assert result.stderr.startswith("error (VALIDATION_ERROR): ")
+    assert "already exists" not in result.stderr
+    assert format_path_for_display(ancestor) in result.stderr
+
+
+def test_init_ignores_an_ancestor_directory_named_like_the_config(tmp_path: Path, monkeypatch):
+    # The same predicate on the other side of the walk: a directory of that name above the
+    # invocation directory must not refuse a legitimate scaffold on the strength of its name.
+    (tmp_path / ".doc-lattice.yml").mkdir()
+    nested = tmp_path / "docs" / "deep"
+    nested.mkdir(parents=True)
+    monkeypatch.chdir(nested)
+
+    result = runner.invoke(app, ["init"])
+
+    assert result.exit_code == 0
+    assert (nested / ".doc-lattice.yml").is_file()
+    assert "wrote '.doc-lattice.yml'" in result.stderr
+
+
+def test_init_treats_a_dangling_repository_marker_as_a_boundary(tmp_path: Path, monkeypatch):
+    # A symlinked `.git` is what a relocated worktree leaves behind, and Git still recognizes the
+    # root when the link's target has gone. `exists()` follows the link and answered False, so
+    # the walk went straight past this root and refused on a config outside it.
+    (tmp_path / ".doc-lattice.yml").write_text("OUTSIDE\n", encoding="utf-8")
+    inner = tmp_path / "inner"
+    inner.mkdir()
+    (inner / ".git").symlink_to(tmp_path / "no-such-gitdir")
+    monkeypatch.chdir(inner)
+
+    result = runner.invoke(app, ["init"])
+
+    assert result.exit_code == 0
+    assert (inner / ".doc-lattice.yml").is_file()
+    assert (tmp_path / ".doc-lattice.yml").read_text(encoding="utf-8") == "OUTSIDE\n"
+
+
+def test_init_print_only_prints_over_an_existing_config_without_touching_it(
+    tmp_path: Path, monkeypatch
+):
+    # The headline upgrade case, and the one every other print-only test misses: the adopter
+    # re-fetching the pre-commit block is standing in their own configured repository root. The
+    # already-exists narration must stay absent, because nothing was attempted.
+    config = tmp_path / ".doc-lattice.yml"
+    config.write_text("SENTINEL\n", encoding="utf-8")
+    monkeypatch.chdir(tmp_path)
+
+    result = runner.invoke(app, ["init", "--print-only"])
+
+    assert result.exit_code == 0
+    assert result.stdout == _legacy_stdout(__version__)
+    assert config.read_text(encoding="utf-8") == "SENTINEL\n"
+    assert "already exists" not in result.stderr
+    assert "wrote" not in result.stderr

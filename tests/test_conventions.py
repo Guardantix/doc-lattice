@@ -1814,7 +1814,7 @@ _MODULE_PATH_BEARING_NAMES: dict[str, frozenset[str]] = {
     # `target.name` is `DEFAULT_CONFIG_NAME`, a compile-time constant that carries no
     # user-controlled byte, so classifying it buys no safety today; it is classified anyway
     # because the alternative is unenforceable. Display exemptions are keyed by (module,
-    # qualified function, expression), and `register_init.init` interpolated `target.name`
+    # qualified function, expression), and `_scaffold_config` interpolated `target.name`
     # three times -- once as a staged-file prefix and twice into human messages -- so a single
     # exemption written for the prefix would have covered both human sinks with it. The prefix
     # now spells `DEFAULT_CONFIG_NAME` directly instead, leaving `target` classified and every
@@ -1826,7 +1826,13 @@ _MODULE_PATH_BEARING_NAMES: dict[str, frozenset[str]] = {
     # `--linear-team` together, so it holds a path only half the time, and routing a team key
     # through a path helper would use it against its own contract. That message keeps `!r`, and
     # what makes it control-safe is that it is the rejection of a control-bearing value.
-    "cli/commands/init.py": frozenset({"root", "target", "target_name"}),
+    #
+    # GTX-153 added `ancestor`: the configuration file a bounded parent walk found above the
+    # invocation directory, which the nested-scaffold refusal names. It is scoped here rather
+    # than added globally because the word reads as a graph or tree position everywhere else in
+    # this project, and `reconcile_transaction.py` already scopes its own ancestor-directory
+    # spelling as `current` for the same reason.
+    "cli/commands/init.py": frozenset({"ancestor", "root", "target", "target_name"}),
 }
 
 # Individual expressions inside scanned modules that are not paths despite the name. Every entry
@@ -2142,6 +2148,7 @@ def _display_guard_scan(
         ("config.py", "config_path"),
         ("config.py", "entry"),
         ("config.py", "safe"),
+        ("cli/commands/init.py", "ancestor"),
         ("cli/commands/init.py", "root"),
         ("cli/commands/init.py", "target"),
         ("cli/commands/init.py", "target_name"),

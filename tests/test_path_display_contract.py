@@ -37,7 +37,12 @@ from doc_lattice import (
 )
 from doc_lattice.cache import CacheFile
 from doc_lattice.cache import store as cache_store
-from doc_lattice.cli.commands.init import _init_persistence_error, _validate_init_flags
+from doc_lattice.cli.commands.init import (
+    _init_persistence_error,
+    _nested_scaffold_error,
+    _validate_init_flags,
+    _walk_unreadable_error,
+)
 from doc_lattice.cli.commands.reconcile import (
     _print_reconcile_lines,
     _recovery_json_payload,
@@ -1001,6 +1006,32 @@ class TestInitSinks:
     def test_scaffold_write_failure_names_the_config_file(self):
         error = _init_persistence_error(DEFAULT_CONFIG_NAME, OSError("publication failed"))
         assert format_path_for_display(DEFAULT_CONFIG_NAME) in str(error)
+
+    def test_nested_scaffold_refusal_names_the_ancestor_config(self, tmp_path: Path):
+        # GTX-153's sink, and the first `init` message naming a path the user chose rather than
+        # a compile-time constant: the ancestor comes from a directory walk, so a hostile
+        # directory name reaches this diagnostic for real.
+        ancestor = tmp_path / HOSTILE / DEFAULT_CONFIG_NAME
+
+        error = _nested_scaffold_error(ancestor)
+
+        message = str(error)
+        assert format_path_for_display(ancestor) in message
+        leaked = sorted(char for char in CONTROLS if char in message)
+        assert not leaked, f"the refusal leaked raw control bytes {leaked!r}: {message!r}"
+
+    def test_unreadable_walk_entry_refusal_names_the_entry(self, tmp_path: Path):
+        # The walk's other diagnostic, and a path from the same directory scan, so it takes the
+        # same treatment: the entry it could not stat is named, and a hostile directory name
+        # reaches this message exactly as it reaches the nested refusal beside it.
+        entry = tmp_path / HOSTILE / DEFAULT_CONFIG_NAME
+
+        error = _walk_unreadable_error(entry, PermissionError("Permission denied"))
+
+        message = str(error)
+        assert format_path_for_display(entry) in message
+        leaked = sorted(char for char in CONTROLS if char in message)
+        assert not leaked, f"the refusal leaked raw control bytes {leaked!r}: {message!r}"
 
 
 def test_machine_channels_are_deliberately_untouched(tmp_path: Path):

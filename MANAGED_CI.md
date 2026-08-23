@@ -597,9 +597,11 @@ because a release that changes generated output carries a `### Migration` subsec
 Print the target release's blocks and replace yours whole:
 
 ```bash
-uvx --python 3.13 --from doc-lattice==NEW_VERSION doc-lattice init --default-branch main
+uvx --python 3.13 --from doc-lattice==NEW_VERSION doc-lattice init --print-only --default-branch main
 ```
 
+`--print-only` writes nothing, so this retrieval cannot touch the config you already have and
+carries no precondition about which directory you run it in.
 Carry `--default-branch main` here for the same reason step 1 does. An upgrade that omits it is
 resolved against whatever `origin/HEAD` the checkout you happen to run it in has cached, so the
 same release can print a workflow gating a different branch on two machines, and replacing a
@@ -609,7 +611,7 @@ Replace the pre-commit block and `.github/workflows/doc-lattice.yml` with the pr
 rather than hand-editing their pinned versions. The blocks carry generated structure beyond the
 pins, so bumping only the pins silently keeps an outdated shape.
 
-Plain `init` cannot regenerate the Linear workflow, so replace that one from this document at the
+No `init` mode regenerates the Linear workflow, so replace that one from this document at the
 target release: open `MANAGED_CI.md` for the release you are moving to and copy its step 2 block
 whole, then reapply your repository identity. Do not bump only the `doc-lattice==` pin. For the
 same reason the ordinary workflow is replaced whole, this workflow's structure and action pins can

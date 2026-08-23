@@ -244,7 +244,7 @@ Contributor commands, gates, and the full verification set live in
 | `reconcile [ID] [--ref REF] [--all] [--dry-run] [--recover] [--format human\|json]` | Durably set `seen` for selected edges as one transaction, preview read-only with `--dry-run`, or recover an interrupted transaction with `--recover`. | 2 on tool error, conflict, lock contention, or persistence/recovery failure |
 | `graph [--format mermaid\|dot\|json]` | Emit the edge graph as Mermaid, DOT, or JSON. | 2 on tool error (including an unrecognized `--format`) |
 | `linear [TARGET] [--from ID] [--exit-code] [--warn-exit] [--format human\|json]` | Report tickets shipped against a spec that has since drifted (needs `LINEAR_API_KEY`). | 1 with `--exit-code` on DANGER/BLOCKED (or WARNING too under `--warn-exit`), 2 on tool error |
-| `init [--docs-root ...] [--linear-team KEY] [--default-branch NAME]` | Scaffold `.doc-lattice.yml` and print the `.gitignore`, pre-commit, and GitHub Actions blocks to install by hand. | 2 on tool error |
+| `init [--docs-root ...] [--linear-team KEY] [--default-branch NAME] [--print-only]` | Scaffold `.doc-lattice.yml` and print the `.gitignore`, pre-commit, and GitHub Actions blocks to install by hand. With `--print-only`, print the same three blocks and write nothing. | 2 on tool error |
 
 `check` and `lint` gate by default, exiting 1 when they find drift or an authority inversion.
 `impact`, `reconcile`, `graph`, and `init` are informational and exit 0 on success, so wiring
@@ -258,6 +258,32 @@ The lattice-loading commands `check`, `lint`, `impact`, `reconcile`, `graph`, an
 behavior and does not require Git: it reads local Git state only to guess the workflow's default
 branch, and falls back when that read finds nothing.
 Run `uv run doc-lattice <command> --help` for the full flag list.
+
+The three printed blocks are hand-maintained artifacts you re-fetch on every upgrade, so
+`--print-only` gets them without any chance of a write. It prints byte-for-byte what an ordinary
+run prints, its only meaningful flag is `--default-branch`, and combining it with `--docs-root` or
+`--linear-team` is a usage error rather than a silently ignored request, because those two feed
+only the config this mode does not render.
+
+Because `init` writes into the current directory and every lattice-loading command selects its
+config from *its* current directory, a run from a subdirectory of a repository whose root is
+already configured refuses rather than scaffolding a second, nested config. That nested file
+would not be inert: commands run from that subdirectory would load it, while every run from the
+configured directory carried on reading the original, which is a silently divergent second
+lattice rather than a harmless extra file. The diagnostic names the configuration it found and
+points at both ways forward: run `init` in that directory, or pass `--print-only` here. A deliberately nested lattice is still supported
+and is one hand-written file, since the exact bytes `init` writes are printed under
+[Configuration](#configuration) below. The refusal is bounded to the repository: the search walks
+up from the current directory to the nearest `.git` entry, inclusive, so a config above your
+checkout never blocks a new project, and a submodule or nested repository under a configured root
+scaffolds normally. That boundary is a filesystem check rather than a Git query, because `init`
+has no Git prerequisite; under `GIT_DIR`, `GIT_CEILING_DIRECTORIES`, or
+`GIT_DISCOVERY_ACROSS_FILESYSTEM` it can therefore disagree with Git's own idea of where the
+repository begins. The cost of that is one refusal too many or one too few, never a file written
+in the wrong place, because the boundary bounds only the refusal and never selects a destination.
+An entry the search cannot read at all is outside that trade: rather than assume it away, `init`
+declines with `INIT_PERSISTENCE` and names the entry, since whether you are standing inside an
+already-configured lattice is not something to guess at in either direction.
 
 Pass `--indent N` with JSON output on `check`, `lint`, `impact`, or `linear` to pretty-print the
 JSON with `N` spaces per level. JSON output is selected uniformly by `--format json`; `--indent`
@@ -831,7 +857,7 @@ your `.pre-commit-config.yaml` for you. Print the block from the target release 
 against the one you checked in:
 
 ```bash
-uvx --python 3.13 --from doc-lattice==NEW_VERSION doc-lattice init
+uvx --python 3.13 --from doc-lattice==NEW_VERSION doc-lattice init --print-only
 ```
 
 Replace your whole block with the printed one instead of hand-editing the pinned version in its
@@ -842,18 +868,21 @@ Replacing the block does not need reactivation, because the installed hook reads
 `.pre-commit-config.yaml` on every commit rather than baking it in. An installation that never
 activated in the first place still has to; see [Enabling the gates](#enabling-the-gates).
 
-Run this from the directory that holds your existing `.doc-lattice.yml`, normally the repository
-root. Plain `init` resolves that file against the current directory rather than the Git root, so
-a run from a subdirectory does not see your config and scaffolds a second, nested one carrying
-default settings. From the right directory the run is safe against an existing install: `init`
-writes `.doc-lattice.yml` only when it is absent, and otherwise reports that the config already
-exists, leaves it untouched, and prints.
+`--print-only` writes nothing at all, so this retrieval carries no directory precondition: run it
+from anywhere in your checkout, including a subdirectory. Dropping the flag turns the same command
+back into scaffolding, which does have one. Plain `init` resolves `.doc-lattice.yml` against the
+current directory rather than the Git root, so run it from the directory that holds your existing
+config, normally the repository root. From there the run is safe against an existing install:
+`init` writes `.doc-lattice.yml` only when it is absent, and otherwise reports that the config
+already exists, leaves it untouched, and prints. From a subdirectory it refuses with exit 2 rather
+than scaffolding a nested config; nothing is written either way, and the diagnostic names the
+directory to run in.
 
 ### Ordinary installs
 
-The same `init` run also prints the GitHub Actions workflow. Diff it against your checked-in
-`.github/workflows/doc-lattice.yml`, replace the file with the printed version, and commit it
-together with the refreshed pre-commit block.
+The same `init --print-only` run also prints the GitHub Actions workflow. Diff it against your
+checked-in `.github/workflows/doc-lattice.yml`, replace the file with the printed version, and
+commit it together with the refreshed pre-commit block.
 
 The printed workflow's trigger branch is resolved per run, so pass `--default-branch` with the
 branch you actually gate on to make the upgrade reproducible rather than dependent on the local
@@ -862,7 +891,7 @@ against your workflow before committing the replacement.
 
 ### Recipe installs
 
-Take the pre-commit block and the ordinary workflow from the plain `init` run above, passing
+Take the pre-commit block and the ordinary workflow from the `init --print-only` run above, passing
 `--default-branch main` as the recipe does at install time, since a recipe installation is pinned
 to `main` throughout and an omitted flag resolves the trigger against whatever `origin/HEAD` the
 checkout you ran it in has cached. Then replace your Linear workflow whole from the target
@@ -945,14 +974,21 @@ documented migration surface.
 | `RECONCILE_IN_PROGRESS` | A reconcile could not establish or keep an exclusive claim on the project root: either another process already holds the lock, so the run refuses rather than writing alongside it, or the directory the run locked is no longer the one at that path, because the project root was renamed, replaced, or removed while the run held it. Every mutating step revalidates the claim first, so that second case refuses before writing anything. |
 | `RECONCILE_CONFLICT` | A reconcile destination's bytes changed between validation and the write, so the transaction was refused and rolled back rather than applied over an edit it never read. |
 | `RECONCILE_PERSISTENCE` | A reconcile transaction could not be durably written, its rollback could not be completed, or `--recover` could not safely finish an interrupted one. It also covers lock setup failing and a platform with no POSIX advisory locking. Wherever there is a transaction to recover, the message names the recovery step to run; the rest describe the condition without one. |
-| `INIT_PERSISTENCE` | `init` could not write `.doc-lattice.yml` into the working directory. |
+| `INIT_PERSISTENCE` | `init` could not write `.doc-lattice.yml` into the working directory, or could not read an entry it has to check before writing one. |
 | `WARNING_AS_ERROR` | A warning filter (`PYTHONWARNINGS=error`, or `-W error`) turned an advisory into an exception, ending a run that would otherwise have continued past it. |
 
 The `init` inputs checked before anything is written, all of them `VALIDATION_ERROR`, are a
 `--docs-root` or `--linear-team` that is empty or carries a control character, a `--docs-root`
-that is absolute or contains `..`, a `--linear-team` that is not a Linear team key, and a
+that is absolute or contains `..`, a `--linear-team` that is not a Linear team key, a
 `--default-branch` outside the supported branch-name domain, including a name the local
-`origin/HEAD` probe discovered rather than one you typed.
+`origin/HEAD` probe discovered rather than one you typed, and the invocation directory itself when
+it holds no config but an ancestor inside the same repository does. That last one is the directory
+read as an input rather than a value you typed, which is why it reports the same code as the
+others: it is checked in the same place, before anything is written.
+
+`--print-only` combined with `--docs-root` or `--linear-team` is *not* in that list. It is a
+command-shape failure, so like `reconcile --recover` with a selector it prints an uncoded
+`error: ...` and exits 2 with no code to match on.
 
 `UNKNOWN` is deliberately absent. It is the base default that every typed error overrides, and no
 production path raises an error carrying it, so it is not a diagnostic you can receive.
