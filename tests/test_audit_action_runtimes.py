@@ -459,6 +459,25 @@ class _FailsOnceThenWrites:
         self._stream.flush()
 
 
+class _AsciiOnly:
+    """A text stream that refuses non-ASCII, the way a console under an ASCII encoding does.
+
+    `TextIOWrapper.write` raises `UnicodeEncodeError` when its encoding cannot carry the text,
+    and that is a `ValueError`. Reproducing the mechanism rather than injecting a hand-built
+    exception is what keeps this honest about the failure it names.
+    """
+
+    def __init__(self, stream):
+        self._stream = stream
+
+    def write(self, text: str) -> int:
+        text.encode("ascii")
+        return self._stream.write(text)
+
+    def flush(self) -> None:
+        self._stream.flush()
+
+
 def _two_findings_api():
     """Return a transport over a run whose single job carries two deprecation annotations."""
     return _fake_api(
@@ -539,6 +558,33 @@ def test_a_failed_step_summary_write_never_masks_a_finding(tmp_path, monkeypatch
     captured = capsys.readouterr()
     assert "Build release distributions: warning: .github:2:" in captured.err
     assert _REPORT_FAILED in captured.err
+
+
+def test_a_summary_the_stream_cannot_encode_is_a_failure_not_a_finding(
+    tmp_path, monkeypatch, capsys
+):
+    # `UnicodeEncodeError` is a `ValueError`, not an `OSError`, so a guard on `OSError` alone
+    # would let it escape as an exit-1 traceback -- the findings code -- on a run that found
+    # nothing. Workflow names, branch names, and annotation text are all upstream text, and a
+    # stream under an ASCII encoding cannot carry any of it.
+    summary_path = tmp_path / "step-summary.md"
+    monkeypatch.setenv("GITHUB_STEP_SUMMARY", str(summary_path))
+    fetch, _calls = _fake_api(
+        jobs=[_job_payload(1, "Tests (3.13)")],
+        annotations={1: [_annotation_payload("warning", _CACHE_MESSAGE)]},
+        run={**_RUN_PAYLOAD, "head_branch": "feature/café"},
+    )
+    monkeypatch.setattr(sys, "stdout", _AsciiOnly(sys.stdout))
+    monkeypatch.setattr(sys, "stderr", _AsciiOnly(sys.stderr))
+
+    code = main(["--repository", _REPOSITORY, "--run-id", str(_RUN_ID)], fetch)
+
+    assert code == 2
+    # The file is opened as UTF-8, so only the console channel is lost.
+    assert "café" in summary_path.read_text(encoding="utf-8")
+    # `UnicodeEncodeError` renders the offending character escaped, so the diagnostic is pure
+    # ASCII and still reaches a stream that has just refused the summary.
+    assert _REPORT_FAILED in capsys.readouterr().err
 
 
 def test_a_failed_audit_diagnostic_exits_two_rather_than_on_a_traceback(monkeypatch, capsys):

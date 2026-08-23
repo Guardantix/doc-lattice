@@ -56,6 +56,12 @@ _NO_FINDINGS = "No deprecation annotations."
 # Worded exactly as `scripts/check_action_pin_correspondence.py` words it, so the two audits read
 # the same way in a log when either one's report is what failed.
 _REPORT_FAILED = "the report could not be written"
+# How a reporting write fails for reasons that are not the audit's answer. `OSError` is the disk
+# or the path. `UnicodeEncodeError` is a stream whose encoding cannot carry the text: every field
+# the summary renders -- workflow name, branch, job name, annotation message -- is upstream text,
+# and a console under an ASCII encoding raises rather than writing it. It is a `ValueError`, so
+# guarding `OSError` alone would let exactly the inversion this guard exists to prevent back in.
+_REPORT_FAILURES = (OSError, UnicodeEncodeError)
 
 
 class AuditError(RuntimeError):
@@ -478,10 +484,11 @@ def _guarded_write(write: Callable[[], None]) -> bool:
     """Attempt one reporting write, and report whether it took.
 
     A write here can fail for the ordinary reasons any write can -- a full runner disk, a
-    ``GITHUB_STEP_SUMMARY`` path that is not writable -- and letting that ``OSError`` escape would
-    end the run on a traceback carrying the interpreter's exit 1, which is this script's *finding*
-    code. A clean audit would then report as a deprecated runtime. So the write is guarded and its
-    failure is answered in the exit code instead, by the caller.
+    ``GITHUB_STEP_SUMMARY`` path that is not writable, a stream whose encoding cannot carry
+    upstream annotation text -- and letting that escape would end the run on a traceback carrying
+    the interpreter's exit 1, which is this script's *finding* code. A clean audit would then
+    report as a deprecated runtime. So the write is guarded and its failure is answered in the
+    exit code instead, by the caller.
 
     This is one write rather than the whole report because the two callers report different
     things. `emit` composes it per channel so that a channel that fails costs only itself, while
@@ -492,14 +499,14 @@ def _guarded_write(write: Callable[[], None]) -> bool:
         write: The write to attempt, taking no arguments.
 
     Returns:
-        True when the write took, False when it raised ``OSError``.
+        True when the write took, False when it failed for one of `_REPORT_FAILURES`.
     """
     try:
         write()
-    except OSError as error:
+    except _REPORT_FAILURES as error:
         # Suppressed rather than raised: this is the report of a failed report, so the channel it
         # would travel on may be the one already known to be unreliable. The exit code carries it.
-        with contextlib.suppress(OSError):
+        with contextlib.suppress(*_REPORT_FAILURES):
             print(f"::error::infrastructure failure: {_REPORT_FAILED}: {error}", file=sys.stderr)
         return False
     return True
