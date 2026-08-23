@@ -398,10 +398,18 @@ mislabeled pin to every adopter.
 ### A red `Action runtime audit` run
 
 `Action runtime audit` runs after every completed CI or Claude Code run and reads that run's job
-annotations through the API. A red `audit` job means the runner told one of those jobs that an
-action it executed targets a deprecated runtime. The job summary names the source workflow, the job
-that carried the annotation, the action and SHA the annotation named, and its text. Read the summary
-first: the failure line alone does not say which pin is at fault.
+annotations through the API. Read the job summary before the failure line, because a red `audit` job
+reports two different things and only one of them is about an action:
+
+| Result | What it means | What to do |
+|--------|---------------|------------|
+| `finding` | The runner told one of the source run's jobs that an action it executed targets a deprecated runtime | The version bump below, on the action the summary names |
+| `failure` | The audit could not be performed or its report could not be written: authentication, rate limit, transport, an unreadable payload, or a write that failed | Nothing about the pins. Re-dispatch, and look at the `::error` line the log carries |
+
+The exit codes carry the same split, 1 for a finding and 2 for a failure, and a finding wins when
+both happen in one run. On a finding the summary names the source workflow, the job that carried the
+annotation, the action and SHA the annotation named, and its text: the failure line alone does not
+say which pin is at fault.
 
 It is a notice, not a pull-request check. A `workflow_run` workflow runs on the default branch and
 does not attach to the run that triggered it, so nothing is blocked and no branch turns red.
@@ -416,9 +424,9 @@ gh workflow run "Action runtime audit" -f run_id=<run-id>
 gh run list --workflow "Action runtime audit"
 ```
 
-The fix is a version bump rather than a workflow change. Find the newest release of the action the
-summary names and take it through the procedure above: the open Dependabot pull request if there is
-one, or the same coupled edit by hand for a `shipped-pins` action if there is not.
+Resolving a finding is a version bump rather than a workflow change. Find the newest release of the
+action the summary names and take it through the procedure above: the open Dependabot pull request
+if there is one, or the same coupled edit by hand for a `shipped-pins` action if there is not.
 
 ### A red `Action pin correspondence` run
 
