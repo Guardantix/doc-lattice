@@ -474,6 +474,63 @@ def test_an_encoded_space_still_names_a_file_that_ends_in_one(tmp_path):
     assert check_repository_links(tmp_path) == []
 
 
+def test_backslash_separates_segments_in_a_raw_href(tmp_path):
+    # The URL path state reads a backslash as a slash under a special scheme, so this
+    # navigates to docs/GUIDE.md in a browser and the gate has to agree.
+    _write(tmp_path, "README.md", '# Readme\n\n<a href="docs\\GUIDE.md">x</a>\n')
+    _write(tmp_path, "docs/GUIDE.md", "# Guide\n")
+
+    assert check_repository_links(tmp_path) == []
+
+
+def test_backslash_climbing_out_is_still_refused(tmp_path):
+    # Containment is unaffected by the separator: a backslash pops exactly like a slash and
+    # popping past the root still refuses.
+    _write(tmp_path, "README.md", '# Readme\n\n<a href="..\\..\\outside.md">x</a>\n')
+
+    message = _only_message(tmp_path)
+    assert "does not resolve inside the repository" in message
+
+
+def test_leading_backslash_is_out_of_scope(tmp_path):
+    # Read as a leading slash, so this is root-absolute rather than a repository path.
+    _write(tmp_path, "README.md", '# Readme\n\n<a href="\\outside.md">x</a>\n')
+
+    assert check_repository_links(tmp_path) == []
+
+
+def test_doubled_leading_backslash_is_out_of_scope(tmp_path):
+    # The protocol-relative form written with backslashes. Judged before normalization, so
+    # the authority is not mistaken for a repository path called evil.com.
+    _write(tmp_path, "README.md", '# Readme\n\n<a href="\\\\evil.com\\x">x</a>\n')
+
+    assert check_repository_links(tmp_path) == []
+
+
+def test_percent_encoded_backslash_is_not_a_separator(tmp_path):
+    # A percent-encoded separator is a literal character inside one segment, the same rule
+    # that keeps %2F out of the structure, so this names a file with a backslash in it.
+    _write(tmp_path, "README.md", '# Readme\n\n<a href="docs%5CGUIDE.md">x</a>\n')
+    _write(tmp_path, "docs/GUIDE.md", "# Guide\n")
+
+    message = _only_message(tmp_path)
+    assert "does not resolve inside the repository" in message
+
+
+def test_anchor_repeated_inside_a_link_title_reports_its_own_line(tmp_path):
+    # A link's title is source text with no child of its own. Without stepping over it the
+    # search matches the copy inside the title and reports the anchor on line 1.
+    _write(
+        tmp_path,
+        "README.md",
+        '[x](GUIDE.md "<a href=MISSING.md>")\n<a href=MISSING.md>y</a>\n',
+    )
+    _write(tmp_path, "GUIDE.md", "# Guide\n")
+
+    message = _only_message(tmp_path)
+    assert message.startswith("'README.md':2:")
+
+
 def test_external_html_anchor_destination_is_out_of_scope(tmp_path):
     _write(tmp_path, "README.md", '# Readme\n\n<a href="https://example.com/x.md">x</a>\n')
 

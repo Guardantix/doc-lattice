@@ -61,6 +61,23 @@ class Link:
     line: int
 
 
+def _skip_past(content: str, cursor: int, text: object) -> int:
+    """Advance the cursor past source text a token carries in an attribute, not as a child.
+
+    Args:
+        content: The parent inline token's raw source.
+        cursor: The current position within it.
+        text: The attribute value to step over, if it is a non-empty string present ahead.
+
+    Returns:
+        The position after that text, or the cursor unchanged when it is not found.
+    """
+    if not isinstance(text, str) or not text:
+        return cursor
+    index = content.find(text, cursor)
+    return cursor if index < 0 else index + len(text)
+
+
 def _walk(tokens: list[Token]) -> Iterator[tuple[int, Token]]:
     """Yield every token with the 1-based line its containing block starts on.
 
@@ -88,6 +105,11 @@ def _walk(tokens: list[Token]) -> Iterator[tuple[int, Token]]:
             continue
         cursor = 0
         for child in token.children:
+            # A link's title is source text with no child of its own, so nothing else moves
+            # the cursor past it and a later fragment repeated inside one would be matched
+            # there instead of at its own position.
+            if child.type == "link_open":
+                cursor = _skip_past(token.content, cursor, child.attrGet("title"))
             # A child whose content is not a verbatim slice -- a code span with its newline
             # folded to a space, text with an entity decoded -- is simply not found, and the
             # cursor waits for the next child that does re-synchronize it.
@@ -253,6 +275,14 @@ def _contained_parts(base: PurePosixPath, raw_path: str) -> tuple[str, ...] | No
     filesystem is touched at all. It is not the whole containment story: a contained path can
     still be a symlink out of the repository, which ``_escapes_by_symlink`` covers.
 
+    A literal backslash separates segments, because the URL path state treats it as a slash
+    under a special scheme and every destination here resolves under one: ``docs\\GUIDE.md``
+    navigates to ``docs/GUIDE.md`` in a browser. Only a raw HTML anchor can carry one, since
+    markdown-it percent-encodes it in a Markdown destination, and ``%5C`` is deliberately not
+    normalized -- a percent-encoded separator is a literal character inside one segment, the
+    same rule that keeps ``%2F`` out of the structure. Containment is unaffected: a backslash
+    can only descend or pop, and popping past the root still refuses.
+
     Args:
         base: The source document's directory, relative to the repository root.
         raw_path: The still-encoded path component of the destination.
@@ -263,7 +293,7 @@ def _contained_parts(base: PurePosixPath, raw_path: str) -> tuple[str, ...] | No
         because a segment decodes into path structure of its own.
     """
     parts = list(base.parts)
-    for raw_segment in raw_path.split("/"):
+    for raw_segment in raw_path.replace("\\", "/").split("/"):
         folded = raw_segment.lower()
         if raw_segment == "" or folded in _SINGLE_DOT_SEGMENTS:
             continue
@@ -348,10 +378,22 @@ def _is_out_of_scope(parts: SplitResult) -> bool:
     Args:
         parts: The split destination.
 
+    A leading backslash counts as a leading slash. The URL path state reads the two alike in
+    a special scheme, which every destination here resolves under, so ``\\outside.md`` is
+    root-absolute and ``\\\\host/x`` is protocol-relative exactly as their slash spellings
+    are. Judging that here rather than after normalization keeps the authority form from
+    being mistaken for a repository path.
+
     Returns:
-        True for any scheme, for the protocol-relative form, and for a root-absolute path.
+        True for any scheme, for the protocol-relative form, and for a root-absolute path
+        written with either separator.
     """
-    return bool(parts.scheme) or bool(parts.netloc) or parts.path.startswith("/")
+    return (
+        bool(parts.scheme)
+        or bool(parts.netloc)
+        or parts.path.startswith("/")
+        or parts.path.startswith("\\")
+    )
 
 
 def _resolve_target(raw_path: str, document: Path, repo_root: Path) -> Path | None:
