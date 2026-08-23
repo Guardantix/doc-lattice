@@ -10,11 +10,17 @@ _ROOT = Path(__file__).resolve().parents[1]
 _SCRIPT = run_path(str(_ROOT / "scripts" / "check_doc_links.py"))
 check_repository_links = _SCRIPT["check_repository_links"]
 maintained_documents = _SCRIPT["maintained_documents"]
-extract_links = _SCRIPT["extract_links"]
+_links_in = _SCRIPT["_links_in"]
+_PARSER = _SCRIPT["_PARSER"]
 _anchor_hrefs = _SCRIPT["_anchor_hrefs"]
 _split_destination = _SCRIPT["_split_destination"]
 
 _SCRIPT_PATH = "scripts/check_doc_links.py"
+
+
+def _links(markdown: str) -> list:
+    """Return the links of a Markdown string, for tests that drive the scan from text."""
+    return _links_in(_PARSER.parse(markdown))
 
 
 def _write(root: Path, name: str, text: str) -> None:
@@ -503,6 +509,38 @@ def test_an_unparseable_document_does_not_end_the_run(tmp_path):
     assert messages[1].startswith("'ZZZ.md':3:")
 
 
+def test_an_undecodable_source_does_not_end_the_run(tmp_path):
+    # The read is inside the same refusal: UnicodeDecodeError is a ValueError, so a root
+    # document that will not decode is reported rather than ending the run on a traceback.
+    (tmp_path / "AAA.md").write_bytes(b"# A\n\xff\xfe\x00binary\n")
+    _write(tmp_path, "ZZZ.md", "# Z\n\n[later](ALSO-MISSING.md)\n")
+
+    messages = check_repository_links(tmp_path)
+
+    assert len(messages) == 2
+    assert messages[0] == "'AAA.md': maintained document could not be parsed for destinations"
+    assert messages[1].startswith("'ZZZ.md':3:")
+
+
+def test_an_unreadable_target_is_reported_rather_than_raised(tmp_path):
+    # A target is read for its heading ids outside the source refusal, and the target set is
+    # the wider of the two: any repository-contained path, staging included. Without the same
+    # guard there, a fragment on an undecodable target ends the run and leaves ZZZ.md
+    # unchecked.
+    _write(tmp_path, "README.md", "# Readme\n\n[x](docs/BIN.md#nope)\n")
+    (tmp_path / "docs").mkdir()
+    (tmp_path / "docs" / "BIN.md").write_bytes(b"# T\n\xff\xfe\x00binary\n")
+    _write(tmp_path, "ZZZ.md", "# Z\n\n[later](ALSO-MISSING.md)\n")
+
+    messages = check_repository_links(tmp_path)
+
+    assert len(messages) == 2
+    assert (
+        messages[0] == "'README.md':3: link target 'docs/BIN.md' could not be read for its headings"
+    )
+    assert messages[1].startswith("'ZZZ.md':3:")
+
+
 def test_html_anchor_without_an_href_is_not_reported(tmp_path):
     # A bare <a name="..."> names a destination rather than carrying one, so there is nothing
     # to verify and nothing to complain about.
@@ -594,6 +632,32 @@ def test_anchor_inside_a_script_block_is_not_reported(tmp_path):
     )
 
     assert check_repository_links(tmp_path) == []
+
+
+def test_raw_text_state_does_not_carry_across_a_block_boundary(tmp_path):
+    # A known limit, pinned rather than fixed. A blank line ends the type-6 ``html_block`` at
+    # ``<script>``, so markdown-it emits the opening tag as a block and the string literal as a
+    # paragraph of ``html_inline`` children. Each token gets its own parser, the CDATA mode the
+    # opening tag entered is lost, and the literal is read as a live anchor.
+    #
+    # Carrying one parser across the whole document would close it, and would also make
+    # ``getpos()`` cumulative over the fed text, which is what reports an anchor at its own
+    # line inside a ``<details>`` block. The trade buys an unreachable case -- GitHub strips
+    # ``<script>`` from rendered Markdown, so such a block is already inert in the only place
+    # these documents are read -- at the cost of a working one, and the failure is a loud false
+    # positive rather than the silent truncation this gate exists to prevent. Should the
+    # attribution question ever be settled, this test is the one that says so.
+    _write(
+        tmp_path,
+        "README.md",
+        "# Readme\n\n<details>\n<script>\n\nvar s = '<a href=\"MISSING.md\">';\n"
+        "</script>\n</details>\n",
+    )
+
+    assert check_repository_links(tmp_path) == [
+        "'README.md':6: raw HTML anchor carries a destination this check cannot resolve; "
+        "write it as a Markdown link"
+    ]
 
 
 def test_directory_target_is_accepted(tmp_path):
@@ -717,14 +781,14 @@ def test_staged_docs_are_not_link_sources_but_may_be_targets(tmp_path):
     assert check_repository_links(tmp_path) == []
 
 
-def test_extract_links_reports_the_line_of_the_containing_block():
-    links = extract_links("# Title\n\npara\n\nSee [a](one.md)\nand [b](two.md)\n")
+def test_links_are_reported_at_the_line_of_the_containing_block():
+    links = _links("# Title\n\npara\n\nSee [a](one.md)\nand [b](two.md)\n")
 
     assert [(link.href, link.line) for link in links] == [("one.md", 5), ("two.md", 5)]
 
 
-def test_extract_links_ignores_an_empty_destination():
-    assert extract_links("[a]()\n") == []
+def test_a_link_with_an_empty_destination_is_ignored():
+    assert _links("[a]()\n") == []
 
 
 def test_repository_maintained_documents_have_no_broken_links():

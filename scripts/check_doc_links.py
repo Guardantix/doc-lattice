@@ -21,7 +21,6 @@ anchor keeps the gap loud rather than leaving the gate green on a link form it d
 """
 
 import sys
-from collections.abc import Iterator
 from dataclasses import dataclass
 from html.parser import HTMLParser
 from pathlib import Path, PurePosixPath, PureWindowsPath
@@ -68,13 +67,12 @@ class Link:
     line: int
 
 
-def _walk(tokens: list[Token]) -> Iterator[tuple[int, Token]]:
-    """Yield every token with the 1-based line its containing block starts on.
+def _block_line(token: Token) -> int:
+    """Return the 1-based line a block token starts on.
 
-    Flattening block tokens and their inline children into one sequence keeps the scan a
-    single loop and the line-attribution rule in one place. Markdown-it records no source
-    position for an inline child, so a child reports the line its containing block starts on,
-    which is the only line the token stream has for it.
+    The one place the line-attribution rule lives, because both kinds of finding answer to it.
+    Markdown-it records no source position for an inline child, so a child is reported at the
+    line its containing block starts on, which is the only line the token stream has for it.
 
     Locating a child by searching the parent's raw source was tried and withdrawn. It is a
     heuristic, not a position: a child's content is only sometimes a verbatim slice of the
@@ -84,64 +82,16 @@ def _walk(tokens: list[Token]) -> Iterator[tuple[int, Token]]:
     line that is sometimes wrong.
 
     Args:
-        tokens: A parsed token stream.
+        token: A token from a parsed stream.
 
-    Yields:
-        Each block token followed by its inline children, in document order.
+    Returns:
+        The token's own start line, or 1 for a token the parser gave no source map.
     """
-    for token in tokens:
-        line = token.map[0] + 1 if token.map is not None else 1
-        yield line, token
-        if token.type == "inline" and token.children is not None:
-            for child in token.children:
-                yield line, child
+    return token.map[0] + 1 if token.map is not None else 1
 
 
 def _links_in(tokens: list[Token]) -> list[Link]:
-    """Return every Markdown link destination in a parsed document, in document order."""
-    links: list[Link] = []
-    for line, token in _walk(tokens):
-        if token.type != "link_open":
-            continue
-        href = token.attrGet("href")
-        if isinstance(href, str) and href:
-            links.append(Link(href=href, line=line))
-    return links
-
-
-def _anchor_lines_in(tokens: list[Token]) -> list[int]:
-    """Return the lines carrying a raw HTML anchor with a destination, in document order.
-
-        Markdown-it emits raw HTML as ``html_block`` and ``html_inline`` rather than as link
-        tokens, so an anchor's destination never reaches ``_links_in``. It is reported rather than
-        resolved, for the reason the module docstring records, and reporting needs the line rather
-        than the destination -- the ``href`` is read only to tell an anchor that carries one from
-        ``<a name="top">``, which names a destination instead.
-
-    An anchor in an ``html_block`` is located within that block's own HTML, so one several
-        lines into a ``<details>`` block reports that line rather than the line the block opens
-        on. An inline anchor reports its containing block's line, which is the only line the token
-        stream records for it.
-
-        Args:
-            tokens: A parsed token stream.
-
-        Returns:
-            One 1-based line per raw anchor found.
-    """
-    lines: list[int] = []
-    for token in tokens:
-        line = token.map[0] + 1 if token.map is not None else 1
-        if token.type == "html_block":
-            lines.extend(line + offset - 1 for offset, _ in _anchor_hrefs(token.content))
-        elif token.type == "inline" and token.children is not None:
-            fragments = [c.content for c in token.children if c.type == "html_inline"]
-            lines.extend(line for _ in _anchor_hrefs(*fragments))
-    return lines
-
-
-def extract_links(markdown: str) -> list[Link]:
-    """Return every Markdown link destination the pinned parser recognizes, in document order.
+    """Return every Markdown link destination in a parsed document, in document order.
 
     Destinations come from parsed link tokens rather than a text scan, so a reference-style
     link is followed to its definition and link-like text inside inline or fenced code is not
@@ -149,13 +99,58 @@ def extract_links(markdown: str) -> list[Link]:
     docstring records why its destination is reported rather than resolved.
 
     Args:
-        markdown: Markdown document text.
+        tokens: A parsed token stream.
 
     Returns:
-        One entry per link with a non-empty destination. The line is where the link's
-        containing block starts, which is what the token stream records.
+        One entry per link with a non-empty destination, at its containing block's line.
     """
-    return _links_in(_PARSER.parse(markdown))
+    links: list[Link] = []
+    for token in tokens:
+        if token.type != "inline" or token.children is None:
+            continue
+        line = _block_line(token)
+        for child in token.children:
+            if child.type != "link_open":
+                continue
+            href = child.attrGet("href")
+            if isinstance(href, str) and href:
+                links.append(Link(href=href, line=line))
+    return links
+
+
+def _anchor_lines_in(tokens: list[Token]) -> list[int]:
+    """Return the lines carrying a raw HTML anchor with a destination, in document order.
+
+    Markdown-it emits raw HTML as ``html_block`` and ``html_inline`` rather than as link
+    tokens, so an anchor's destination never reaches ``_links_in``. It is reported rather than
+    resolved, for the reason the module docstring records, and reporting needs the line rather
+    than the destination -- the ``href`` is read only to tell an anchor that carries one from
+    ``<a name="top">``, which names a destination instead.
+
+    An anchor in an ``html_block`` is located within that block's own HTML, so one several
+    lines into a ``<details>`` block reports that line rather than the line the block opens
+    on. An inline anchor reports its containing block's line, which is the only line the token
+    stream records for it.
+
+    Args:
+        tokens: A parsed token stream.
+
+    Returns:
+        One 1-based line per raw anchor found.
+    """
+    lines: list[int] = []
+    for token in tokens:
+        if token.type == "html_block":
+            line = _block_line(token)
+            lines.extend(line + offset - 1 for offset, _ in _anchor_hrefs(token.content))
+        elif token.type == "inline" and token.children is not None:
+            fragments = [c.content for c in token.children if c.type == "html_inline"]
+            # Guarded rather than fed unconditionally: an inline token carrying no raw HTML at
+            # all is every ordinary paragraph, heading and list item in the document, and each
+            # would otherwise build and close an HTML parser that has nothing to read.
+            if fragments:
+                lines.extend(_block_line(token) for _ in _anchor_hrefs(*fragments))
+    return lines
 
 
 class _AnchorHrefs(HTMLParser):
@@ -305,10 +300,31 @@ def _contained_parts(base: PurePosixPath, raw_path: str) -> tuple[str, ...] | No
     return tuple(parts)
 
 
-def _heading_ids(document: Path, cache: dict[Path, frozenset[str]]) -> frozenset[str]:
-    """Return the addressable GitHub heading ids of a Markdown document, memoized."""
+def _heading_ids(document: Path, cache: dict[Path, frozenset[str]]) -> frozenset[str] | None:
+    """Return the addressable GitHub heading ids of a Markdown document, memoized.
+
+    A target is read here rather than where the sources are, so it needs the same refusal the
+    sources have: a document that will not decode as UTF-8, or that carries a character
+    reference wider than the interpreter's integer-conversion limit, raises ``ValueError``
+    instead of answering. Left unguarded that ends the run on a traceback and leaves every
+    later link in every later document unchecked -- and a target is the wider set of the two,
+    since it may be any repository-contained path rather than a root ``*.md`` file.
+
+    A failed read is not memoized, because nothing is learned to memoize; the same target
+    reached from a second link is read again and refused again.
+
+    Args:
+        document: The Markdown target whose heading ids are wanted.
+        cache: Heading ids already read, keyed by target path.
+
+    Returns:
+        The target's addressable heading ids, or None when it could not be read for them.
+    """
     if document not in cache:
-        headings = extract_headings(document.read_text(encoding="utf-8"))
+        try:
+            headings = extract_headings(document.read_text(encoding="utf-8"))
+        except ValueError:
+            return None
         cache[document] = frozenset(github_heading_ids(headings))
     return cache[document]
 
@@ -325,9 +341,12 @@ def _fragment_message(
     fragment carries whatever the destination percent-encoded, so ``#%1b`` would otherwise put
     a live ESC on stderr. See AD-34.
     """
-    if fragment in _heading_ids(target, cache):
-        return None
+    heading_ids = _heading_ids(target, cache)
     displayed_target = format_path_for_display(target.relative_to(repo_root).as_posix())
+    if heading_ids is None:
+        return f"link target {displayed_target} could not be read for its headings"
+    if fragment in heading_ids:
+        return None
     displayed_fragment = format_path_for_display("#" + fragment)
     return f"fragment {displayed_fragment} matches no heading in {displayed_target}"
 
@@ -502,9 +521,10 @@ def check_repository_links(repo_root: Path) -> list[str]:
     Returns:
         Messages in document order, sources sorted by name, with unresolvable links and raw
         HTML anchors interleaved by line rather than grouped by kind. Each names the source
-        document and the line the finding sits on. A source that leaves the repository or
-        cannot be parsed carries no line, since both are refused before their destinations are
-        read. An empty list means every relative destination and heading fragment resolves.
+        document and the line the finding sits on. A source that leaves the repository, or
+        that will not decode or parse, carries no line, since all of those are refused before
+        their destinations are read. An empty list means every relative destination and
+        heading fragment resolves.
     """
     root = repo_root.resolve()
     cache: dict[Path, frozenset[str]] = {}
@@ -522,9 +542,10 @@ def check_repository_links(repo_root: Path) -> list[str]:
             tokens = _PARSER.parse(document.read_text(encoding="utf-8"))
             links, anchors = _links_in(tokens), _anchor_lines_in(tokens)
         except ValueError:
-            # A character reference wider than the interpreter's integer-conversion limit
-            # makes the parsers raise rather than answer. Reported and stepped over, so one
-            # document's content cannot end the run and leave every later document
+            # Two causes, both spelled ``ValueError``: bytes that will not decode as UTF-8,
+            # and a character reference wider than the interpreter's integer-conversion limit,
+            # which makes the parsers raise rather than answer. Reported and stepped over, so
+            # one document's content cannot end the run and leave every later document
             # unchecked -- the failure the NUL and malformed-authority refusals also close.
             messages.append(f"{source}: {_UNPARSEABLE_SOURCE_MESSAGE}")
             continue
