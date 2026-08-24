@@ -99,6 +99,77 @@ def test_third_duplicate_heading_beyond_the_document_is_still_rejected(tmp_path)
     assert "fixed-2" in message
 
 
+def test_setext_heading_resolves_as_a_fragment_target(tmp_path):
+    # GitHub gives a setext heading an id like any other, so a link to one renders and works.
+    # Resolving fragments against the section-identity grammar failed it on a correct link.
+    _write(tmp_path, "README.md", "# Readme\n\n[x](GUIDE.md#overview)\n")
+    _write(tmp_path, "GUIDE.md", "Overview\n========\n\nbody\n")
+
+    assert check_repository_links(tmp_path) == []
+
+
+def test_indented_atx_heading_resolves_as_a_fragment_target(tmp_path):
+    _write(tmp_path, "README.md", "# Readme\n\n[x](GUIDE.md#indented)\n")
+    _write(tmp_path, "GUIDE.md", "# Guide\n\n   ## Indented\n\nbody\n")
+
+    assert check_repository_links(tmp_path) == []
+
+
+def test_heading_inside_a_list_item_resolves_as_a_fragment_target(tmp_path):
+    _write(tmp_path, "README.md", "# Readme\n\n[x](GUIDE.md#nested)\n")
+    _write(tmp_path, "GUIDE.md", "# Guide\n\n- item\n\n  ## Nested\n\nbody\n")
+
+    assert check_repository_links(tmp_path) == []
+
+
+def test_heading_inside_a_block_quote_resolves_as_a_fragment_target(tmp_path):
+    _write(tmp_path, "README.md", "# Readme\n\n[x](GUIDE.md#quoted)\n")
+    _write(tmp_path, "GUIDE.md", "# Guide\n\n> ## Quoted\n>\n> body\n")
+
+    assert check_repository_links(tmp_path) == []
+
+
+def test_mixed_form_duplicates_are_suffixed_in_document_order(tmp_path):
+    # The widened inventory changes which heading owns the base slug: the setext 'Overview'
+    # comes first, so the ATX one it used to be the only candidate for moves to 'overview-1'.
+    _write(
+        tmp_path,
+        "README.md",
+        "# Readme\n\n[a](GUIDE.md#overview) [b](GUIDE.md#overview-1)\n",
+    )
+    _write(tmp_path, "GUIDE.md", "Overview\n========\n\ntext\n\n# Overview\n\nbody\n")
+
+    assert check_repository_links(tmp_path) == []
+
+
+def test_mixed_form_duplicate_beyond_the_document_is_still_rejected(tmp_path):
+    _write(tmp_path, "README.md", "# Readme\n\n[c](GUIDE.md#overview-2)\n")
+    _write(tmp_path, "GUIDE.md", "Overview\n========\n\ntext\n\n# Overview\n\nbody\n")
+
+    message = _only_message(tmp_path)
+    assert "overview-2" in message
+
+
+def test_four_space_indented_heading_is_a_code_block_and_not_a_target(tmp_path):
+    # Four spaces makes it an indented code block, which GitHub renders as text rather than a
+    # heading. Widening to one-to-three spaces must not walk past that boundary.
+    _write(tmp_path, "README.md", "# Readme\n\n[x](GUIDE.md#code)\n")
+    _write(tmp_path, "GUIDE.md", "# Guide\n\n    # Code\n\nbody\n")
+
+    message = _only_message(tmp_path)
+    assert "code" in message
+
+
+def test_heading_inside_a_fence_is_not_a_fragment_target(tmp_path):
+    # A fence suppresses headings on GitHub too, so a fenced '# Fenced' is sample text with no
+    # id. The inventory reads parsed heading tokens rather than scanning lines, so it agrees.
+    _write(tmp_path, "README.md", "# Readme\n\n[x](GUIDE.md#fenced)\n")
+    _write(tmp_path, "GUIDE.md", "# Guide\n\n```markdown\n# Fenced\n```\n")
+
+    message = _only_message(tmp_path)
+    assert "fenced" in message
+
+
 def test_missing_target_does_not_also_report_a_missing_anchor(tmp_path):
     _write(tmp_path, "README.md", "# Readme\n\n[gone](MISSING.md#whatever).\n")
 

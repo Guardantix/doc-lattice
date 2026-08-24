@@ -7,6 +7,7 @@ the local state adapter builds only the source maps those rules require. Generat
 """
 
 import re
+from collections.abc import Iterable
 from dataclasses import dataclass
 
 from markdown_it import MarkdownIt
@@ -238,6 +239,32 @@ class _Slugger:
         return result
 
 
+def github_ids_for_texts(texts: Iterable[str]) -> list[str]:
+    """Return the GitHub heading id for each raw heading text, in document order.
+
+    The one owner of the pinned document-order collision rule, shared by both heading
+    inventories rather than reimplemented per caller. ``github_heading_ids`` delegates here
+    for section identity; ``scripts/check_doc_links.py`` feeds it the heading texts of its
+    own link-target inventory, whose grammar is deliberately wider than ``Heading`` describes.
+    Sharing the primitive is what keeps a fragment resolving to the same id the engine would
+    assign wherever both inventories see the same heading.
+
+    Text rather than ``Heading`` is the parameter because ``Heading`` is one *supported* ATX
+    heading with a source line and an explicit anchor, and a setext or nested heading is
+    neither. Manufacturing one to reach the collision rule would put values outside that
+    type's stated domain into the adapter; a raw text is all the rule reads.
+
+    Args:
+        texts: Raw heading content in document order.
+
+    Returns:
+        Ids positionally aligned with ``texts``, deduplicated in document order by the pinned
+        github-slugger collision rule.
+    """
+    slugger = _Slugger()
+    return [slugger.slug(text) for text in texts]
+
+
 def github_heading_ids(headings: list[Heading]) -> list[str]:
     """Return the GitHub heading id each heading would render with.
 
@@ -266,8 +293,7 @@ def github_heading_ids(headings: list[Heading]) -> list[str]:
         Ids positionally aligned with ``headings``, deduplicated in document order by the
         pinned github-slugger collision rule.
     """
-    slugger = _Slugger()
-    return [slugger.slug(heading.text) for heading in headings]
+    return github_ids_for_texts(heading.text for heading in headings)
 
 
 def anchor_ids(headings: list[Heading]) -> list[str]:

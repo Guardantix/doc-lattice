@@ -11,6 +11,7 @@ from doc_lattice.markdown_compat import (
     anchor_ids,
     extract_headings,
     github_heading_ids,
+    github_ids_for_texts,
     github_slug,
     strip_heading_anchor,
 )
@@ -42,6 +43,33 @@ def test_github_heading_ids_match_golden_fixture(case: dict[str, object]) -> Non
     headings = extract_headings(str(case["body"]))
 
     assert github_heading_ids(headings) == case["github_ids"]
+
+
+@pytest.mark.parametrize("case", CASES, ids=lambda case: case["name"])
+def test_github_ids_for_texts_matches_github_heading_ids(case: dict[str, object]) -> None:
+    # The two heading inventories share this one collision implementation: section identity
+    # reaches it through Heading.text, and the link gate feeds it raw texts from a wider
+    # grammar Heading does not describe. Pinning the delegation is what keeps a heading both
+    # inventories see resolving to the same id rather than to two independently drifting ones.
+    headings = extract_headings(str(case["body"]))
+
+    ids = github_ids_for_texts(heading.text for heading in headings)
+    assert ids == github_heading_ids(headings)
+
+
+def test_github_ids_for_texts_dedupes_across_heading_forms_in_document_order() -> None:
+    # The gate's inventory mixes forms extract_headings never yields together -- a setext
+    # 'Overview' ahead of '# Overview' takes the base slug and moves the ATX heading to
+    # 'overview-1'. The rule reads document order over raw text and knows nothing of form.
+    assert github_ids_for_texts(["Overview", "Overview", "Overview"]) == [
+        "overview",
+        "overview-1",
+        "overview-2",
+    ]
+
+
+def test_github_ids_for_texts_empty_is_empty() -> None:
+    assert github_ids_for_texts([]) == []
 
 
 def test_github_heading_ids_do_not_substitute_explicit_markers() -> None:

@@ -7,10 +7,21 @@ be any repository-contained relative path, staged documents included. Containmen
 ends: a source that leaves the repository through a symlink is reported rather than read.
 
 Absolute and external destinations are out of scope and skipped, as are image destinations.
-Heading fragments are validated only against Markdown targets, and only against the heading
-grammar the pinned compatibility adapter supports: top-level, column-zero ATX headings. Fragments
-resolve through ``markdown_compat.github_heading_ids``, so a repeated heading is addressable at
-the document-order id GitHub gives it rather than collapsing onto one base slug.
+Heading fragments are validated only against Markdown targets, against a link-target heading
+inventory this gate builds for itself. That inventory is deliberately not doc-lattice's section
+identity: it reads the same pinned full CommonMark parse the destinations come from, so it sees
+every heading form GitHub assigns an id to -- setext, ATX indented one to three spaces, and
+headings nested in a list item or a block quote -- where the addressable subset sees only
+column-zero ATX. A link to one of the wider forms renders and resolves on GitHub, so failing it
+here would fail a correct link; widening the adapter instead would change which sections the
+engine sees, which is a cached-derivation change this gate has no business forcing. The two
+inventories share one slug and collision implementation, ``markdown_compat.github_ids_for_texts``,
+so a repeated heading is addressable at the document-order id GitHub gives it rather than
+collapsing onto one base slug, and a heading both inventories see resolves to the same id in both.
+
+Rendered inline heading text is the one form still out of reach: heading ids are slugged from raw
+inline source on both sides, so ``## [Guide](target.md)`` yields ``guidetargetmd`` against
+GitHub's ``guide``.
 
 Destinations are read from Markdown link tokens. A destination written as a raw HTML anchor is
 reported rather than resolved. Markdown-it normalizes a Markdown destination -- percent-encoding
@@ -29,7 +40,7 @@ from urllib.parse import SplitResult, parse_qs, unquote, urlsplit
 from markdown_it import MarkdownIt
 from markdown_it.token import Token
 
-from doc_lattice.markdown_compat import extract_headings, github_heading_ids
+from doc_lattice.markdown_compat import MARKDOWN_COMPAT_VERSION, github_ids_for_texts
 from doc_lattice.path_utils import format_path_for_display
 
 _REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -300,8 +311,51 @@ def _contained_parts(base: PurePosixPath, raw_path: str) -> tuple[str, ...] | No
     return tuple(parts)
 
 
+def _heading_texts(tokens: list[Token]) -> list[str]:
+    """Return the raw source text of every heading a rendered document assigns an id to.
+
+    The gate's own link-target inventory, in document order, taken from the full parse rather
+    than from ``markdown_compat.extract_headings``. The module docstring records why the two
+    are separate; the mechanical difference is that this stream is the unrestricted CommonMark
+    one, so a setext heading, an ATX heading indented one to three spaces, and a heading nested
+    in a list item or a block quote all arrive here as ordinary heading tokens. A heading a
+    fence or an indented code block swallows is not a heading token in either, so neither
+    inventory invents an id for sample text.
+
+    The text is the raw inline source with any ATX closing sequence already removed, which is
+    what ``Heading.text`` carries too -- so the shared slugger reads the same input on both
+    sides for any heading both see.
+
+    Args:
+        tokens: A parsed token stream.
+
+    Returns:
+        One raw heading text per heading, in document order.
+
+    Raises:
+        RuntimeError: If the pinned parser returns a malformed heading token pair. Silently
+            skipping one would report a heading that is plainly there as matching no fragment,
+            which is the exact diagnostic this gate exists to make trustworthy.
+    """
+    texts: list[str] = []
+    for index, token in enumerate(tokens):
+        if token.type != "heading_open":
+            continue
+        content = tokens[index + 1] if index + 1 < len(tokens) else None
+        if content is None or content.type != "inline":
+            msg = f"{MARKDOWN_COMPAT_VERSION} returned a malformed heading token pair"
+            raise RuntimeError(msg)
+        texts.append(content.content)
+    return texts
+
+
 def _heading_ids(document: Path, cache: dict[Path, frozenset[str]]) -> frozenset[str] | None:
-    """Return the addressable GitHub heading ids of a Markdown document, memoized.
+    """Return the link-target GitHub heading ids of a Markdown document, memoized.
+
+    "Link-target" rather than "addressable": these are the ids a GitHub render of the document
+    would carry, which is what a deep link resolves against, and a wider set than the
+    addressable sections doc-lattice derives from the same file. ``_heading_texts`` owns that
+    difference.
 
     A target is read here rather than where the sources are, so it needs the same refusal the
     sources have: a document that will not decode as UTF-8, or that carries a character
@@ -318,14 +372,14 @@ def _heading_ids(document: Path, cache: dict[Path, frozenset[str]]) -> frozenset
         cache: Heading ids already read, keyed by target path.
 
     Returns:
-        The target's addressable heading ids, or None when it could not be read for them.
+        The target's link-target heading ids, or None when it could not be read for them.
     """
     if document not in cache:
         try:
-            headings = extract_headings(document.read_text(encoding="utf-8"))
+            texts = _heading_texts(_PARSER.parse(document.read_text(encoding="utf-8")))
         except ValueError:
             return None
-        cache[document] = frozenset(github_heading_ids(headings))
+        cache[document] = frozenset(github_ids_for_texts(texts))
     return cache[document]
 
 
