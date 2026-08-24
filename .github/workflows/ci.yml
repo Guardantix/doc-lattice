@@ -343,6 +343,49 @@ jobs:
         run: uv build
       - name: Validate distributions
         run: uvx --from twine twine check dist/*
+      # GTX-239: the only run of the built distribution that happens while publication can still
+      # be stopped. The `release` job's pre-tag smoke installs from the Git source and omits
+      # `--default-branch`, and Twine validation reads metadata without executing anything, so
+      # without this step nothing exercises MANAGED_CI.md step 1's command shape against what
+      # adopters actually install. It sits between validation and the upload on purpose: `publish`
+      # consumes the artifact the next step produces, so a failure here leaves that artifact
+      # unbuilt and there is nothing to publish. It cannot move into `publish`, which GitHub holds
+      # for environment approval before any of its steps start -- a smoke there would run after
+      # the decision it exists to inform, inside the job that holds the OIDC token.
+      - name: Smoke-test the built distribution
+        env:
+          # Nothing ambient may satisfy this run. An installed `uv tool` copy of doc-lattice is
+          # reachable from the default tool directory, and a green smoke drawn from one would say
+          # nothing about the wheel this job built; pointing the lookup at a path this run owns
+          # makes the provenance observable rather than inferred.
+          UV_TOOL_DIR: ${{ runner.temp }}/release-smoke-tools
+        run: |
+          # The provider, resolved absolute before anything changes directory: the invocation
+          # below runs from a throwaway directory, where a relative `dist/` names nothing. The
+          # probe is also the sole-wheel gate -- a second wheel makes this two lines, which is
+          # not a file -- so the run can only ever be the one distribution this job built.
+          WHEEL="$(ls -1 "${GITHUB_WORKSPACE}"/dist/*.whl)"
+          test -f "${WHEEL}"
+          out="$(mktemp)"
+          err="$(mktemp)"
+          # `init` is the whole subject of the step, so its output is the evidence; capturing it
+          # to files would otherwise hide it from a failed release run.
+          trap 'cat "${err}" >&2; cat "${out}"' EXIT
+          workdir="$(mktemp -d)"
+          test ! -e "${workdir}/.doc-lattice.yml"
+          ( cd "${workdir}" && uvx --python 3.13 --from "${WHEEL}" doc-lattice init --default-branch main ) >"${out}" 2>"${err}"
+          test -e "${workdir}/.doc-lattice.yml"
+          # The branch readback is printed after the write path and after the benign
+          # already-exists path alike, so the config probe above is what proves scaffolding
+          # happened. The two channels are kept apart because stdout owns the copy-paste blocks
+          # and the readback is deliberately not among them.
+          grep -qxF 'workflow triggers on branch main (--default-branch)' "${err}"
+          # Spelled as a conditional rather than `! grep`, which errexit ignores by rule: a
+          # negated pipeline is exempt, so the readback could reach stdout without failing here.
+          if grep -qF 'workflow triggers on branch' "${out}"; then
+            echo 'the branch readback reached stdout; step 1 of MANAGED_CI.md reads it off stderr' >&2
+            exit 1
+          fi
       - name: Upload distributions
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
         with:

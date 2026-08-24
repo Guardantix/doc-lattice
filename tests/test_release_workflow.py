@@ -57,6 +57,21 @@ _LAUNCHERS = frozenset({"uv", "uvx", "python", "python3"})
 _PROTECTED_STEPS = frozenset(
     {"Re-assert version sync", "Smoke-test the commit", "Confirm pinned ref resolves"}
 )
+# GTX-239: the pre-publication execution of the built distribution, and the only one. The name is
+# load-bearing twice over -- it is how this suite finds the step, so deleting the step fails here
+# rather than silently publishing an artifact nothing ever ran.
+_SMOKE_BUILT_STEP = "Smoke-test the built distribution"
+# The provider that smoke runs against, named from the workspace root rather than relatively: the
+# invocation runs from a throwaway directory, where `dist/` names nothing at all.
+_WHEEL_GLOB = "${GITHUB_WORKSPACE}/dist/*.whl"
+# The line MANAGED_CI.md step 1 tells an adopter to read back, in full and on stderr. `init`
+# prints it after the write path and after the benign already-exists path alike, which is why the
+# config probes rather than this line are what prove scaffolding happened.
+_BRANCH_READBACK = "workflow triggers on branch main (--default-branch)"
+# Words that open a compound whose condition or body a command's exit status would become
+# instead of it becoming the step's. `!` negates in place and needs no closer.
+_COMPOUND_OPENERS = frozenset({"if", "while", "until"})
+_COMPOUND_CLOSERS = frozenset({"fi", "done"})
 # GTX-176: the jobs `main` requires in place of the per-leg contexts GitHub generates from a
 # matrix. Each maps its job id to the fixed context name it reports and the matrix job it
 # summarizes. Branch protection names the middle value, so it is the one that cannot drift.
@@ -478,6 +493,180 @@ def _config_probes(text: str, names: set[str], child: str) -> list[tuple[int, bo
     return probes
 
 
+def _expanded_name(word: str) -> str | None:
+    """Return the variable a word expands, in either spelling, or None when it expands none.
+
+    `_expands` answers the same question against a name already known. This one is for the
+    callers that have to *learn* the name: a redirection target and the operand of the command
+    that reads that file back have to be the same variable, and this contract fixes neither.
+    """
+    if word.startswith("${") and word.endswith("}"):
+        return word[2:-1] or None
+    if word.startswith("$"):
+        return word[1:] or None
+    return None
+
+
+def _short_flags(argv: list[str]) -> set[str]:
+    """Return the short-option letters a command carries, `-qxF` counting as three.
+
+    Bundled and separate spellings are the same request to every option parser, so the contract
+    is about which options are in force rather than about how they were written.
+    """
+    letters: set[str] = set()
+    for word in argv[1:]:
+        if word.startswith("--") or not word.startswith("-"):
+            continue
+        letters.update(word[1:])
+    return letters
+
+
+def _operands(argv: list[str]) -> list[str]:
+    """Return a command's non-option arguments, in order.
+
+    Only sound where the command's short options take no values, which holds for every `grep`
+    and `ls` this suite reads; a value-taking flag would land its value here.
+    """
+    return [word for word in argv[1:] if not word.startswith("-")]
+
+
+def _bindings(text: str) -> list[tuple[str, str]]:
+    """Return every `name=value` binding a step performs, in the order it performs them.
+
+    Only a command that is nothing but assignments counts, for the reason `_retarget` gives at
+    length: `NAME=value cmd` sets the name for that one command, and `echo 'NAME=value'` sets
+    nothing at all.
+    """
+    bound: list[tuple[str, str]] = []
+    for line in text.splitlines():
+        for _joined_by, argv in _separated_commands(line):
+            pairs: list[tuple[str, str]] = []
+            for word in argv:
+                assignment = _ASSIGNMENT.match(word)
+                if assignment is None:
+                    pairs = []
+                    break
+                pairs.append((assignment.group(1), assignment.group(2)))
+            bound.extend(pairs)
+    return bound
+
+
+def _makes_local_wheel(value: str) -> bool:
+    """Report whether an assigned value is the path of the one wheel the job just built.
+
+    The sibling of `_makes_throwaway_dir`, and it recognizes a single shape for the same reason:
+    what a substitution expands to is what its last command printed, so a compound one vouches
+    for nothing. The listing has to name `dist/*.whl` under the workspace root and nothing else.
+    A relative `dist/` would resolve against the throwaway directory the run happens in, and a
+    requirement naming the index or the repository would install something other than what this
+    job produced, which is the whole claim the step exists to make.
+    """
+    substitution = _COMMAND_SUBSTITUTION.match(value)
+    if substitution is None:
+        return False
+    inner = _invocations(substitution.group(1))
+    if len(inner) != 1 or inner[0][:1] != ["ls"] or not _REDIRECTIONS.isdisjoint(inner[0]):
+        return False
+    return _operands(inner[0]) == [_WHEEL_GLOB]
+
+
+def _redirections(argv: list[str]) -> dict[str, str]:
+    """Return each file descriptor a command redirects, mapped to the target it writes to.
+
+    `>` and `2>` reach a parsed command as ordinary words, the latter split into its descriptor
+    and the operator, so a bare `>` is stdout and a `>` preceded by a digit is that descriptor.
+    Reading them this way is what makes "captured apart" checkable rather than assumed. A step
+    that merges the channels spells it `2>&1`, which tokenizes as `>&` and so produces no entry
+    here at all; a step that points both at one file produces two entries holding one value.
+    """
+    targets: dict[str, str] = {}
+    for index, word in enumerate(argv):
+        if word != ">":
+            continue
+        previous = argv[index - 1] if index else ""
+        descriptor = previous if previous.isdigit() else "1"
+        targets[descriptor] = argv[index + 1] if index + 1 < len(argv) else ""
+    return targets
+
+
+def _status_reaches_the_step(text: str, program: str, subcommand: str) -> bool:
+    """Report whether `program subcommand`'s own exit status is what the step exits with.
+
+    Presence assertions cannot see this, and it is the half of the oracle a rewrite would take
+    first. "Exit 0" in the acceptance criteria means the *command's* exit, not the last shell
+    line's: `cmd || true`, `cmd | tee log`, `! cmd`, `if cmd; then`, and a preceding `set +e`
+    each leave every presence, config, and readback check green in front of a run that failed.
+    So the command has to be the last one on its line, joined only by operators that carry a
+    failure out of the list, negated by nothing, and outside any compound still open above it.
+
+    Compound depth is tracked by the word each line opens with, which is coarse and deliberately
+    so: it over-rejects a legitimate one-line compound elsewhere in the step rather than
+    reasoning about shell grammar, and over-rejection is the direction that fails closed.
+    """
+    depth, reached = 0, False
+    for line in text.splitlines():
+        commands = _separated_commands(line)
+        words = [[word for word in argv if word not in {"(", ")"}] for _joined_by, argv in commands]
+        if any(argv[:1] == ["set"] and "+e" in argv for argv in words):
+            return False
+        for index, argv in enumerate(words):
+            if not _launches(argv, program, subcommand):
+                continue
+            if depth or index != len(words) - 1:
+                return False
+            if any(joined_by not in _SEQUENCING for joined_by, _argv in commands[1:]):
+                return False
+            if any(
+                other[:1] == ["!"] or (bool(other) and other[0] in _COMPOUND_OPENERS)
+                for other in words
+            ):
+                return False
+            reached = True
+        opener = words[0][0] if words and words[0] else ""
+        if opener in _COMPOUND_OPENERS:
+            depth += 1
+        elif opener in _COMPOUND_CLOSERS:
+            depth = max(depth - 1, 0)
+    return reached
+
+
+def _refuses_on_match(text: str, pattern_of: str, target: str) -> bool:
+    """Report whether the step fails when `pattern_of` is found in the file `target` names.
+
+    The negative half of the channel oracle. A bare `! grep` cannot express it, because errexit
+    is defined not to apply to a negated pipeline, so the readback could reach stdout with the
+    step still green; and a `grep` whose result nothing reads is a no-op either way. What has to
+    be pinned is therefore the whole conditional: a fixed-string search of that one file, and a
+    body that ends the step with a nonzero status before the compound closes.
+
+    The pattern is required to be a prefix of the readback rather than equal to it, since any
+    prefix of a line that must not appear is a stricter search and a legitimate spelling.
+    """
+    lines = text.splitlines()
+    for index, line in enumerate(lines):
+        commands = [argv for _joined_by, argv in _separated_commands(line)]
+        if not commands or commands[0][:1] != ["if"]:
+            continue
+        condition = commands[0][1:]
+        if condition[:1] != ["grep"] or "F" not in _short_flags(condition):
+            continue
+        operands = _operands(condition)
+        if len(operands) != 2:
+            continue
+        pattern, searched = operands
+        if not pattern or not pattern_of.startswith(pattern):
+            continue
+        if _expanded_name(searched) != target:
+            continue
+        for body in lines[index + 1 :]:
+            argvs = [argv for _joined_by, argv in _separated_commands(body)]
+            if any(argv[:1] == ["fi"] for argv in argvs):
+                break
+            if any(argv[:1] == ["exit"] and argv[1:2] not in ([], ["0"]) for argv in argvs):
+                return True
+    return False
+
+
 def _fetches_tags(argv: list[str]) -> bool:
     """Report whether a command fetches tags and overwrites the local refs.
 
@@ -768,6 +957,86 @@ def test_build_job_builds_validates_and_uploads_one_artifact():
         "path": "dist/",
         "if-no-files-found": "error",
     }
+
+
+def test_built_distribution_is_smoke_tested_before_it_can_be_published():
+    """GTX-239: the packaged artifact is executed while publication can still be stopped.
+
+    The `release` job's pre-tag smoke installs from the source tree and omits the flag, and
+    Twine validation reads metadata without running anything, so before this step nothing
+    exercised MANAGED_CI.md step 1's command shape against what an adopter actually installs.
+    Once PyPI serves a version the only remedies left are the hotfix and yank paths RELEASING.md
+    owns, which is why the check has to gate the upload rather than report after it.
+    """
+    build = _WORKFLOW["jobs"]["build-release"]
+    step = _named_step(build, _SMOKE_BUILT_STEP)
+    commands = _commands(step)
+    # A failure has to prevent publication, and the ordering is the whole mechanism: `publish`
+    # consumes the artifact the upload produces, so a smoke that fails before the upload leaves
+    # that job nothing to download. Placed after it, the same failure would be a report on an
+    # artifact already on its way to an approval gate.
+    assert (
+        _step_index(build, "Validate distributions")
+        < _step_index(build, _SMOKE_BUILT_STEP)
+        < _step_index(build, "Upload distributions")
+    )
+    # A step allowed to fail soft is the same as no step, and the job-level spelling reaches
+    # every step in it.
+    assert "continue-on-error" not in step
+    assert "continue-on-error" not in build
+
+    # Provenance, first half: the provider is the one wheel this job built, resolved absolutely
+    # because the invocation runs somewhere `dist/` does not exist.
+    wheels = [name for name, value in _bindings(commands) if _makes_local_wheel(value)]
+    assert len(wheels) == 1, f"expected exactly one local-wheel binding, got {wheels}"
+    (wheel,) = wheels
+    # Provenance, second half: an installed `uv tool` copy of doc-lattice satisfies a run from
+    # the default tool directory without consulting anything, which RELEASING.md records as a
+    # live hazard rather than a hypothetical. Pointing the lookup at per-job scratch is what
+    # makes "the wheel it built" observable instead of inferred.
+    assert step["env"]["UV_TOOL_DIR"].startswith("${{ runner.temp }}/")
+
+    # The invocation itself, bound to the directory it runs in the way the pre-tag smoke is.
+    targets = _throwaway_dir_run_targets(commands, "doc-lattice", "init")
+    assert len(targets) == 1, f"expected exactly one packaged init run, got {targets}"
+    ((workdir, argv),) = targets
+    assert _expanded_name(_flag_value(argv, "--from") or "") == wheel
+    assert _flag_value(argv, "--default-branch") == "main"
+
+    # The two channels are the interface under test: stdout owns the copy-paste blocks and the
+    # readback is deliberately not among them, so a capture that merged them would satisfy every
+    # assertion below without proving anything about what an adopter reads.
+    channels = _redirections(argv)
+    assert set(channels) == {"1", "2"}, f"stdout and stderr must be captured apart, got {channels}"
+    stdout, stderr = (_expanded_name(channels["1"]), _expanded_name(channels["2"]))
+    assert stdout
+    assert stderr
+    assert stdout != stderr
+
+    # `exit 0` means this command's exit, not the shell's last line.
+    assert _status_reaches_the_step(commands, "doc-lattice", "init")
+
+    # Scaffolding is proven by the config, not by the readback, which `init` prints on the
+    # already-exists path too. Both probes name the directory the run actually used, so pointing
+    # the run at a second throwaway while the probes keep naming the first fails here.
+    probes = _config_probes(commands, {workdir}, DEFAULT_CONFIG_NAME)
+    assert [negated for _index, negated in probes] == [True, False], (
+        f"expected exactly two probes of the throwaway config, absent then present, got {probes}"
+    )
+
+    # The readback, whole and on stderr. `-x` is what makes it exact: a substring match would
+    # accept a line that named some other branch alongside this one.
+    exact = [
+        invocation
+        for invocation in _invocations(commands)
+        if invocation[:1] == ["grep"]
+        and {"x", "F"} <= _short_flags(invocation)
+        and _operands(invocation)[:1] == [_BRANCH_READBACK]
+        and _expanded_name(_operands(invocation)[-1]) == stderr
+    ]
+    assert exact, f"no exact whole-line match of {_BRANCH_READBACK!r} against the stderr capture"
+    # And absent from the other channel, which is the assertion the merge mutation fails.
+    assert _refuses_on_match(commands, _BRANCH_READBACK, stdout)
 
 
 def test_publish_job_is_oidc_only_and_waits_for_build():

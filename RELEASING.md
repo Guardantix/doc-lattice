@@ -67,7 +67,16 @@ The release pipeline then runs in this order:
    fail the release runs before the tag exists, so a missing or empty changelog section fails the
    run while there is still nothing immutable to strand.
 2. The dependent, unprivileged `build-release` job checks out that exact tag, builds the wheel
-   and source distribution, validates both with Twine, and uploads them as an artifact.
+   and source distribution, and validates both with Twine. It then installs the wheel it just
+   built into a throwaway environment and runs
+   [MANAGED_CI.md](MANAGED_CI.md#1-scaffold-the-config-and-the-offline-workflow) step 1's command
+   against it, `init --default-branch main`, in a throwaway directory: the config has to be
+   absent before the run and present after it, and the branch readback has to arrive on stderr
+   and nowhere else. Only then does it upload the distributions as an artifact. Twine reads
+   metadata without executing anything and the `release` job's smoke runs the Git source, so this
+   is the only execution of the packaged artifact while publication can still be stopped, and a
+   failure leaves `publish` nothing to download. Once PyPI serves a version the remedies are the
+   ones below, not a failing check.
 3. The `publish` job downloads the validated artifact and uploads it to PyPI through OIDC. It
    does not check out the repository or execute package build code.
 
