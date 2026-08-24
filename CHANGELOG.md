@@ -313,6 +313,19 @@ hand-written file, and the diagnostic says so. See **Added** and **Changed** bel
 
 ### Fixed
 
+- The release pipeline now runs the packaged artifact before it can be published. `build-release`
+  installs the wheel it just built and runs MANAGED_CI.md step 1's command against it,
+  `init --default-branch main` in a throwaway directory, between Twine validation and the artifact
+  upload. Nothing exercised that path before: the pre-tag smoke installs from the Git source and
+  omits the flag, and Twine reads distribution metadata without executing any of it, so a
+  scaffolding regression that existed only in the packaged artifact would have reached PyPI and
+  become a hotfix or a yank rather than a failed run. The check asserts what an adopter following
+  the recipe observes -- the config written into a directory that did not have one, and the branch
+  readback on stderr and absent from stdout -- and it gates rather than reports: it precedes the
+  upload `publish` depends on, so a failure leaves that job nothing to download. The `publish` job
+  is unchanged, and deliberately so; GitHub holds it for `pypi` environment approval before any of
+  its steps start, so a check placed there would run after the decision it exists to inform.
+
 - `check --format github` and `lint --format github` now annotate the document a run *failed* on,
   not only the ones it classified. A broken frontmatter block, or a document that cannot be read
   or decoded, previously exited 2 with a single stderr line and an empty stdout, so a pull request
