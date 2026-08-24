@@ -83,7 +83,11 @@ hand-written file, and the diagnostic says so. See **Added** and **Changed** bel
   doc-lattice's explicit `{#anchor}` identity, which is a different namespace because GitHub has
   no such syntax and slugs the literal marker-bearing heading instead. The new helper is a thin
   wrapper over the existing deduplicator rather than a second collision algorithm, and
-  `anchor_ids` now derives from it, so both namespaces stay pinned to one implementation. The
+  `anchor_ids` now derives from it, so both namespaces stay pinned to one implementation.
+  `markdown_compat.github_ids_for_texts` exposes that same deduplicator over raw heading texts,
+  for a caller whose heading grammar is wider than the addressable subset `Heading` describes;
+  `github_heading_ids` delegates to it, and the link gate below feeds it the heading texts of its
+  own inventory rather than manufacturing `Heading` values or copying the collision rule. The
   golden compatibility fixture gains a `github_ids` column per case, which is where the
   divergence between the two is recorded.
 - `scripts/check_doc_links.py` resolves every relative link and heading fragment in the maintained
@@ -94,7 +98,15 @@ hand-written file, and the diagnostic says so. See **Added** and **Changed** bel
   documents accumulated 36 deep anchor links that a renamed heading would have broken silently. Link
   sources are the sorted root `*.md` files, a target may be any repository-contained relative path,
   and absolute and external destinations stay out of scope. Destinations come from parsed link
-  tokens, so reference-style links are followed and link-like text inside code is not a link. A
+  tokens, so reference-style links are followed and link-like text inside code is not a link.
+  Heading fragments resolve against a link-target inventory the gate builds from its own full
+  CommonMark parse, deliberately separate from doc-lattice's section identity: it covers every
+  heading form GitHub assigns an id to -- setext, ATX indented one to three spaces, and headings
+  nested in a list item or a block quote -- so a deep link that renders and resolves on GitHub is
+  not failed by a gate reading the narrower addressable subset, and accepting it costs no
+  cached-derivation change to what the engine sees as a section. A heading a fence or an indented
+  code block swallows is sample text to both inventories, and both deduplicate through the one
+  shared collision rule, so a heading both see resolves to the same id. A
   destination written as a raw HTML anchor is reported rather than resolved, since markdown-it
   normalizes a Markdown destination and an attribute value arrives with none of that done, so
   resolving one means owning URL and HTML attribute semantics wider than this gate's contract. An
