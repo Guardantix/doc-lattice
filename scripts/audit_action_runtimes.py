@@ -22,7 +22,6 @@ import os
 import subprocess
 import sys
 from dataclasses import dataclass
-from functools import partial
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -480,7 +479,7 @@ def _append(path: str, text: str) -> None:
         handle.write(text)
 
 
-def _guarded_write(write: Callable[[], None]) -> bool:
+def _guarded_write(write: Callable[..., object], *args: object, **kwargs: object) -> bool:
     """Attempt one reporting write, and report whether it took.
 
     A write here can fail for the ordinary reasons any write can -- a full runner disk, a
@@ -496,13 +495,15 @@ def _guarded_write(write: Callable[[], None]) -> bool:
     the audit never returned one.
 
     Args:
-        write: The write to attempt, taking no arguments.
+        write: The write to attempt.
+        *args: Positional arguments for ``write``.
+        **kwargs: Keyword arguments for ``write``.
 
     Returns:
         True when the write took, False when it failed for one of `_REPORT_FAILURES`.
     """
     try:
-        write()
+        write(*args, **kwargs)
     except _REPORT_FAILURES as error:
         # Suppressed rather than raised: this is the report of a failed report, so the channel it
         # would travel on may be the one already known to be unreliable. The exit code carries it.
@@ -520,10 +521,6 @@ def emit(summary: str, findings: Sequence[Finding]) -> bool:
     results are collected first and combined afterwards, which is what keeps a boolean
     accumulator from short-circuiting a later channel away.
 
-    The channels are ordered by what a reader loses if a later one fails: the summary and the
-    per-finding lines first, and the step-summary file last, so a file that cannot be written
-    costs only itself.
-
     Args:
         summary: The rendered job summary.
         findings: Every deprecation annotation found, for the per-finding log lines.
@@ -533,13 +530,13 @@ def emit(summary: str, findings: Sequence[Finding]) -> bool:
     """
     # Flushed before the per-finding lines below, because a piped stdout is block-buffered and an
     # unflushed summary would otherwise land after them in the workflow log.
-    attempts = [_guarded_write(partial(print, summary, end="", flush=True))]
+    attempts = [_guarded_write(print, summary, end="", flush=True)]
     attempts.extend(
-        _guarded_write(partial(print, describe(finding), file=sys.stderr)) for finding in findings
+        _guarded_write(print, describe(finding), file=sys.stderr) for finding in findings
     )
     summary_path = os.environ.get("GITHUB_STEP_SUMMARY")
     if summary_path:
-        attempts.append(_guarded_write(partial(_append, summary_path, summary)))
+        attempts.append(_guarded_write(_append, summary_path, summary))
     return all(attempts)
 
 
@@ -560,7 +557,7 @@ def main(argv: Sequence[str] | None = None, fetch: Callable[[str], object] = fet
     try:
         run, findings, jobs_audited = _audit(fetch, args.repository, args.run_id)
     except (AuditError, OSError) as error:
-        _guarded_write(partial(print, f"::error::{error}", file=sys.stderr))
+        _guarded_write(print, f"::error::{error}", file=sys.stderr)
         return 2
     reported = emit(render_summary(run, findings, jobs_audited), findings)
     if findings:

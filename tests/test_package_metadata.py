@@ -107,22 +107,6 @@ def test_sdist_has_an_explicit_minimal_include_set():
         "/README.md",
         "/pyproject.toml",
     ]
-    assert sdist["exclude"] == [
-        "/tests/test_action_pin_correspondence_workflow.py",
-        "/tests/test_action_runtime_audit_workflow.py",
-        "/tests/test_audit_action_runtimes.py",
-        "/tests/test_bench_sections.py",
-        "/tests/test_check_action_pin_correspondence.py",
-        "/tests/test_check_doc_links.py",
-        "/tests/test_check_version_sync.py",
-        "/tests/test_extract_release_notes.py",
-        "/tests/test_managed_ci_recipe.py",
-        "/tests/test_release_gate.py",
-        "/tests/test_release_target.py",
-        "/tests/test_release_workflow.py",
-        "/tests/test_slugger_generator.py",
-        "/tests/test_workflow_pinning.py",
-    ]
 
 
 def test_the_sdist_exclude_list_and_the_archive_denial_set_name_the_same_modules():

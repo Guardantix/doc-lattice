@@ -421,40 +421,35 @@ def test_init_skips_existing_config_but_still_prints(tmp_path: Path, monkeypatch
 _LONG_DEFAULT_BRANCH = "release/very-long-integration-branch-name-for-wrapping"
 
 
-def test_init_keeps_the_wrote_and_branch_records_on_one_line_at_any_width(
-    tmp_path: Path, monkeypatch
+@pytest.mark.parametrize(
+    ("preexisting", "config_record"),
+    [
+        (False, "wrote '.doc-lattice.yml'"),
+        (True, "'.doc-lattice.yml' already exists, leaving it untouched"),
+    ],
+    ids=["wrote", "already-exists"],
+)
+def test_init_keeps_the_config_and_branch_records_on_one_line_at_any_width(
+    tmp_path: Path, monkeypatch, preexisting: bool, config_record: str
 ):
     # Same one-record-per-line contract reconcile carries at
     # test_reconcile_keeps_every_record_on_one_line_at_any_width: a status record stays on one
     # physical line at any terminal width rather than hard-wrapping mid-token into a fragment.
     # Only the first two stderr lines are pinned: the placement guidance that follows is prose
     # and is meant to wrap, so asserting it here would freeze the wrong contract.
+    #
+    # Parametrized because the wrote and already-exists records are the `else` and `except` arms
+    # of one create attempt, so no single run reaches both and each arm needs its own run.
     monkeypatch.setenv("COLUMNS", "20")
     monkeypatch.chdir(tmp_path)
+    if preexisting:
+        (tmp_path / ".doc-lattice.yml").write_text("SENTINEL\n", encoding="utf-8")
 
     result = runner.invoke(app, ["init", "--default-branch", _LONG_DEFAULT_BRANCH])
 
     assert result.exit_code == 0
     assert result.stderr.splitlines()[:2] == [
-        "wrote '.doc-lattice.yml'",
-        f"workflow triggers on branch {_LONG_DEFAULT_BRANCH} (--default-branch)",
-    ]
-
-
-def test_init_keeps_the_already_exists_and_branch_records_on_one_line_at_any_width(
-    tmp_path: Path, monkeypatch
-):
-    # The already-exists and wrote records are the `except` and `else` arms of one create
-    # attempt, so no single run reaches both and this second run is what covers the other arm.
-    monkeypatch.setenv("COLUMNS", "20")
-    monkeypatch.chdir(tmp_path)
-    (tmp_path / ".doc-lattice.yml").write_text("SENTINEL\n", encoding="utf-8")
-
-    result = runner.invoke(app, ["init", "--default-branch", _LONG_DEFAULT_BRANCH])
-
-    assert result.exit_code == 0
-    assert result.stderr.splitlines()[:2] == [
-        "'.doc-lattice.yml' already exists, leaving it untouched",
+        config_record,
         f"workflow triggers on branch {_LONG_DEFAULT_BRANCH} (--default-branch)",
     ]
 
