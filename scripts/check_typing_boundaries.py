@@ -7,21 +7,31 @@ import ast
 import sys
 from pathlib import Path
 
-BOUNDARY_PATTERNS = {"boundary", "adapter", "parser", "validator", "external", "inbound"}
+# The three modules AD-3 names, spelled as exact source-root-relative paths. An allowlist rather
+# than a name pattern: a pattern exempts every future module whose name happens to match it, and
+# a stem alone would extend the exemption to a same-named module anywhere in the tree.
+BOUNDARY_MODULES = frozenset(
+    {
+        "doc_lattice/frontmatter_parser.py",
+        "doc_lattice/linear_parser.py",
+        "doc_lattice/yaml_boundary.py",
+    }
+)
 
 
 def is_boundary_module(relpath: Path) -> bool:
-    """Return True if the file is an approved boundary module.
+    """Return True if the file is one of the boundary modules AD-3 names.
 
-    `relpath` is relative to the scanned source root, so `relpath.parts[0]` is the
-    top-level package. Only directories *below* that package count toward a
-    directory match, so a package merely named like a boundary role (e.g.
-    `src/parser/`) does not exempt its own ordinary modules.
+    Args:
+        relpath: The module's path relative to the scanned source root, so
+            `relpath.parts[0]` is the top-level package.
+
+    Returns:
+        True only for an exact path match against `BOUNDARY_MODULES`. A module whose
+        name merely reads like a boundary role, such as `doc_lattice/cache/external.py`
+        or a second package's `frontmatter_parser.py`, is not exempt.
     """
-    inner_dirs = set(relpath.parts[1:-1])
-    if inner_dirs & BOUNDARY_PATTERNS or relpath.stem in BOUNDARY_PATTERNS:
-        return True
-    return any(relpath.stem.endswith(f"_{p}") for p in BOUNDARY_PATTERNS)
+    return relpath.as_posix() in BOUNDARY_MODULES
 
 
 TYPING_MODULES = {"typing", "typing_extensions"}

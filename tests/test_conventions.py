@@ -2,6 +2,7 @@
 
 import ast
 import inspect
+import tomllib
 from dataclasses import dataclass
 from functools import cache
 from pathlib import Path
@@ -18,8 +19,10 @@ from doc_lattice.constants import (
 )
 from doc_lattice.error_types import ProjectError
 from doc_lattice.reconcile import Rewrite
+from doc_lattice.scaffold import PYTHON_PIN
 
 SRC_DIR = Path(__file__).parent.parent / "src" / "doc_lattice"
+PYPROJECT_PATH = Path(__file__).parent.parent / "pyproject.toml"
 
 
 def _source_files() -> list[Path]:
@@ -129,6 +132,62 @@ def test_no_raw_action_pin_values():
         content = py_file.read_text(encoding="utf-8")
         for value in (CHECKOUT_REF, CHECKOUT_VERSION, SETUP_UV_REF, SETUP_UV_VERSION):
             assert value not in content, f"{py_file.name} inlines the pin value '{value}'"
+
+
+def _requires_python_lower_bound(requires_python: str) -> str:
+    """Return the version in the sole ``>=`` clause of a requires-python specifier.
+
+    Args:
+        requires_python: A PEP 440 specifier set such as ``">=3.13"``.
+
+    Returns:
+        The version the ``>=`` clause names, with surrounding whitespace stripped.
+
+    Raises:
+        AssertionError: If the specifier set does not carry exactly one ``>=`` clause. The
+            correspondence below has no meaning against a floor spelled some other way, so an
+            unrecognized shape fails rather than being silently skipped.
+    """
+    lower_bounds = [
+        clause.strip().removeprefix(">=").strip()
+        for clause in requires_python.split(",")
+        if clause.strip().startswith(">=")
+    ]
+    assert len(lower_bounds) == 1, (
+        f"requires-python {requires_python!r} does not carry exactly one '>=' clause; "
+        f"the PYTHON_PIN correspondence cannot be judged against it"
+    )
+    return lower_bounds[0]
+
+
+def test_python_pin_matches_the_requires_python_lower_bound():
+    """AD-24's load-bearing floor has two sources, so changing either alone must fail.
+
+    ``scaffold.PYTHON_PIN`` is what generated gates run under and ``requires-python`` is what
+    installers resolve against. This is a parsed correspondence rather than a second literal on
+    purpose: ``tests/test_scaffold.py`` already fails on a lone ``PYTHON_PIN`` change by
+    asserting the rendered ``--python 3.13``, which proves nothing about ``requires-python``.
+    """
+    pyproject = tomllib.loads(PYPROJECT_PATH.read_text(encoding="utf-8"))
+    lower_bound = _requires_python_lower_bound(pyproject["project"]["requires-python"])
+    assert lower_bound == PYTHON_PIN, (
+        f"AD-24: requires-python floor {lower_bound!r} and scaffold.PYTHON_PIN {PYTHON_PIN!r} "
+        f"disagree; change both or neither"
+    )
+
+
+@pytest.mark.parametrize(
+    ("requires_python", "expected"),
+    [(">=3.13", "3.13"), (">= 3.13", "3.13"), (">=3.13,<4", "3.13"), ("<4,>=3.13", "3.13")],
+)
+def test_requires_python_lower_bound_is_parsed_not_matched_literally(requires_python, expected):
+    assert _requires_python_lower_bound(requires_python) == expected
+
+
+@pytest.mark.parametrize("requires_python", ["==3.13", ">3.13", ">=3.13,>=3.14", ""])
+def test_an_unparsable_requires_python_floor_fails_rather_than_passing(requires_python):
+    with pytest.raises(AssertionError):
+        _requires_python_lower_bound(requires_python)
 
 
 def test_no_em_dashes_in_source():
