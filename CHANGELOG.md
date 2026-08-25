@@ -142,10 +142,11 @@ hand-written file, and the diagnostic says so. See **Added** and **Changed** bel
   annotation named. It is a notice rather than a gate: a `workflow_run` workflow runs on the
   default branch and does not attach to the run that triggered it, so a red audit blocks nothing
   and someone has to look. Any completed run can be re-read on demand with
-  `gh workflow run "Action runtime audit" -f run_id=<run-id>`, and the 5.0.0 release run already
-  trips it, because `actions/upload-artifact` and `actions/download-artifact` are still pinned to
-  releases that target Node.js 20. No shipped pin moves in this change: both mechanisms report, and
-  every pin stays exactly where it was. AD-42 in ARCHITECTURE.md records the decision, including
+  `gh workflow run "Action runtime audit" -f run_id=<run-id>`, and the 5.0.0 release run trips it,
+  because at that tag `actions/upload-artifact` and `actions/download-artifact` were pinned to
+  releases that target Node.js 20. No shipped pin moved in this change: both mechanisms report, and
+  every pin stayed exactly where it was. Those two workflow-only pins have since moved, under
+  **Changed** below. AD-42 in ARCHITECTURE.md records the decision, including
   why a manifest-fetching auditor and a tail job inside `ci.yml` were both rejected.
 - A new `Action pin correspondence` workflow asks GitHub whether each shipped pin's SHA really is
   the commit its trailing `# vX.Y.Z` comment names. Every other check compares this repository's
@@ -375,6 +376,18 @@ hand-written file, and the diagnostic says so. See **Added** and **Changed** bel
 - CLAUDE.md names `uv run --group dev pre-commit install` as a required contributor setup step and
   says it is per clone. It described what the hooks run without ever saying to install them.
   Adopter-side activation was already documented in README.md and MANAGED_CI.md and is unchanged.
+- `actions/upload-artifact` moves to v7.0.1 and `actions/download-artifact` to v8.0.1, both
+  SHA-pinned per AD-42, off the releases that target Node.js 20 and onto ones declaring `node24`.
+  These are the release path's two workflow-only pins, used by `build-release` and `publish`; they
+  are not among the pins `init` and MANAGED_CI.md ship to adopters, so nothing an adopter holds
+  moves and the shipped-pin parity test is untouched. The configured inputs are unchanged and
+  still contract-tested: upload keeps `name`, `path`, and `if-no-files-found`, download keeps
+  `name` and `path`. Upload v7's direct-upload path is opt-in through `archive: false`, so the
+  default zipped transfer this pipeline relies on is unchanged, and download v8 now fails a digest
+  mismatch that older releases only warned about, which tightens the same-run build-to-publish
+  handoff rather than requiring an override. Both jobs are gated on a real version-bump run, so
+  neither bumped action executes until this release is cut and the first `Action runtime audit`
+  reading of that run is what confirms the deprecation is gone.
 
 ### Fixed
 
