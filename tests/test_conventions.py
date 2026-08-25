@@ -134,14 +134,54 @@ def test_no_raw_action_pin_values():
             assert value not in content, f"{py_file.name} inlines the pin value '{value}'"
 
 
+def _dotted_release(version: str) -> tuple[int, ...]:
+    """Return a purely numeric dotted version as a release tuple.
+
+    Args:
+        version: A version string such as ``"3.13"``.
+
+    Returns:
+        The dot-separated components as integers, or the empty tuple when any component is not
+        an ASCII decimal run. The empty return is the caller's signal to refuse: a version this
+        cannot order is one the admissibility check below cannot judge.
+    """
+    parts = version.split(".")
+    if not all(part.isascii() and part.isdigit() for part in parts):
+        return ()
+    return tuple(int(part) for part in parts)
+
+
+def _zero_padded(left: tuple[int, ...], right: tuple[int, ...]) -> tuple[tuple[int, ...], ...]:
+    """Return both release tuples padded with zeros to a common length.
+
+    PEP 440 reads a shorter release as zero-extended, so ``3.13`` and ``3.13.0`` are the same
+    version. Comparing the raw tuples would instead order the shorter one first and accept
+    ``<3.13.0`` as admitting a ``3.13`` floor.
+
+    Args:
+        left: One release tuple.
+        right: The other release tuple.
+
+    Returns:
+        The two tuples, in the order given, each extended to the longer length.
+    """
+    width = max(len(left), len(right))
+    return tuple(release + (0,) * (width - len(release)) for release in (left, right))
+
+
 def _requires_python_lower_bound(requires_python: str) -> str:
     """Return the effective floor of a requires-python specifier set.
 
     Two clause shapes are judged: the sole ``>=`` clause that names the floor, and upper bounds,
-    which cannot raise it. Every other operator can, without touching the ``>=`` clause at all:
-    ``>3.14``, ``!=3.13.*``, and ``==3.14`` alongside ``>=3.13`` each leave installers rejecting
-    3.13 while the ``>=`` clause still reads 3.13. A specifier set carrying one is refused rather
-    than reduced to a floor that is not the effective one.
+    which are checked to admit it. Every other operator can raise the floor without touching the
+    ``>=`` clause at all: ``>3.14``, ``!=3.13.*``, and ``==3.14`` alongside ``>=3.13`` each leave
+    installers rejecting 3.13 while the ``>=`` clause still reads 3.13. A specifier set carrying
+    one is refused rather than reduced to a floor that is not the effective one.
+
+    An upper bound cannot raise the floor, but it can eliminate it, which breaks the same
+    correspondence: ``>=3.13,<3.13`` and ``>=3.13,<=3.12`` admit no interpreter whatsoever, so
+    the ``>=`` clause names a version installers reject. Each upper bound is therefore ordered
+    against the floor rather than waved through.
 
     Args:
         requires_python: A PEP 440 specifier set such as ``">=3.13"``.
@@ -150,10 +190,11 @@ def _requires_python_lower_bound(requires_python: str) -> str:
         The version the ``>=`` clause names, with surrounding whitespace stripped.
 
     Raises:
-        AssertionError: If the specifier set does not carry exactly one ``>=`` clause, or carries
-            any clause other than an upper bound alongside it. The correspondence below has no
-            meaning against a floor spelled some other way, so an unrecognized shape fails rather
-            than being silently skipped.
+        AssertionError: If the specifier set does not carry exactly one ``>=`` clause, carries
+            any clause other than an upper bound alongside it, or carries an upper bound that
+            excludes the floor or that cannot be ordered against it. The correspondence below has
+            no meaning against a floor spelled some other way, so an unrecognized shape fails
+            rather than being silently skipped.
     """
     clauses = [clause.strip() for clause in requires_python.split(",")]
     lower_bounds = [
@@ -169,7 +210,30 @@ def _requires_python_lower_bound(requires_python: str) -> str:
         f"only an upper bound cannot raise the effective floor, so the PYTHON_PIN "
         f"correspondence cannot be judged against it"
     )
-    return lower_bounds[0]
+    floor = lower_bounds[0]
+    upper_bounds = [clause for clause in clauses if clause.startswith("<")]
+    if upper_bounds:
+        floor_release = _dotted_release(floor)
+        assert floor_release, (
+            f"requires-python {requires_python!r} names floor {floor!r}, which is not a dotted "
+            f"numeric version; its upper bounds cannot be ordered against it"
+        )
+        for clause in upper_bounds:
+            inclusive = clause.startswith("<=")
+            bound = clause.removeprefix("<=" if inclusive else "<").strip()
+            bound_release = _dotted_release(bound)
+            assert bound_release, (
+                f"requires-python {requires_python!r} carries upper bound {clause!r}, whose "
+                f"version is not dotted numeric; it cannot be ordered against floor {floor!r}"
+            )
+            padded_floor, padded_bound = _zero_padded(floor_release, bound_release)
+            admits = padded_floor <= padded_bound if inclusive else padded_floor < padded_bound
+            assert admits, (
+                f"requires-python {requires_python!r} carries upper bound {clause!r}, which "
+                f"excludes floor {floor!r}; installers reject every {floor} interpreter, so the "
+                f"PYTHON_PIN correspondence cannot be judged against it"
+            )
+    return floor
 
 
 def test_python_pin_matches_the_requires_python_lower_bound():
@@ -196,6 +260,9 @@ def test_python_pin_matches_the_requires_python_lower_bound():
         (">=3.13,<4", "3.13"),
         ("<4,>=3.13", "3.13"),
         (">=3.13,<=3.14", "3.13"),
+        (">=3.13,<=3.13", "3.13"),
+        (">=3.13,<3.13.1", "3.13"),
+        (">=3.13,< 4", "3.13"),
     ],
 )
 def test_requires_python_lower_bound_is_parsed_not_matched_literally(requires_python, expected):
@@ -217,6 +284,30 @@ def test_a_clause_that_can_raise_the_floor_is_refused_rather_than_ignored(requir
 
     Reducing the set to its ``>=`` clause would report a floor that is not the effective one,
     and the correspondence would pass against a ``PYTHON_PIN`` installers no longer accept.
+    """
+    with pytest.raises(AssertionError):
+        _requires_python_lower_bound(requires_python)
+
+
+@pytest.mark.parametrize(
+    "requires_python",
+    [
+        ">=3.13,<3.13",
+        ">=3.13,<=3.12",
+        ">=3.13,<3",
+        ">=3.13,<3.13.0",
+        ">=3.13,<4,<3.12",
+        ">=3.13,<3.14rc1",
+        ">=3.13rc1,<4",
+    ],
+)
+def test_an_upper_bound_that_excludes_the_floor_is_refused(requires_python):
+    """An upper bound cannot raise the floor, but it can leave the set admitting nothing.
+
+    Reducing these to their ``>=`` clause would report 3.13 as the effective floor while
+    installers reject every 3.13 interpreter, so the correspondence would pass against a
+    ``PYTHON_PIN`` nothing can install. The last two carry a bound that cannot be ordered
+    against the floor at all, which is refused on the same fail-closed grounds.
     """
     with pytest.raises(AssertionError):
         _requires_python_lower_bound(requires_python)
