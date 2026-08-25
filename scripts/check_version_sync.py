@@ -74,9 +74,12 @@ def maintained_documents(repo_root: Path) -> list[Path]:
     """Return the maintained documents: the sorted root Markdown files.
 
     This is the same mechanical stand-in for the CLAUDE.md ownership list that
-    ``scripts/check_doc_links.py`` takes as its link sources, kept here rather than imported
-    because neither script is importable from the other's process. ``test_check_version_sync.py``
-    asserts the two selections stay identical.
+    ``scripts/check_doc_links.py`` takes as its link sources. It is spelled here rather than
+    imported from there for two reasons: the suites load both scripts with ``runpy.run_path``,
+    which leaves ``sys.path`` untouched, so an import that resolves under
+    ``python scripts/<name>.py`` would not resolve under test; and importing that module would
+    pull ``markdown_it`` and a constructed parser into a gate that only reads install pins.
+    ``test_check_version_sync.py`` asserts the two selections stay identical.
 
     Args:
         repo_root: The repository root.
@@ -155,6 +158,70 @@ def _release_surface_messages(
     return messages
 
 
+def _pin_messages(
+    maintained_docs: Mapping[str, str], pin_policy: PinPolicy, init_version: str
+) -> list[str]:
+    """Return every release-surface violation across the maintained documents.
+
+    Each document is classified exactly once: an exempt document is skipped, a declared release
+    surface is judged against its declared count and currency, and any other document carrying a
+    recognized pin fails as an unclassified release surface.
+
+    Args:
+        maintained_docs: Each maintained document's filename mapped to its full text, classified
+            in the mapping's insertion order.
+        pin_policy: The release-surface classification to judge those documents against.
+        init_version: The canonical package version.
+
+    Returns:
+        One message per violation, in document order.
+    """
+    messages: list[str] = []
+    for doc_name, doc_text in maintained_docs.items():
+        if doc_name in pin_policy.historical:
+            continue
+        pins = _recognized_pins(doc_text)
+        if doc_name in pin_policy.manifest:
+            messages.extend(
+                _release_surface_messages(
+                    doc_name, pins, pin_policy.manifest[doc_name], init_version
+                )
+            )
+        elif pins:
+            messages.append(
+                f"{doc_name} is not a declared release surface but pins doc-lattice "
+                f"{', '.join(_distinct(pins))}; enroll it in PIN_MANIFEST or exempt it in "
+                f"HISTORICAL_PIN_DOCS in scripts/check_version_sync.py."
+            )
+    return messages
+
+
+def _policy_messages(maintained_docs: Mapping[str, str], pin_policy: PinPolicy) -> list[str]:
+    """Return the manifest's own errors, which are faults in the policy rather than the tree.
+
+    Args:
+        maintained_docs: Each maintained document's filename mapped to its full text.
+        pin_policy: The release-surface classification to check for internal consistency.
+
+    Returns:
+        One message per document declared and exempted at once, whose exemption is applied first
+        and would otherwise silence its declared count, followed by one per manifest entry with
+        no matching maintained document, so deleting the document does not read as compliance.
+    """
+    return [
+        f"{doc_name} is declared in PIN_MANIFEST and exempted in HISTORICAL_PIN_DOCS in "
+        f"scripts/check_version_sync.py; the exemption is applied first, so the declared pin "
+        f"count would never be checked. Keep exactly one of the two."
+        for doc_name in pin_policy.manifest
+        if doc_name in pin_policy.historical
+    ] + [
+        f"{doc_name} is declared in PIN_MANIFEST but is not a maintained document; "
+        f"restore the document or drop its manifest entry in scripts/check_version_sync.py."
+        for doc_name in pin_policy.manifest
+        if doc_name not in maintained_docs
+    ]
+
+
 def check_version_consistency(
     init_version: str,
     pyproject_text: str,
@@ -176,13 +243,8 @@ def check_version_consistency(
     Returns:
         One message per disagreeing source, naming the file and the expected value. An empty
         list means every source agrees. A source that cannot be parsed is reported as a mismatch
-        rather than raising. A maintained document is classified exactly once: an exempt document
-        is skipped, a declared release surface must carry exactly its declared number of
-        recognized pins and every one of them must equal ``init_version``, and any other document
-        carrying a recognized pin fails as an unclassified release surface. Two policy errors are
-        reported alongside those: a manifest entry with no matching maintained document, so
-        deleting the document does not read as compliance, and a document that is both declared
-        and exempted, whose exemption would otherwise silence its declared count.
+        rather than raising. The release-surface violations ``_pin_messages`` finds follow the
+        two version checks, and the policy errors ``_policy_messages`` finds follow those.
     """
     messages: list[str] = []
     pyproject_version = _pyproject_version(pyproject_text)
@@ -197,35 +259,8 @@ def check_version_consistency(
             f"CHANGELOG.md top version heading is {changelog_version!r}, "
             f"expected {init_version!r}; add or fix the '## [{init_version}]' section."
         )
-    for doc_name, doc_text in maintained_docs.items():
-        if doc_name in pin_policy.historical:
-            continue
-        pins = _recognized_pins(doc_text)
-        if doc_name in pin_policy.manifest:
-            messages.extend(
-                _release_surface_messages(
-                    doc_name, pins, pin_policy.manifest[doc_name], init_version
-                )
-            )
-        elif pins:
-            messages.append(
-                f"{doc_name} is not a declared release surface but pins doc-lattice "
-                f"{', '.join(_distinct(pins))}; enroll it in PIN_MANIFEST or exempt it in "
-                f"HISTORICAL_PIN_DOCS in scripts/check_version_sync.py."
-            )
-    messages.extend(
-        f"{doc_name} is declared in PIN_MANIFEST and exempted in HISTORICAL_PIN_DOCS in "
-        f"scripts/check_version_sync.py; the exemption is applied first, so the declared pin "
-        f"count would never be checked. Keep exactly one of the two."
-        for doc_name in pin_policy.manifest
-        if doc_name in pin_policy.historical
-    )
-    messages.extend(
-        f"{doc_name} is declared in PIN_MANIFEST but is not a maintained document; "
-        f"restore the document or drop its manifest entry in scripts/check_version_sync.py."
-        for doc_name in pin_policy.manifest
-        if doc_name not in maintained_docs
-    )
+    messages.extend(_pin_messages(maintained_docs, pin_policy, init_version))
+    messages.extend(_policy_messages(maintained_docs, pin_policy))
     return messages
 
 
