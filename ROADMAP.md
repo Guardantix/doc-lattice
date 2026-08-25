@@ -62,10 +62,10 @@ section), `PYTHONWARNINGS=error` (GTX-202), the broken stderr pipe (GTX-201), th
 write warning (GTX-221), the journal's own validation diagnostic (GTX-227), the codes `init`
 reports for a value it rejects before writing anything (GTX-216), the README pass itself
 (GTX-113, PR #301), `init --print-only` with the nested-scaffold refusal beside it (GTX-153), the
-pre-publication smoke of the built wheel (GTX-239), the doc-link gate's acceptance of every
-heading form GitHub links to (GTX-277), and the artifact-action bumps themselves (GTX-263, PRs
-#309 and #312). One was canceled rather than worked: reconcile's post-load re-parse warning
-(GTX-200), which the PR that spawned it had already fixed. GTX-263 is the one landed change whose
+pre-publication smoke of the built wheel (GTX-239), the doc-link gate's acceptance of the setext,
+indented, and nested heading forms GitHub links to (GTX-277), and the artifact-action bumps
+themselves (GTX-263, PRs #309 and #312). One was canceled rather than worked: reconcile's
+post-load re-parse warning (GTX-200), which the PR that spawned it had already fixed. GTX-263 is the one landed change whose
 issue stays open: `build-release` and `publish` execute only on a real version-bump run, so the
 6.0 release run is the first thing that can prove the bumped pins, and the issue has moved to
 `doc-lattice v6.x`, where the 6.x section names it as that validation checkpoint. GTX-213, the
