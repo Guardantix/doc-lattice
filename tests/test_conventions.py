@@ -135,7 +135,13 @@ def test_no_raw_action_pin_values():
 
 
 def _requires_python_lower_bound(requires_python: str) -> str:
-    """Return the version in the sole ``>=`` clause of a requires-python specifier.
+    """Return the effective floor of a requires-python specifier set.
+
+    Two clause shapes are judged: the sole ``>=`` clause that names the floor, and upper bounds,
+    which cannot raise it. Every other operator can, without touching the ``>=`` clause at all:
+    ``>3.14``, ``!=3.13.*``, and ``==3.14`` alongside ``>=3.13`` each leave installers rejecting
+    3.13 while the ``>=`` clause still reads 3.13. A specifier set carrying one is refused rather
+    than reduced to a floor that is not the effective one.
 
     Args:
         requires_python: A PEP 440 specifier set such as ``">=3.13"``.
@@ -144,18 +150,24 @@ def _requires_python_lower_bound(requires_python: str) -> str:
         The version the ``>=`` clause names, with surrounding whitespace stripped.
 
     Raises:
-        AssertionError: If the specifier set does not carry exactly one ``>=`` clause. The
-            correspondence below has no meaning against a floor spelled some other way, so an
-            unrecognized shape fails rather than being silently skipped.
+        AssertionError: If the specifier set does not carry exactly one ``>=`` clause, or carries
+            any clause other than an upper bound alongside it. The correspondence below has no
+            meaning against a floor spelled some other way, so an unrecognized shape fails rather
+            than being silently skipped.
     """
+    clauses = [clause.strip() for clause in requires_python.split(",")]
     lower_bounds = [
-        clause.strip().removeprefix(">=").strip()
-        for clause in requires_python.split(",")
-        if clause.strip().startswith(">=")
+        clause.removeprefix(">=").strip() for clause in clauses if clause.startswith(">=")
     ]
     assert len(lower_bounds) == 1, (
         f"requires-python {requires_python!r} does not carry exactly one '>=' clause; "
         f"the PYTHON_PIN correspondence cannot be judged against it"
+    )
+    unjudged = [clause for clause in clauses if not clause.startswith((">=", "<"))]
+    assert not unjudged, (
+        f"requires-python {requires_python!r} carries {unjudged} alongside its '>=' clause; "
+        f"only an upper bound cannot raise the effective floor, so the PYTHON_PIN "
+        f"correspondence cannot be judged against it"
     )
     return lower_bounds[0]
 
@@ -178,14 +190,34 @@ def test_python_pin_matches_the_requires_python_lower_bound():
 
 @pytest.mark.parametrize(
     ("requires_python", "expected"),
-    [(">=3.13", "3.13"), (">= 3.13", "3.13"), (">=3.13,<4", "3.13"), ("<4,>=3.13", "3.13")],
+    [
+        (">=3.13", "3.13"),
+        (">= 3.13", "3.13"),
+        (">=3.13,<4", "3.13"),
+        ("<4,>=3.13", "3.13"),
+        (">=3.13,<=3.14", "3.13"),
+    ],
 )
 def test_requires_python_lower_bound_is_parsed_not_matched_literally(requires_python, expected):
     assert _requires_python_lower_bound(requires_python) == expected
 
 
-@pytest.mark.parametrize("requires_python", ["==3.13", ">3.13", ">=3.13,>=3.14", ""])
+@pytest.mark.parametrize("requires_python", ["==3.13", ">3.13", ">=3.13,>=3.14", "3.13", ""])
 def test_an_unparsable_requires_python_floor_fails_rather_than_passing(requires_python):
+    with pytest.raises(AssertionError):
+        _requires_python_lower_bound(requires_python)
+
+
+@pytest.mark.parametrize(
+    "requires_python",
+    [">=3.13,>3.14", ">=3.13,!=3.13.*", ">=3.13,==3.14", ">=3.13,~=3.14.0", ">=3.13,===3.14"],
+)
+def test_a_clause_that_can_raise_the_floor_is_refused_rather_than_ignored(requires_python):
+    """Each of these rejects 3.13 at install time while the '>=' clause still reads 3.13.
+
+    Reducing the set to its ``>=`` clause would report a floor that is not the effective one,
+    and the correspondence would pass against a ``PYTHON_PIN`` installers no longer accept.
+    """
     with pytest.raises(AssertionError):
         _requires_python_lower_bound(requires_python)
 

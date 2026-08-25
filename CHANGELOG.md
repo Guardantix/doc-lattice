@@ -346,7 +346,11 @@ hand-written file, and the diagnostic says so. See **Added** and **Changed** bel
 - `scaffold.PYTHON_PIN` and the `requires-python` lower bound are held to each other by a parsed
   correspondence test. Both are copies of the floor AD-24 declares load-bearing, and changing
   either alone now fails. The existing scaffold test fails on a lone `PYTHON_PIN` change by
-  asserting the rendered `--python 3.13`, which proved nothing about `requires-python`. Three
+  asserting the rendered `--python 3.13`, which proved nothing about `requires-python`. The parse
+  judges two clause shapes, the sole `>=` clause and upper bounds, and refuses a specifier set
+  carrying anything else: every other operator can raise the effective floor without touching the
+  `>=` clause, so reducing such a set to its `>=` clause would report a floor installers do not
+  honor and pass the correspondence against a `PYTHON_PIN` they reject. Three
   machine-consumed copies of the floor stay uncorrelated and are named here so the claim stays
   honest: Ruff's `target-version`, the CI matrix, and the slugger generator's default interpreter.
 - CLAUDE.md names `uv run --group dev pre-commit install` as a required contributor setup step and
