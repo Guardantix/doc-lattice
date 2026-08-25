@@ -6,6 +6,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [6.0.0] - 2026-08-25
+
 ### Migration
 
 One thing to act on, and it applies only to a caller that reads the printed error code rather than
