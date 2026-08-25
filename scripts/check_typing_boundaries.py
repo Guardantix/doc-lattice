@@ -34,6 +34,25 @@ def is_boundary_module(relpath: Path) -> bool:
     return relpath.as_posix() in BOUNDARY_MODULES
 
 
+def missing_boundary_modules(search_dir: Path) -> list[str]:
+    """Return the allowlisted modules the scan root does not contain, in sorted order.
+
+    `BOUNDARY_MODULES` is spelled relative to the source root, so it classifies correctly only
+    when the scan is pointed at that root. Pointed one level deeper, every entry misses and the
+    three exempt modules are reported as violations; pointed at an unrelated tree, the scan runs
+    with no exemptions at all and says nothing about why. Both are caller error rather than a
+    finding, so `main` refuses the root instead of reporting against it.
+
+    Args:
+        search_dir: The directory the scan was pointed at.
+
+    Returns:
+        Every `BOUNDARY_MODULES` entry that is not a file under `search_dir`, sorted. An empty
+        list means the root is the one the allowlist is spelled against.
+    """
+    return sorted(relpath for relpath in BOUNDARY_MODULES if not (search_dir / relpath).is_file())
+
+
 TYPING_MODULES = {"typing", "typing_extensions"}
 ESCAPE_HATCHES = {"Any", "cast"}
 
@@ -78,6 +97,14 @@ def find_escape_hatch_usage(filepath: Path) -> list[tuple[int, str]]:
 def main() -> None:
     """Scan a directory and exit non-zero if typing.Any/cast leaks outside boundaries."""
     search_dir = Path(sys.argv[1]) if len(sys.argv) > 1 else Path()
+    missing = missing_boundary_modules(search_dir)
+    if missing:
+        print(f"FAIL: {search_dir} is not the source root the boundary allowlist is spelled")
+        print("against; it does not contain:")
+        for relpath in missing:
+            print(f"  {relpath}")
+        print("Point this check at the source root, such as `src/`.")
+        sys.exit(1)
     violations: list[str] = []
     for py_file in search_dir.rglob("*.py"):
         if is_boundary_module(py_file.relative_to(search_dir)):

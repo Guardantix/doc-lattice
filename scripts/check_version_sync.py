@@ -5,8 +5,10 @@ Release surfaces are declared, never discovered. ``PIN_MANIFEST`` names each mai
 that carries live ``doc-lattice==X.Y.Z`` or ``doc-lattice@vX.Y.Z`` install refs together with the
 exact number it must carry, ``HISTORICAL_PIN_DOCS`` names the documents whose superseded pins are
 preserved on purpose, and a recognized pin in any other maintained document fails as an
-unclassified release surface. "Maintained documents" means the sorted root ``*.md`` files, the
-same mechanical set ``scripts/check_doc_links.py`` takes as its link sources.
+unclassified release surface. The two classifications are exclusive: a document named by both is
+reported, since the exemption is applied first and would otherwise silence the declared count.
+"Maintained documents" means the sorted root ``*.md`` files, the same mechanical set
+``scripts/check_doc_links.py`` takes as its link sources.
 
 Counts are exact rather than minimums because a minimum lets a newly added pin mask the deletion
 of a required occurrence. What an exact count closes is any change that alters the number of
@@ -23,7 +25,8 @@ particular prose install instruction.
 import re
 import sys
 import tomllib
-from collections.abc import Collection, Mapping
+from collections.abc import Mapping
+from collections.abc import Set as AbstractSet
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -46,7 +49,7 @@ PIN_MANIFEST: Mapping[str, int] = {"README.md": 3, "MANAGED_CI.md": 5}
 # Documents whose recognized pins are historical rather than live. CHANGELOG.md preserves the
 # exact install refs superseded releases told adopters to run, so requiring them to equal
 # __version__ would rewrite the record every release.
-HISTORICAL_PIN_DOCS: Collection[str] = frozenset({_CHANGELOG_NAME})
+HISTORICAL_PIN_DOCS: AbstractSet[str] = frozenset({_CHANGELOG_NAME})
 
 
 @dataclass(frozen=True)
@@ -61,7 +64,7 @@ class PinPolicy:
     """
 
     manifest: Mapping[str, int]
-    historical: Collection[str]
+    historical: AbstractSet[str]
 
 
 PIN_POLICY = PinPolicy(manifest=PIN_MANIFEST, historical=HISTORICAL_PIN_DOCS)
@@ -118,11 +121,7 @@ def _recognized_pins(doc_text: str) -> list[str]:
 
 def _distinct(versions: list[str]) -> list[str]:
     """Return versions with later duplicates dropped, preserving first-appearance order."""
-    seen: list[str] = []
-    for version in versions:
-        if version not in seen:
-            seen.append(version)
-    return seen
+    return list(dict.fromkeys(versions))
 
 
 def _release_surface_messages(
@@ -150,8 +149,8 @@ def _release_surface_messages(
     if len(pins) != expected_count:
         messages.append(
             f"{doc_name} carries {len(pins)} recognized doc-lattice install pins, "
-            f"expected exactly {expected_count}; restore the missing pin or enroll the new "
-            f"count in PIN_MANIFEST in scripts/check_version_sync.py."
+            f"expected exactly {expected_count}; restore or remove the pin, or enroll the "
+            f"new count in PIN_MANIFEST in scripts/check_version_sync.py."
         )
     return messages
 
@@ -180,9 +179,10 @@ def check_version_consistency(
         rather than raising. A maintained document is classified exactly once: an exempt document
         is skipped, a declared release surface must carry exactly its declared number of
         recognized pins and every one of them must equal ``init_version``, and any other document
-        carrying a recognized pin fails as an unclassified release surface. A manifest entry with
-        no matching maintained document is reported too, so deleting the document does not read
-        as compliance.
+        carrying a recognized pin fails as an unclassified release surface. Two policy errors are
+        reported alongside those: a manifest entry with no matching maintained document, so
+        deleting the document does not read as compliance, and a document that is both declared
+        and exempted, whose exemption would otherwise silence its declared count.
     """
     messages: list[str] = []
     pyproject_version = _pyproject_version(pyproject_text)
@@ -213,6 +213,13 @@ def check_version_consistency(
                 f"{', '.join(_distinct(pins))}; enroll it in PIN_MANIFEST or exempt it in "
                 f"HISTORICAL_PIN_DOCS in scripts/check_version_sync.py."
             )
+    messages.extend(
+        f"{doc_name} is declared in PIN_MANIFEST and exempted in HISTORICAL_PIN_DOCS in "
+        f"scripts/check_version_sync.py; the exemption is applied first, so the declared pin "
+        f"count would never be checked. Keep exactly one of the two."
+        for doc_name in pin_policy.manifest
+        if doc_name in pin_policy.historical
+    )
     messages.extend(
         f"{doc_name} is declared in PIN_MANIFEST but is not a maintained document; "
         f"restore the document or drop its manifest entry in scripts/check_version_sync.py."

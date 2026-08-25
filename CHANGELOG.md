@@ -320,21 +320,25 @@ hand-written file, and the diagnostic says so. See **Added** and **Changed** bel
   preserved on purpose, and a recognized pin in any other maintained document fails as an
   unclassified release surface. The count is exact, not a minimum, because a minimum lets a newly
   added pin mask the deletion of a required occurrence; what it closes is any change that alters
-  the number of recognized pins, never one that preserves it, so neither a deletion compensated by
-  a new current pin in the same document nor a newly added spelling `_PINNED_REF` never sees is
-  reported. Identifying individual pin sites and widening candidate recognition both stay out of
-  scope. A manifest entry with no
-  matching document fails too, so deleting the document does not read as compliance. "Maintained
-  documents" is the sorted root `*.md` files, the same set `scripts/check_doc_links.py` takes as
-  its link sources; the two selections are spelled separately, because neither script is
-  importable from the other's process, and a test holds them identical.
+  the number of recognized pins, never one that preserves it, so neither a deletion compensated
+  by a new current pin in the same document nor a newly added spelling that `_PINNED_REF` never
+  sees is reported. Identifying individual pin sites and widening candidate recognition both stay
+  out of scope. Two policy errors are reported alongside the pins: a manifest entry with no
+  matching document, so deleting the document does not read as compliance, and a document that is
+  declared and exempted at once, whose exemption is applied first and would otherwise silence its
+  declared count. "Maintained documents" is the sorted root `*.md` files, the same set
+  `scripts/check_doc_links.py` takes as its link sources; the two selections are spelled
+  separately, because neither script is importable from the other's process, and a test holds
+  them identical.
 - `scripts/check_typing_boundaries.py` matched six generic keywords as an inner directory, an
   exact stem, or a `_<keyword>` suffix, so a future `doc_lattice/cache/external.py`,
   `doc_lattice/external/store.py`, or `doc_lattice/cache_store_external.py` would each have opened
   a `typing.Any` escape hatch nobody decided to open. The keyword set is replaced by an exact
   allowlist of the three modules AD-3 actually names, spelled as source-root-relative paths rather
-  than stems so a same-named module elsewhere in the tree cannot inherit the exemption. The
-  scanned tree is unchanged: those three are the only modules that use the escape hatches today.
+  than stems so a same-named module elsewhere in the tree cannot inherit the exemption. Because
+  those paths are relative to the source root, the check now refuses a scan root that does not
+  carry them rather than reporting the three exempt modules as violations. The scanned tree is
+  unchanged: those three are the only modules that use the escape hatches today.
 - CI runs Ruff check and Ruff format check over `src/ tests/ scripts/` and `ty` over
   `src/ scripts/`, where the release-gating scripts were previously unlinted, unformatted-checked,
   and untyped. The tree already passed all three, so this is enforcement coverage rather than a

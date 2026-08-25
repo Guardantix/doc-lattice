@@ -258,8 +258,14 @@ def test_adding_an_extra_pin_to_a_declared_surface_fails_the_count():
     assert "expected exactly 1" in messages[0]
 
 
-def test_an_added_pin_cannot_mask_a_deleted_one():
-    """The reason counts are exact: a replacement keeps the total but is still a deletion."""
+def test_a_compensating_add_nets_to_the_count_and_an_unrecognized_spelling_does_not():
+    """What the exact count does and does not close, in one case.
+
+    A deletion compensated by another recognized current pin in the same document keeps the
+    total and passes, because the manifest counts occurrences rather than identifying sites.
+    What the count does catch is any change that lowers the total, including one that reformats
+    a required occurrence into a spelling ``_PINNED_REF`` never sees.
+    """
     readme = (
         "uvx --from doc-lattice==0.4.0 doc-lattice\n"
         "uvx --from doc-lattice==0.4.0 doc-lattice init\n"
@@ -274,6 +280,18 @@ def test_an_added_pin_cannot_mask_a_deleted_one():
     messages = _check("0.4.0", _PYPROJECT, _CHANGELOG, {"README.md": reformatted}, {"README.md": 2})
     assert len(messages) == 1
     assert "README.md" in messages[0]
+
+
+def test_a_document_declared_and_exempted_at_once_is_reported():
+    """The exemption runs first, so an overlap would silence a declared count with no message."""
+    policy = PinPolicy(manifest={"README.md": 1}, historical=frozenset({"README.md"}))
+    messages = check_version_consistency(
+        "0.4.0", _PYPROJECT, _CHANGELOG, {"README.md": "# doc-lattice\n"}, policy
+    )
+    assert len(messages) == 1
+    assert "README.md" in messages[0]
+    assert "PIN_MANIFEST" in messages[0]
+    assert "HISTORICAL_PIN_DOCS" in messages[0]
 
 
 def test_a_pin_outside_the_manifest_fails_as_an_unclassified_release_surface():
@@ -362,13 +380,33 @@ def test_the_changelog_really_does_carry_superseded_pins():
     assert superseded, "CHANGELOG.md carries no superseded pins; HISTORICAL_PIN_DOCS is now moot"
 
 
+def _write_selection_fixture(root):
+    """Write the shapes that distinguish a maintained document from every near miss."""
+    (root / "README.md").write_text("# Readme\n", encoding="utf-8")
+    (root / "AGENTS.md").write_text("# Agents\n", encoding="utf-8")
+    (root / "notes.txt").write_text("text\n", encoding="utf-8")
+    (root / "docs").mkdir()
+    (root / "docs" / "staging.md").write_text("# Staged\n", encoding="utf-8")
+    (root / "directory.md").mkdir()
+
+
+def test_maintained_documents_are_the_sorted_root_markdown_files(tmp_path):
+    _write_selection_fixture(tmp_path)
+
+    assert [path.name for path in maintained_documents(tmp_path)] == ["AGENTS.md", "README.md"]
+
+
+def test_the_shipped_policy_keeps_its_two_classifications_exclusive():
+    assert set(PIN_POLICY.manifest).isdisjoint(PIN_POLICY.historical)
+
+
 def test_every_policy_document_is_a_maintained_document():
     names = set(_repository_documents())
     assert set(PIN_POLICY.manifest) <= names
     assert set(PIN_POLICY.historical) <= names
 
 
-def test_maintained_documents_matches_the_doc_links_definition():
+def test_maintained_documents_matches_the_doc_links_definition(tmp_path):
     """One definition of "maintained document", asserted rather than assumed.
 
     The two guards cannot import each other -- neither script is on the other's path -- so the
@@ -376,3 +414,7 @@ def test_maintained_documents_matches_the_doc_links_definition():
     """
     doc_links = run_path(str(_ROOT / "scripts" / "check_doc_links.py"))
     assert maintained_documents(_ROOT) == doc_links["maintained_documents"](_ROOT)
+    # The real tree carries no staged directory and no ``.md`` directory, so agreeing on it
+    # alone would leave the parts of the selection that differ untested.
+    _write_selection_fixture(tmp_path)
+    assert maintained_documents(tmp_path) == doc_links["maintained_documents"](tmp_path)
