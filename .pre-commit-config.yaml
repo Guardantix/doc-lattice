@@ -51,6 +51,16 @@ repos:
         language: system
         always_run: true
         pass_filenames: false
+      # always_run for the same reason, one file further apart: an edit to scaffold.py or to
+      # MANAGED_CI.md invalidates a rule about CHANGELOG.md, and none of the three is the file
+      # the other two changed. This mirrors the offline half only; the `Code quality` context is
+      # the authority, and the script's docstring records why.
+      - id: check-migration-rule
+        name: check migration rule
+        entry: uv run --locked --group dev python scripts/check_migration_rule.py
+        language: system
+        always_run: true
+        pass_filenames: false
 
   - repo: https://github.com/Yelp/detect-secrets
     rev: v1.5.0

@@ -28,6 +28,18 @@ jobs:
       - run: uv run --no-sync python scripts/check_typing_boundaries.py src/
       - run: uv run --no-sync python scripts/check_version_sync.py
       - run: uv run --no-sync python scripts/check_doc_links.py
+      # On a pull request the guard also compares the committed baseline against the base branch,
+      # which is the half that catches a renderer and its baseline updated in the same commit. The
+      # base ref is fetched shallowly because `actions/checkout` leaves only the merge commit.
+      - env:
+          BASE_REF: ${{ github.base_ref }}
+        run: |
+          if [ -n "${BASE_REF}" ]; then
+            git fetch --no-tags --depth=1 origin "refs/heads/${BASE_REF}"
+            uv run --no-sync python scripts/check_migration_rule.py --base-ref FETCH_HEAD
+          else
+            uv run --no-sync python scripts/check_migration_rule.py
+          fi
 
   # The three `*-result` jobs below exist so branch protection can require one fixed context per
   # matrix instead of the per-leg names GitHub generates from the matrix values. Requiring the

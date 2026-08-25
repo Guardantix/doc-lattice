@@ -56,6 +56,13 @@ check its current state.
    separated by install kind. The generic upgrade procedure covering routine pin bumps is owned by
    [README.md](README.md#upgrading); this checklist owns only the rule that a qualifying release
    must carry the subsection.
+
+   That rule is enforced, not merely written down. `scripts/check_migration_rule.py` compares
+   those blocks against a committed normalized baseline, `scripts/migration_baseline.json`, and
+   the release commit that promotes `## [Unreleased]` must regenerate it by running that script
+   with `--update` in the same commit; the guard fails the release pull request until it does.
+   The script's module docstring owns the mechanism, what the baseline's stamp closes, and the
+   limits of both.
 5. Run the full verification suite, open a pull request, and wait for every CI check to pass.
 6. Merge the pull request to `main`.
 

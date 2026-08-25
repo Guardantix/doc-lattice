@@ -81,11 +81,8 @@ Start at GTX-176. It is two points, and it is what makes every other CI change i
 cheap.
 
 - Collapse the eight matrix-generated required status checks behind three stable aggregator
-  contexts (GTX-176), so branch protection stops carrying CI matrix values literally. Three items
-  here are sequenced directly behind it: GTX-114, GTX-108, and GTX-119.
-- Give the guard scripts the reach their names and CLAUDE.md imply (GTX-114), then guard the
-  Migration-subsection release rule the same way (GTX-150) rather than leaving it as prose that
-  release pressure can silently skip.
+  contexts (GTX-176), so branch protection stops carrying CI matrix values literally. Two items
+  here are sequenced directly behind it: GTX-108 and GTX-119.
 - Arm the section-identity gates in CI and record a bench baseline (GTX-108), then write the
   ordered upgrade tracks into AD-13 against the resulting reality (GTX-107). Arming first is what
   makes the procedure short: folding the compat constants into the cache staleness check removes a
