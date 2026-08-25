@@ -72,7 +72,8 @@ issue stays open: `build-release` and `publish` execute only on a real version-b
 sweep the previous revision of this inventory rested on, closed with that sweep on 2026-08-20.
 
 That accounting leaves one open item, and it is the whole remaining release sequence: GTX-279,
-then the tag, with nothing else admitted in between. GTX-304, filed 2026-08-24 as GTX-213's
+which closes with the landing of the README pass this revision records, then the tag, with
+nothing else admitted in between. GTX-304, filed 2026-08-24 as GTX-213's
 successor, closed with the sweep this revision of the document rests on, so its blocker relation
 on GTX-279 is satisfied history like GTX-153's, every ordering edge into the README pass is
 settled, and the tracker holds no other non-terminal issue in the 6.0 project.
