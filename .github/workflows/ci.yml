@@ -22,9 +22,9 @@ jobs:
           enable-cache: true
       - run: uv python install ${{ matrix.python }}
       - run: uv sync --locked --group dev
-      - run: uv run --no-sync ruff check src/ tests/
-      - run: uv run --no-sync ruff format --check src/ tests/
-      - run: uv run --no-sync ty check src/
+      - run: uv run --no-sync ruff check src/ tests/ scripts/
+      - run: uv run --no-sync ruff format --check src/ tests/ scripts/
+      - run: uv run --no-sync ty check src/ scripts/
       - run: uv run --no-sync python scripts/check_typing_boundaries.py src/
       - run: uv run --no-sync python scripts/check_version_sync.py
       - run: uv run --no-sync python scripts/check_doc_links.py

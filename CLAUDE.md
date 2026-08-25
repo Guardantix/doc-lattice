@@ -32,15 +32,16 @@ Use Python 3.13 or later and run dependency management and project commands thro
 
 ```bash
 uv sync --group dev
+uv run --group dev pre-commit install
 uv run doc-lattice --help
 
 uv run --group dev pytest
 uv run --group dev pytest tests/test_loader.py::test_duplicate_id_raises
 uv run --group dev pytest tests/test_check.py -v
 
-uv run --group dev ruff check src tests
-uv run --group dev ruff format --check src tests
-uv run --group dev ty check src
+uv run --group dev ruff check src tests scripts
+uv run --group dev ruff format --check src tests scripts
+uv run --group dev ty check src scripts
 uv run --group dev python scripts/check_typing_boundaries.py src
 uv run --group dev python scripts/check_version_sync.py
 uv run --group dev python scripts/check_doc_links.py
@@ -50,8 +51,10 @@ uv run --group dev python scripts/bench_sections.py
 
 Unset `FORCE_COLOR` when your shell sets it, since forced color breaks human-output assertions.
 
-Pre-commit runs formatting, linting, type and boundary checks, version sync, secret detection,
-and repository hygiene checks. If a hook changes a file, re-stage it before committing.
+`pre-commit install` is a required setup step and has to be run once per clone, since Git hooks
+are not carried in a checkout. Pre-commit runs formatting, linting, type and boundary checks,
+version sync, secret detection, and repository hygiene checks. If a hook changes a file, re-stage
+it before committing.
 
 ## Enforced repository rules
 
@@ -60,9 +63,11 @@ and repository hygiene checks. If a hook changes a file, re-stage it before comm
 - Before moving logic across an I/O boundary or changing which module owns an effect, consult
   [ARCHITECTURE.md](ARCHITECTURE.md) and update the relevant decision when the boundary changes.
   That source defines the `persistence.py` and `reconcile_transaction.py` ownership boundaries.
-- `typing.Any` and `typing.cast` are limited to boundary modules recognized by
-  `scripts/check_typing_boundaries.py`. Validate untyped YAML and JSON at those boundaries, then
-  pass typed models through the rest of the engine.
+- `typing.Any` and `typing.cast` are limited to the boundary modules AD-3 names, which
+  `scripts/check_typing_boundaries.py` holds as an exact allowlist of source-root-relative paths
+  rather than a name pattern. Validate untyped YAML and JSON at those boundaries, then pass typed
+  models through the rest of the engine. Opening a new boundary is an allowlist edit and an AD-3
+  edit, never a rename that happens to match.
 - Custom exceptions extend `ProjectError`, carry a code, and give actionable context. Do not add
   bare `except Exception` or `except BaseException` catches. The one exception is a signal type
   at an I/O boundary whose builtin ancestry is what classifies it: `cli/pipe_policy.py`'s
@@ -86,7 +91,18 @@ and repository hygiene checks. If a hook changes a file, re-stage it before comm
 - Keep `src/doc_lattice/__init__.py`, `pyproject.toml`, the first versioned CHANGELOG heading,
   and the exact install pins in README.md and MANAGED_CI.md synchronized. Run
   `scripts/check_version_sync.py` for every documentation or release change that can affect those
-  values.
+  values. Release surfaces are declared there, not discovered: `PIN_MANIFEST` carries the exact
+  recognized-pin count for each document that pins a live release, `HISTORICAL_PIN_DOCS` exempts
+  CHANGELOG.md's preserved migration pins, and a recognized pin in any other maintained document
+  fails as an unclassified release surface. Changing how many pinned install refs a document
+  carries is therefore an enrollment decision: edit the count in the same change, and enroll a new
+  document rather than letting it pin a release unenforced. The count closes any change that
+  alters that number, never one that preserves it: a deletion compensated by a new current pin in
+  the same document, and a spelling `_PINNED_REF` does not recognize, both pass.
+- `scaffold.PYTHON_PIN` and the `requires-python` lower bound are both copies of the AD-24 floor
+  and are held to each other by a parsed correspondence test in `tests/test_conventions.py`.
+  Change both or neither. Ruff's `target-version`, the CI matrix, and the slugger generator's
+  default interpreter are further machine-consumed copies that no gate correlates yet.
 - `scripts/check_doc_links.py` resolves every relative Markdown link and `#anchor` in the
   maintained documents, which it takes as the sorted root `*.md` files. A target may be any
   repository-contained relative path, `docs/` staging included; absolute and external

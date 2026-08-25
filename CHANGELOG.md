@@ -311,6 +311,52 @@ hand-written file, and the diagnostic says so. See **Added** and **Changed** bel
   coded domain `constants.py` declares, and the sample must be byte-for-byte what a flagless
   `init` writes. Tests pin the uncoded shapes too.
 
+- The repository guards now enforce what their names imply, in four places where they did not.
+  `scripts/check_version_sync.py` loaded README.md and MANAGED_CI.md alone and treated a document
+  with no recognized pin as consistent, so deleting a pinned install ref was invisible and a pin
+  added to a new document was unenforced. Release surfaces are now declared rather than
+  discovered: `PIN_MANIFEST` names each document with the exact number of recognized pins it
+  carries, `HISTORICAL_PIN_DOCS` exempts CHANGELOG.md, whose superseded migration pins are
+  preserved on purpose, and a recognized pin in any other maintained document fails as an
+  unclassified release surface. The count is exact, not a minimum, because a minimum lets a newly
+  added pin mask the deletion of a required occurrence; what it closes is any change that alters
+  the number of recognized pins, never one that preserves it, so neither a deletion compensated
+  by a new current pin in the same document nor a newly added spelling that `_PINNED_REF` never
+  sees is reported. Identifying individual pin sites and widening candidate recognition both stay
+  out of scope. Two policy errors are reported alongside the pins: a manifest entry with no
+  matching document, so deleting the document does not read as compliance, and a document that is
+  declared and exempted at once, whose exemption is applied first and would otherwise silence its
+  declared count. "Maintained documents" is the sorted root `*.md` files, the same set
+  `scripts/check_doc_links.py` takes as its link sources; the two selections are spelled
+  separately, because neither script is importable from the other's process, and a test holds
+  them identical.
+- `scripts/check_typing_boundaries.py` matched six generic keywords as an inner directory, an
+  exact stem, or a `_<keyword>` suffix, so a future `doc_lattice/cache/external.py`,
+  `doc_lattice/external/store.py`, or `doc_lattice/cache_store_external.py` would each have opened
+  a `typing.Any` escape hatch nobody decided to open. The keyword set is replaced by an exact
+  allowlist of the three modules AD-3 actually names, spelled as source-root-relative paths rather
+  than stems so a same-named module elsewhere in the tree cannot inherit the exemption. Because
+  those paths are relative to the source root, the check now refuses a scan root that does not
+  carry them rather than reporting the three exempt modules as violations. The scanned tree is
+  unchanged: those three are the only modules that use the escape hatches today.
+- CI runs Ruff check and Ruff format check over `src/ tests/ scripts/` and `ty` over
+  `src/ scripts/`, where the release-gating scripts were previously unlinted, unformatted-checked,
+  and untyped. The tree already passed all three, so this is enforcement coverage rather than a
+  cleanup. CLAUDE.md's contributor commands name the same target sets.
+- `scaffold.PYTHON_PIN` and the `requires-python` lower bound are held to each other by a parsed
+  correspondence test. Both are copies of the floor AD-24 declares load-bearing, and changing
+  either alone now fails. The existing scaffold test fails on a lone `PYTHON_PIN` change by
+  asserting the rendered `--python 3.13`, which proved nothing about `requires-python`. The parse
+  judges two clause shapes, the sole `>=` clause and upper bounds, and refuses a specifier set
+  carrying anything else: every other operator can raise the effective floor without touching the
+  `>=` clause, so reducing such a set to its `>=` clause would report a floor installers do not
+  honor and pass the correspondence against a `PYTHON_PIN` they reject. Three
+  machine-consumed copies of the floor stay uncorrelated and are named here so the claim stays
+  honest: Ruff's `target-version`, the CI matrix, and the slugger generator's default interpreter.
+- CLAUDE.md names `uv run --group dev pre-commit install` as a required contributor setup step and
+  says it is per clone. It described what the hooks run without ever saying to install them.
+  Adopter-side activation was already documented in README.md and MANAGED_CI.md and is unchanged.
+
 ### Fixed
 
 - The release pipeline now runs the packaged artifact before it can be published. `build-release`
