@@ -163,6 +163,25 @@ hand-written file, and the diagnostic says so. See **Added** and **Changed** bel
   change. AD-43 in ARCHITECTURE.md records the decision and amends AD-42, whose conclusion that a
   wrong comment can only enter by hand edit holds at authorship time alone: a Git tag is mutable,
   and the pinned `actions/checkout` release reports `immutable: false`.
+- `scripts/check_migration_rule.py` enforces the release rule that changed adopter output carries a
+  `### Migration` subsection, which RELEASING.md step 4 had only ever stated as prose, in the one
+  situation where prose is weakest: a release under time pressure. The guard snapshots the surfaces
+  that rule names -- the `.gitignore`, pre-commit, and workflow blocks `init` prints, rendered here
+  from `doc_lattice.scaffold` across a representative default-branch matrix, and the trusted Linear
+  workflow and the two `gh` procedure sections MANAGED_CI.md publishes, extracted from the document
+  because AD-32 left no renderer for them -- and compares them against a committed baseline,
+  `scripts/migration_baseline.json`. Only the routine per-release version-pin substitution is
+  normalized away, since every release performs it and step 4 exempts it by name. A baseline that
+  any change may freely rewrite would authenticate nothing, so it is bound twice: its stamp must
+  equal the latest released changelog heading, which forces the rollover into the release commit
+  that promotes `## [Unreleased]`, and required pull-request CI additionally compares it against the
+  base ref, where a content change without a version promotion, or a promoted section missing the
+  subsection, fails. Mid-cycle, a change to generated output is authorized by writing the
+  subsection, never by advancing the baseline. It runs as a step in the CI code-quality job, on both
+  the base-ref path and the plain one the push to `main` takes, and as an `always_run` pre-commit
+  hook mirroring the offline half for early feedback. The script's module docstring owns the
+  mechanism and states what stays open: edits to the guard itself, and branch shapes outside the
+  matrix.
 
 ### Changed
 

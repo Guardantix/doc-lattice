@@ -816,6 +816,25 @@ def test_version_sync_is_re_asserted_against_the_release_source():
     )
 
 
+def test_migration_rule_runs_in_code_quality_on_both_paths():
+    # GTX-150. `Code quality` is this guard's only authority: the pre-commit hook is opt-in, and
+    # the release job deliberately does not re-assert it, because this same job runs again on the
+    # push to `main` that is the release commit. Both invocations are pinned because they carry
+    # different halves of the rule -- the base-ref one is what catches a renderer and its baseline
+    # updated together, and the plain one is what runs on that push, where there is no base ref.
+    argvs = [
+        argv
+        for step in _WORKFLOW["jobs"]["code-quality"]["steps"]
+        for argv in _invocations(_commands(step))
+        if _invokes(argv, "scripts/check_migration_rule.py")
+    ]
+    assert len(argvs) == 2, "code-quality must run the migration guard on both paths"
+    with_base = [argv for argv in argvs if "--base-ref" in argv]
+    assert len(with_base) == 1
+    assert with_base[0][with_base[0].index("--base-ref") + 1] == "FETCH_HEAD"
+    assert [argv for argv in argvs if "--base-ref" not in argv]
+
+
 def test_smoke_step_runs_the_packaged_cli_against_the_release_fixture():
     # This is the pre-tag execution of the packaged CLI, installed from the release source rather
     # than from the working tree, so a packaging break shows up before anything immutable exists.

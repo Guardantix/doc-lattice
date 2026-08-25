@@ -45,6 +45,7 @@ uv run --group dev ty check src scripts
 uv run --group dev python scripts/check_typing_boundaries.py src
 uv run --group dev python scripts/check_version_sync.py
 uv run --group dev python scripts/check_doc_links.py
+uv run --group dev python scripts/check_migration_rule.py
 uv run --group dev python scripts/generate_github_slugger_data.py --check
 uv run --group dev python scripts/bench_sections.py
 ```
@@ -148,7 +149,7 @@ it before committing.
   The full pytest suite enforces coverage of at least 80 percent.
 
 For Markdown-only changes, at minimum run `scripts/check_version_sync.py`,
-`scripts/check_doc_links.py`, and `git diff --check`. Run the full suite when commit hooks do not
-execute it. For production changes, the complete handoff verification is pytest, Ruff check and
+`scripts/check_doc_links.py`, `scripts/check_migration_rule.py`, and `git diff --check`. Run the
+full suite when commit hooks do not execute it. For production changes, the complete handoff verification is pytest, Ruff check and
 format check, `ty`, typing boundaries, version sync, doc links, and any generator or benchmark
 gate affected by the change.
