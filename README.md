@@ -687,7 +687,7 @@ your documents, then run `doc-lattice reconcile --all` once before
 [enabling the gates](#enabling-the-gates):
 
 ```bash
-uvx --python 3.13 --from doc-lattice==5.0.0 doc-lattice reconcile --all
+uvx --python 3.13 --from doc-lattice==6.0.0 doc-lattice reconcile --all
 ```
 
 Commit the annotated input state and start from an otherwise clean working tree before running
@@ -711,7 +711,7 @@ Bootstrap config and the drift and authority-ladder gates for a repo whose docs 
 track:
 
 ```bash
-uvx --python 3.13 --from doc-lattice==5.0.0 doc-lattice init
+uvx --python 3.13 --from doc-lattice==6.0.0 doc-lattice init
 ```
 
 This writes `.doc-lattice.yml` (only if absent) and always prints the reconcile-artifact
@@ -828,7 +828,7 @@ Confirm activation with a commit that stages at least one Markdown file. Both ge
 entries carry `files: \.md$`, so an empty or non-Markdown commit runs pre-commit and reports both
 doc-lattice hooks as `Skipped`. That looks like a working gate and proves nothing about it.
 
-The hook entries run `uvx --python 3.13 --from doc-lattice==5.0.0`, so the pinned release has to
+The hook entries run `uvx --python 3.13 --from doc-lattice==6.0.0`, so the pinned release has to
 resolve on every gated commit, out of uv's cache once it is warm and from PyPI when it is not.
 These gates are offline in the sense that matters for secrets, meaning they never require or
 receive `LINEAR_API_KEY`. That is not the same as running without a network.
