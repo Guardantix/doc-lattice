@@ -32,12 +32,6 @@ def test_the_allowlist_is_exactly_the_ad3_modules():
     assert frozenset(_AD3_MODULES) == BOUNDARY_MODULES
 
 
-def test_every_allowlisted_module_exists_in_the_source_tree():
-    """An allowlist entry naming a module that no longer exists is a silent open hatch."""
-    missing = [relpath for relpath in BOUNDARY_MODULES if not (_ROOT / "src" / relpath).is_file()]
-    assert missing == [], f"BOUNDARY_MODULES names modules that do not exist: {sorted(missing)}"
-
-
 @pytest.mark.parametrize(
     "relpath",
     [
@@ -92,7 +86,9 @@ def _run_against(root, monkeypatch):
 
 
 def test_the_repository_source_root_carries_every_allowlisted_module():
-    assert missing_boundary_modules(_ROOT / "src") == []
+    """An allowlist entry naming a module that no longer exists is a silent open hatch."""
+    missing = missing_boundary_modules(_ROOT / "src")
+    assert missing == [], f"BOUNDARY_MODULES names modules that do not exist: {missing}"
 
 
 def test_a_root_one_level_below_the_source_root_misses_the_whole_allowlist():
@@ -114,6 +110,31 @@ def test_the_wrong_scan_root_is_refused_instead_of_flagging_the_boundary_modules
     assert "source root" in output
     assert "doc_lattice/frontmatter_parser.py" in output
     assert "imports typing.Any" not in output
+
+
+def test_a_stale_allowlist_entry_is_reported_as_such_not_as_a_wrong_root(
+    tmp_path, monkeypatch, capsys
+):
+    """The scan root is spelled `src/` by both callers, so the likelier fault is the allowlist.
+
+    Telling a contributor who already passed `src/` to point the check at the source root would
+    name the one cause that cannot apply. Some entries missing rather than all of them means a
+    module was renamed or removed without the matching AD-3 and allowlist edit.
+    """
+    present = _AD3_MODULES[:-1]
+    for relpath in present:
+        _write_module(tmp_path, relpath)
+
+    with pytest.raises(SystemExit) as excinfo:
+        _run_against(tmp_path, monkeypatch)
+
+    assert excinfo.value.code == 1
+    output = capsys.readouterr().out
+    assert _AD3_MODULES[-1] in output
+    assert "BOUNDARY_MODULES" in output
+    assert "Point this check at the source root" not in output
+    for relpath in present:
+        assert relpath not in output
 
 
 def test_a_valid_scan_root_exempts_the_allowlisted_modules(tmp_path, monkeypatch, capsys):

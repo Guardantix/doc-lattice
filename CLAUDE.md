@@ -96,9 +96,8 @@ it before committing.
   CHANGELOG.md's preserved migration pins, and a recognized pin in any other maintained document
   fails as an unclassified release surface. Changing how many pinned install refs a document
   carries is therefore an enrollment decision: edit the count in the same change, and enroll a new
-  document rather than letting it pin a release unenforced. The count closes any change that
-  alters that number, never one that preserves it: a deletion compensated by a new current pin in
-  the same document, and a spelling `_PINNED_REF` does not recognize, both pass.
+  document rather than letting it pin a release unenforced. The script's module docstring owns
+  what the count does and does not close.
 - `scaffold.PYTHON_PIN` and the `requires-python` lower bound are both copies of the AD-24 floor
   and are held to each other by a parsed correspondence test in `tests/test_conventions.py`.
   Change both or neither. Ruff's `target-version`, the CI matrix, and the slugger generator's

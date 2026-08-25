@@ -40,8 +40,8 @@ def missing_boundary_modules(search_dir: Path) -> list[str]:
     `BOUNDARY_MODULES` is spelled relative to the source root, so it classifies correctly only
     when the scan is pointed at that root. Pointed one level deeper, every entry misses and the
     three exempt modules are reported as violations; pointed at an unrelated tree, the scan runs
-    with no exemptions at all and says nothing about why. Both are caller error rather than a
-    finding, so `main` refuses the root instead of reporting against it.
+    with no exemptions at all and says nothing about why. Neither is a finding about the tree, so
+    `main` refuses the root instead of reporting against it.
 
     Args:
         search_dir: The directory the scan was pointed at.
@@ -99,11 +99,21 @@ def main() -> None:
     search_dir = Path(sys.argv[1]) if len(sys.argv) > 1 else Path()
     missing = missing_boundary_modules(search_dir)
     if missing:
-        print(f"FAIL: {search_dir} is not the source root the boundary allowlist is spelled")
-        print("against; it does not contain:")
+        # Two different faults reach here and their remedies are opposites. Every entry missing
+        # means the scan root is wrong. The callers spell that root `src/` and never type it by
+        # hand, so the likelier fault is the other one: some entries missing means the allowlist
+        # names a module the tree no longer has, which has to be edited alongside AD-3.
+        wrong_root = len(missing) == len(BOUNDARY_MODULES)
+        if wrong_root:
+            header = f"FAIL: {search_dir} is not the source root the allowlist is spelled against."
+            remedy = "Point this check at the source root, such as `src/`."
+        else:
+            header = f"FAIL: the boundary allowlist names modules missing from {search_dir}:"
+            remedy = "Update BOUNDARY_MODULES and the AD-3 decision together, or restore them."
+        print(header)
         for relpath in missing:
             print(f"  {relpath}")
-        print("Point this check at the source root, such as `src/`.")
+        print(remedy)
         sys.exit(1)
     violations: list[str] = []
     for py_file in search_dir.rglob("*.py"):

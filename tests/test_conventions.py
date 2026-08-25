@@ -134,39 +134,30 @@ def test_no_raw_action_pin_values():
             assert value not in content, f"{py_file.name} inlines the pin value '{value}'"
 
 
-def _dotted_release(version: str) -> tuple[int, ...]:
-    """Return a purely numeric dotted version as a release tuple.
+def _dotted_release(version: str) -> tuple[int, ...] | None:
+    """Return a purely numeric dotted version as a directly comparable release tuple.
+
+    Trailing zeros are dropped, because PEP 440 reads a shorter release as zero-extended: ``3.13``
+    and ``3.13.0`` normalize to the same tuple, so ordinary tuple ordering already sees
+    ``<3.13.0`` as excluding a ``3.13`` floor rather than admitting it on tuple length. Trimming
+    is that same relation without a padding step, matching how ``tests/test_release_workflow.py``
+    correlates a declared floor with an exact pin.
 
     Args:
         version: A version string such as ``"3.13"``.
 
     Returns:
-        The dot-separated components as integers, or the empty tuple when any component is not
-        an ASCII decimal run. The empty return is the caller's signal to refuse: a version this
-        cannot order is one the admissibility check below cannot judge.
+        The dot-separated components as integers with trailing zeros removed, or None when any
+        component is not an ASCII decimal run. None is the caller's signal to refuse: a version
+        this cannot order is one the admissibility check below cannot judge.
     """
     parts = version.split(".")
     if not all(part.isascii() and part.isdigit() for part in parts):
-        return ()
-    return tuple(int(part) for part in parts)
-
-
-def _zero_padded(left: tuple[int, ...], right: tuple[int, ...]) -> tuple[tuple[int, ...], ...]:
-    """Return both release tuples padded with zeros to a common length.
-
-    PEP 440 reads a shorter release as zero-extended, so ``3.13`` and ``3.13.0`` are the same
-    version. Comparing the raw tuples would instead order the shorter one first and accept
-    ``<3.13.0`` as admitting a ``3.13`` floor.
-
-    Args:
-        left: One release tuple.
-        right: The other release tuple.
-
-    Returns:
-        The two tuples, in the order given, each extended to the longer length.
-    """
-    width = max(len(left), len(right))
-    return tuple(release + (0,) * (width - len(release)) for release in (left, right))
+        return None
+    release = [int(part) for part in parts]
+    while release and release[-1] == 0:
+        release.pop()
+    return tuple(release)
 
 
 def _requires_python_lower_bound(requires_python: str) -> str:
@@ -197,37 +188,33 @@ def _requires_python_lower_bound(requires_python: str) -> str:
             rather than being silently skipped.
     """
     clauses = [clause.strip() for clause in requires_python.split(",")]
-    lower_bounds = [
-        clause.removeprefix(">=").strip() for clause in clauses if clause.startswith(">=")
-    ]
+    lower_bounds = [clause for clause in clauses if clause.startswith(">=")]
+    upper_bounds = [clause for clause in clauses if clause.startswith("<")]
+    unjudged = [clause for clause in clauses if clause not in lower_bounds + upper_bounds]
     assert len(lower_bounds) == 1, (
         f"requires-python {requires_python!r} does not carry exactly one '>=' clause; "
         f"the PYTHON_PIN correspondence cannot be judged against it"
     )
-    unjudged = [clause for clause in clauses if not clause.startswith((">=", "<"))]
     assert not unjudged, (
         f"requires-python {requires_python!r} carries {unjudged} alongside its '>=' clause; "
         f"only an upper bound cannot raise the effective floor, so the PYTHON_PIN "
         f"correspondence cannot be judged against it"
     )
-    floor = lower_bounds[0]
-    upper_bounds = [clause for clause in clauses if clause.startswith("<")]
+    floor = lower_bounds[0].removeprefix(">=").strip()
     if upper_bounds:
         floor_release = _dotted_release(floor)
-        assert floor_release, (
+        assert floor_release is not None, (
             f"requires-python {requires_python!r} names floor {floor!r}, which is not a dotted "
             f"numeric version; its upper bounds cannot be ordered against it"
         )
         for clause in upper_bounds:
             inclusive = clause.startswith("<=")
-            bound = clause.removeprefix("<=" if inclusive else "<").strip()
-            bound_release = _dotted_release(bound)
-            assert bound_release, (
+            bound_release = _dotted_release(clause.removeprefix("<").removeprefix("=").strip())
+            assert bound_release is not None, (
                 f"requires-python {requires_python!r} carries upper bound {clause!r}, whose "
                 f"version is not dotted numeric; it cannot be ordered against floor {floor!r}"
             )
-            padded_floor, padded_bound = _zero_padded(floor_release, bound_release)
-            admits = padded_floor <= padded_bound if inclusive else padded_floor < padded_bound
+            admits = floor_release <= bound_release if inclusive else floor_release < bound_release
             assert admits, (
                 f"requires-python {requires_python!r} carries upper bound {clause!r}, which "
                 f"excludes floor {floor!r}; installers reject every {floor} interpreter, so the "
