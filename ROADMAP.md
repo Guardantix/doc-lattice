@@ -71,11 +71,12 @@ issue stays open: `build-release` and `publish` execute only on a real version-b
 `doc-lattice v6.x`, where the 6.x section names it as that validation checkpoint. GTX-213, the
 sweep the previous revision of this inventory rested on, closed with that sweep on 2026-08-20.
 
-That accounting leaves two open items, and they are the whole remaining release sequence: GTX-304,
-filed 2026-08-24 as GTX-213's successor and the sweep this revision of the document rests on,
-then GTX-279, then the tag, with nothing else admitted in between. GTX-304 blocks GTX-279 on the
-tracker, so the order is a recorded relation rather than this sentence alone, and GTX-304 closes
-with its own sweep and so is not carried below as pending work.
+That accounting leaves one open item, and it is the whole remaining release sequence: GTX-279,
+which closes with the landing of the README pass this revision records, then the tag, with
+nothing else admitted in between. GTX-304, filed 2026-08-24 as GTX-213's
+successor, closed with the sweep this revision of the document rests on, so its blocker relation
+on GTX-279 is satisfied history like GTX-153's, every ordering edge into the README pass is
+settled, and the tracker holds no other non-terminal issue in the 6.0 project.
 
 - Make README describe what 6.0 actually prints and enforces at the tag (GTX-279). GTX-113 did
   this once, and PR #301 landed it, but the window was then held open and behavior has landed

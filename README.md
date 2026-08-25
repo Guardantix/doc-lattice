@@ -265,6 +265,14 @@ run prints, its only meaningful flag is `--default-branch`, and combining it wit
 `--linear-team` is a usage error rather than a silently ignored request, because those two feed
 only the config this mode does not render.
 
+`init` reports its status on stderr: that it wrote `.doc-lattice.yml`, or that the file already
+exists and was left untouched, and which branch the printed workflow triggers on. Those three
+status records are each one record on one line at any terminal width, the same promise the
+`check` verdict line carries below, so a long branch name stays intact for a line-oriented
+pipeline instead of wrapping mid-token on a narrow console. The promise covers exactly those
+records: the placement, baseline, and activation guidance printed beside them is prose and wraps
+normally.
+
 Because `init` writes into the current directory and every lattice-loading command selects its
 config from *its* current directory, a run from a subdirectory of a repository whose root is
 already configured refuses rather than scaffolding a second, nested config. That nested file
@@ -407,6 +415,13 @@ lock: it re-reads each file at write time, detects a destination that changed un
 conflict, and rolls the batch back if anything fails before the commit. Its temporary artifacts are
 a project-root journal plus staged before and after images, covered by the `.gitignore` block that
 `doc-lattice init` prints.
+
+Human output is one record per line: each per-file record
+(`reconciled 'pc-design.md': art-direction#accent`, or the same line led by `would reconcile`
+under `--dry-run`) and the `nothing to reconcile` all-clear stay on one line at any terminal
+width, the same promise the `check` verdict line carries above, so a long document name or
+target ref reaches a line-oriented pipeline intact instead of wrapping mid-token on a narrow
+console.
 
 See [RECONCILE.md](https://github.com/Guardantix/doc-lattice/blob/main/RECONCILE.md) for
 selector details, dry-run and JSON output, the durability contract, and recovery.
