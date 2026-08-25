@@ -319,9 +319,11 @@ hand-written file, and the diagnostic says so. See **Added** and **Changed** bel
   carries, `HISTORICAL_PIN_DOCS` exempts CHANGELOG.md, whose superseded migration pins are
   preserved on purpose, and a recognized pin in any other maintained document fails as an
   unclassified release surface. The count is exact, not a minimum, because a minimum lets a newly
-  added pin mask the deletion of a required occurrence; what it closes is the deletion or
-  reformatting of the occurrences currently enrolled, not a newly added spelling `_PINNED_REF`
-  never sees, and widening candidate recognition stays out of scope. A manifest entry with no
+  added pin mask the deletion of a required occurrence; what it closes is any change that alters
+  the number of recognized pins, never one that preserves it, so neither a deletion compensated by
+  a new current pin in the same document nor a newly added spelling `_PINNED_REF` never sees is
+  reported. Identifying individual pin sites and widening candidate recognition both stay out of
+  scope. A manifest entry with no
   matching document fails too, so deleting the document does not read as compliance. "Maintained
   documents" is the sorted root `*.md` files, the same set `scripts/check_doc_links.py` takes as
   its link sources; the two selections are spelled separately, because neither script is

@@ -94,9 +94,11 @@ it before committing.
   values. Release surfaces are declared there, not discovered: `PIN_MANIFEST` carries the exact
   recognized-pin count for each document that pins a live release, `HISTORICAL_PIN_DOCS` exempts
   CHANGELOG.md's preserved migration pins, and a recognized pin in any other maintained document
-  fails as an unclassified release surface. Adding or removing a pinned install ref is therefore
-  an enrollment decision: edit the count in the same change, and enroll a new document rather
-  than letting it pin a release unenforced.
+  fails as an unclassified release surface. Changing how many pinned install refs a document
+  carries is therefore an enrollment decision: edit the count in the same change, and enroll a new
+  document rather than letting it pin a release unenforced. The count closes any change that
+  alters that number, never one that preserves it: a deletion compensated by a new current pin in
+  the same document, and a spelling `_PINNED_REF` does not recognize, both pass.
 - `scaffold.PYTHON_PIN` and the `requires-python` lower bound are both copies of the AD-24 floor
   and are held to each other by a parsed correspondence test in `tests/test_conventions.py`.
   Change both or neither. Ruff's `target-version`, the CI matrix, and the slugger generator's

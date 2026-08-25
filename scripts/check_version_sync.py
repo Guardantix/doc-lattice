@@ -9,11 +9,15 @@ unclassified release surface. "Maintained documents" means the sorted root ``*.m
 same mechanical set ``scripts/check_doc_links.py`` takes as its link sources.
 
 Counts are exact rather than minimums because a minimum lets a newly added pin mask the deletion
-of a required occurrence. What an exact count closes is the deletion or the reformatting of the
-occurrences currently enrolled: either lowers the recognized count and the failure names the
-document. It does not detect a newly added unrecognized spelling, in an enrolled document or in a
-pin-free one, because ``_PINNED_REF`` never sees one. Widening candidate recognition is
-deliberately out of scope.
+of a required occurrence. What an exact count closes is any change that alters the number of
+recognized pins: an uncompensated deletion or reformatting lowers it, and the failure names the
+document. What it does not close is a change that preserves that number, and there are two of
+those, both because the manifest counts occurrences rather than identifying sites. A change that
+deletes one enrolled pin and adds another recognized current pin to the same document nets to the
+declared count. And a newly added unrecognized spelling, in an enrolled document or in a pin-free
+one, is never seen by ``_PINNED_REF`` at all. Site identity and wider candidate recognition are
+both deliberately out of scope: this gate owns release currency, not the survival of one
+particular prose install instruction.
 """
 
 import re
@@ -35,8 +39,8 @@ _PINNED_REF = re.compile(
 )
 
 # The live release surfaces, each with the exact number of recognized install pins it carries.
-# Adding or removing an occurrence is an enrollment decision, so it has to be made here as well
-# as in the document.
+# Changing how many occurrences a document carries is an enrollment decision, so it has to be made
+# here as well as in the document.
 PIN_MANIFEST: Mapping[str, int] = {"README.md": 3, "MANAGED_CI.md": 5}
 
 # Documents whose recognized pins are historical rather than live. CHANGELOG.md preserves the
