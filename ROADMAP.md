@@ -111,8 +111,7 @@ GTX-263 blocks GTX-267, and everything else ships in whatever order it lands.
   written procedure would otherwise have to teach.
 - Close or record the remaining slugging gap: `github_heading_ids` slugs raw inline source where
   GitHub slugs rendered text (GTX-272).
-- Finish the CI rollouts that are already half true: complete the `Runtime floor compatibility`
-  requirement on `main`'s protected checks (GTX-289), run the shipped test suite from an unpacked
+- Finish the CI rollouts that are already half true: run the shipped test suite from an unpacked
   sdist so an exclusion gap cannot ship silently (GTX-292), lint `scripts/` in CI (GTX-271),
   decide whether `scripts/` joins the measured coverage source (GTX-268), and give the two CI
   scripts' failure-guarded reporting contract a single owner (GTX-301).

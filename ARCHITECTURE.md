@@ -2155,9 +2155,8 @@ the parity tests already make redundant and would sweep in the `v1` channel. **A
 pull-request check** was rejected twice over: the answer needs network access, so it cannot live
 in the offline suite that gates every pull request, and the protected contexts are a settings
 contract RELEASING.md owns, so joining that list is a branch-protection change this does not
-carry. The count is deliberately not restated here: GTX-119's rollout of
-`Runtime floor compatibility` is mid-flight, so the recorded list and the live rule differ by one
-until its readback, and a number written down here would be wrong for the duration.
+carry. The count is deliberately not restated here: the required list is that same contract for
+RELEASING.md to state, and a number copied into this record would be a second place to drift.
 **Reusing `scripts/audit_action_runtimes.py`'s transport** was rejected because it
 deliberately collapses every nonzero `gh api` result into one error, which is right for its
 contract and cannot express the finding-versus-failure split this one turns on.

@@ -583,11 +583,9 @@ separate control plane from [.github/workflows/ci.yml](.github/workflows/ci.yml)
 but not yet emitted leaves every open pull request waiting on a report that never arrives, so the
 order is fixed. Land the workflow first, under the existing required list. Wait for `main` to
 report the new context green at least once. Then apply one `PATCH` adding it, and read the rule
-back with the query above before trusting it. Until that readback shows five entries, this table
-describes the intended state and the live rule still has four -- and a red floor matrix can merge.
-GTX-119 owns that rollout; GTX-255, which asked the same question for the `rich` floor leg
-separately, is absorbed by it, since that leg is now one cell of this matrix rather than its own
-context.
+back with the query above before trusting it. GTX-255, which asked the same question for the
+`rich` floor leg separately, was absorbed by GTX-119's rollout, since that leg is now one cell of
+this matrix rather than its own context.
 
 All five are fixed names rather than generated ones, and that is the whole reason this rule and
 the matrices in [.github/workflows/ci.yml](.github/workflows/ci.yml) no longer have to move
