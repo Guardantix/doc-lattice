@@ -577,15 +577,16 @@ The `checks` row names its contexts because "every required check is present" is
 claim: any non-empty list satisfies it, including one a dropped context has already shortened.
 Compare the names.
 
-`Runtime floor compatibility` is the newest of them, and adding it to this rule is a deliberate
-step rather than a consequence of merging the workflow that emits it. Branch protection is a
+Adding a context to this rule is a deliberate step rather than a consequence of merging the
+workflow that emits it, and the order is fixed for every one of them. Branch protection is a
 separate control plane from [.github/workflows/ci.yml](.github/workflows/ci.yml): a name required
-but not yet emitted leaves every open pull request waiting on a report that never arrives, so the
-order is fixed. Land the workflow first, under the existing required list. Wait for `main` to
-report the new context green at least once. Then apply one `PATCH` adding it, and read the rule
-back with the query above before trusting it. GTX-255, which asked the same question for the
-`rich` floor leg separately, was absorbed by GTX-119's rollout, since that leg is now one cell of
-this matrix rather than its own context.
+but not yet emitted leaves every open pull request waiting on a report that never arrives. So land
+the workflow first, under the existing required list. Wait for `main` to report the new context
+green at least once. Only then apply one `PATCH` adding it, and read the rule back with the query
+above before trusting it. `Runtime floor compatibility` is the most recent context to have gone
+through that sequence; GTX-255, which asked the same question for the `rich` floor leg separately,
+was absorbed by GTX-119's rollout, since that leg is now one cell of this matrix rather than its
+own context.
 
 All five are fixed names rather than generated ones, and that is the whole reason this rule and
 the matrices in [.github/workflows/ci.yml](.github/workflows/ci.yml) no longer have to move
