@@ -29,11 +29,13 @@ _REPOSITORY_ONLY_TESTS = (
     "tests/test_check_doc_links.py",
     "tests/test_check_typing_boundaries.py",
     "tests/test_check_version_sync.py",
+    "tests/test_ci_report.py",
     "tests/test_extract_release_notes.py",
     "tests/test_managed_ci_recipe.py",
     "tests/test_release_gate.py",
     "tests/test_release_target.py",
     "tests/test_release_workflow.py",
+    "tests/test_script_loader.py",
     "tests/test_slugger_generator.py",
     "tests/test_workflow_pinning.py",
 )

@@ -1,8 +1,13 @@
 """Behavior tests for the action-pin correspondence checker.
 
-The script is loaded with `run_path` rather than imported, for the reason
-`tests/test_audit_action_runtimes.py` does the same: `scripts/` is not a package and the workflow
-runs the file by path, so this exercises exactly what the runner executes.
+The script is loaded rather than imported, for the reason `tests/test_audit_action_runtimes.py`
+does the same: `scripts/` is not a package and the workflow runs the file by path, so this
+exercises exactly what the runner executes. `tests/script_loader.py` owns the load, because this
+script imports a sibling and a bare `run_path` would not let it.
+
+The guarded reporting mechanics live in `scripts/_ci_report.py`, which `tests/test_ci_report.py`
+owns directly. What is pinned here is this script's own adapter into them: which lines it renders,
+and how its exit ladder reads a failed report.
 
 Every test drives the check through an injected transport, so the suite stays offline. That is
 the whole reason the transport is a parameter: the correspondence this script exists to establish
@@ -15,9 +20,10 @@ import os
 import subprocess
 import sys
 from pathlib import Path
-from runpy import run_path
 
 import pytest
+from failing_streams import _AsciiOnly, _FailsOnceThenWrites
+from script_loader import load_script, script_path
 
 from doc_lattice.constants import (
     CHECKOUT_REF,
@@ -27,23 +33,26 @@ from doc_lattice.constants import (
 )
 
 _ROOT = Path(__file__).resolve().parents[1]
-_SCRIPT_PATH = _ROOT / "scripts" / "check_action_pin_correspondence.py"
-_SCRIPT = run_path(str(_SCRIPT_PATH))
+_SCRIPT_PATH = script_path("check_action_pin_correspondence.py")
+_SCRIPT = load_script(_SCRIPT_PATH)
 
 CLEAN = _SCRIPT["CLEAN"]
 FAILURE = _SCRIPT["FAILURE"]
 FINDING = _SCRIPT["FINDING"]
+Outcome = _SCRIPT["Outcome"]
 Pin = _SCRIPT["Pin"]
 PinFormatError = _SCRIPT["PinFormatError"]
 Response = _SCRIPT["Response"]
 SHIPPED_PINS = _SCRIPT["SHIPPED_PINS"]
 TransportError = _SCRIPT["TransportError"]
+annotation_lines = _SCRIPT["annotation_lines"]
 check = _SCRIPT["check"]
 fetch_json = _SCRIPT["fetch_json"]
 main = _SCRIPT["main"]
 parse_pin = _SCRIPT["parse_pin"]
 render_summary = _SCRIPT["render_summary"]
 resolve_pin = _SCRIPT["resolve_pin"]
+_REPORT_FAILED = load_script(script_path("_ci_report.py"))["REPORT_FAILED"]
 
 # A second commit and a tag-object SHA, both distinct from the shipped checkout pin. The tag
 # object is what `/git/ref/tags/` returns for an annotated tag, and comparing it would be wrong
@@ -352,6 +361,97 @@ def test_a_report_that_cannot_be_written_never_masks_a_finding(tmp_path, monkeyp
     assert code == 1
     assert "::error::correspondence finding:" in captured.err
     assert "the report could not be written" in captured.err
+
+
+def _two_annotated_pins():
+    """Return a transport over both shipped pins: a missing tag, and an outage on the other."""
+    setup_uv = parse_pin(SETUP_UV_USES)
+    return _fake_api(
+        {
+            _PROBE: Response(status=404, payload=None),
+            f"/repos/{setup_uv.action}/git/ref/tags/{setup_uv.version}": Response(
+                status=500, payload=None
+            ),
+        }
+    )
+
+
+def test_annotation_lines_name_every_outcome_worth_acting_on_and_no_other():
+    # `emit` writes what it is handed and knows nothing of an outcome, so this is where the
+    # vocabulary a reader sees is decided: which kinds are annotated, and what each is called.
+    lines = annotation_lines(
+        [
+            Outcome("a", CLEAN, "fine"),
+            Outcome("b", FINDING, "the tag names another commit"),
+            Outcome("c", FAILURE, "HTTP 500"),
+        ]
+    )
+
+    assert lines == [
+        "::error::correspondence finding: the tag names another commit",
+        "::error::infrastructure failure: HTTP 500",
+    ]
+
+
+def test_a_failed_summary_write_leaves_the_later_writes_attempted(tmp_path, monkeypatch, capsys):
+    # The summary is the first write, so a single `try` around the whole report -- which this
+    # script carried until the mechanics were shared -- would cost the step-summary file too.
+    # Only the write that failed is allowed to be lost.
+    summary_path = tmp_path / "summary.md"
+    monkeypatch.setenv("GITHUB_STEP_SUMMARY", str(summary_path))
+    fetch, _calls = _fake_api(_correspondent())
+    monkeypatch.setattr(sys, "stdout", _FailsOnceThenWrites(sys.stdout))
+
+    code = main(["--pin", CHECKOUT_USES], fetch)
+
+    assert code == 2
+    assert "Pins checked: 1." in summary_path.read_text(encoding="utf-8")
+    assert _REPORT_FAILED in capsys.readouterr().err
+
+
+def test_a_failed_annotation_line_leaves_the_later_lines_and_the_file_attempted(
+    tmp_path, monkeypatch, capsys
+):
+    # The granularity is per write, not per channel: the second annotation line shares stderr with
+    # the first, and grouping the two inside one guarded call would drop it while still satisfying
+    # the failed-summary case above. Two annotated pins is the smallest case that can tell the
+    # difference, and it is the analogue of the auditor's own two-finding case.
+    summary_path = tmp_path / "summary.md"
+    monkeypatch.setenv("GITHUB_STEP_SUMMARY", str(summary_path))
+    fetch, _calls = _two_annotated_pins()
+    monkeypatch.setattr(sys, "stderr", _FailsOnceThenWrites(sys.stderr))
+
+    code = main([], fetch)
+
+    assert code == 1
+    captured = capsys.readouterr()
+    assert "::error::infrastructure failure: probing" in captured.err
+    assert _REPORT_FAILED in captured.err
+    assert "Pins checked: 2." in summary_path.read_text(encoding="utf-8")
+
+
+def test_a_detail_the_stream_cannot_encode_is_a_failure_not_a_traceback(
+    tmp_path, monkeypatch, capsys
+):
+    # `UnicodeEncodeError` is a `ValueError`, not an `OSError`, so the guard this script carried
+    # on `OSError` alone let it escape as an exit-1 traceback -- the *finding* code -- on a run
+    # that established no finding at all. The detail here is upstream text: `check` builds it from
+    # `str(error)` on a transport failure, and a console under an ASCII encoding cannot carry it.
+    summary_path = tmp_path / "summary.md"
+    monkeypatch.setenv("GITHUB_STEP_SUMMARY", str(summary_path))
+    detail = "GET " + _PROBE + " failed: café indisponible"
+    fetch, _calls = _fake_api({_PROBE: TransportError(detail)})
+    monkeypatch.setattr(sys, "stdout", _AsciiOnly(sys.stdout))
+    monkeypatch.setattr(sys, "stderr", _AsciiOnly(sys.stderr))
+
+    code = main(["--pin", CHECKOUT_USES], fetch)
+
+    assert code == 2
+    # The file is opened as UTF-8, so only the console writes are lost.
+    assert "café" in summary_path.read_text(encoding="utf-8")
+    # `UnicodeEncodeError` renders the offending character escaped, so the diagnostic is pure
+    # ASCII and still reaches a stream that has just refused the summary.
+    assert _REPORT_FAILED in capsys.readouterr().err
 
 
 def test_main_exits_one_on_a_correspondence_finding(monkeypatch, capsys):
