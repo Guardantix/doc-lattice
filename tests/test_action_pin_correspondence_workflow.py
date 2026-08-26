@@ -120,8 +120,8 @@ def test_the_check_is_not_one_of_the_protected_contexts_releasing_records():
     rule the repository does not have.
 
     The assertion reads the row rather than counting it, deliberately: the list grows -- GTX-119
-    is adding `Runtime floor compatibility` to it now -- and a test that pinned the count would
-    fail on someone else's rollout while saying nothing about this workflow.
+    added `Runtime floor compatibility` to it -- and a test that pinned the count would fail on
+    someone else's rollout while saying nothing about this workflow.
     """
     row = next(
         line
