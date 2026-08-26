@@ -1,25 +1,31 @@
 """Behavior tests for the deprecation-annotation auditor.
 
-The script is loaded with `run_path` rather than imported, for the reason
-`tests/test_extract_release_notes.py` does the same: `scripts/` is not a package and the
-auditing workflow runs the file by path, so this exercises exactly what the runner executes.
+The script is loaded rather than imported, for the reason `tests/test_extract_release_notes.py`
+does the same: `scripts/` is not a package and the auditing workflow runs the file by path, so
+this exercises exactly what the runner executes. `tests/script_loader.py` owns the load, because
+this script imports a sibling and a bare `run_path` would not let it.
+
+The guarded reporting mechanics the assertions below drive live in `scripts/_ci_report.py`, which
+`tests/test_ci_report.py` owns directly. What is pinned here is this script's own adapter into
+them: which lines it renders, and how its exit ladder reads a failed report.
 """
 
 import subprocess
 import sys
 import types
 from pathlib import Path
-from runpy import run_path
 
 import pytest
+from failing_streams import _AsciiOnly, _FailsOnceThenWrites
+from script_loader import load_script, script_path
 
 _ROOT = Path(__file__).resolve().parents[1]
-_SCRIPT_PATH = _ROOT / "scripts" / "audit_action_runtimes.py"
-_SCRIPT = run_path(str(_SCRIPT_PATH))
+_SCRIPT_PATH = script_path("audit_action_runtimes.py")
+_SCRIPT = load_script(_SCRIPT_PATH)
 
 Annotation = _SCRIPT["Annotation"]
 AuditError = _SCRIPT["AuditError"]
-_REPORT_FAILED = _SCRIPT["_REPORT_FAILED"]
+_REPORT_FAILED = load_script(script_path("_ci_report.py"))["REPORT_FAILED"]
 Finding = _SCRIPT["Finding"]
 Job = _SCRIPT["Job"]
 Run = _SCRIPT["Run"]
@@ -434,48 +440,6 @@ def test_script_rejects_a_missing_run_id_at_the_command_line():
 
     assert result.returncode != 0
     assert "--run-id" in result.stderr
-
-
-class _FailsOnceThenWrites:
-    """A text stream that raises `OSError` on its first write and delegates every later one.
-
-    The failure is injected at the stream rather than at the channel on purpose. Every write
-    after the failing one is then a real write through the real stream, so "the remaining
-    channels were still attempted" is asserted against what those channels actually produced
-    rather than against a recording of intent.
-    """
-
-    def __init__(self, stream):
-        self._stream = stream
-        self.failed = False
-
-    def write(self, text: str) -> int:
-        if not self.failed:
-            self.failed = True
-            raise OSError("No space left on device")
-        return self._stream.write(text)
-
-    def flush(self) -> None:
-        self._stream.flush()
-
-
-class _AsciiOnly:
-    """A text stream that refuses non-ASCII, the way a console under an ASCII encoding does.
-
-    `TextIOWrapper.write` raises `UnicodeEncodeError` when its encoding cannot carry the text,
-    and that is a `ValueError`. Reproducing the mechanism rather than injecting a hand-built
-    exception is what keeps this honest about the failure it names.
-    """
-
-    def __init__(self, stream):
-        self._stream = stream
-
-    def write(self, text: str) -> int:
-        text.encode("ascii")
-        return self._stream.write(text)
-
-    def flush(self) -> None:
-        self._stream.flush()
 
 
 def _two_findings_api():

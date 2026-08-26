@@ -457,7 +457,7 @@ only one of them is about the pins:
 | Result | What it means | What to do |
 |--------|---------------|------------|
 | `finding` | The pin and its comment disagree, the tag is gone, or the comment is not an exact release | The coupled edit above, once you have decided which half is wrong |
-| `failure` | The check could not establish correspondence: authentication, rate limit, transport, an unexpected status, or an unreadable payload | Nothing about the pins. Re-dispatch, and look at the status the summary names |
+| `failure` | The check could not establish correspondence, or could not write its report: authentication, rate limit, transport, an unexpected status, an unreadable payload, or a write that failed | Nothing about the pins. Re-dispatch, and look at the status the summary names, or the `::error` line the log carries |
 
 The exit codes carry the same split, 1 for a finding and 2 for a failure, and a finding wins when
 both happen in one run. Resolving a finding means deciding which half is wrong, and the answer is
@@ -657,10 +657,18 @@ The value never belongs in this repository, in an issue, or in a workflow log.
 Run the full verification set from [CLAUDE.md](CLAUDE.md), adding `--locked` to every `uv run`,
 then:
 
+`scripts/_ci_report.py` is named alongside the auditor because the auditor imports it: the
+workflow runs the auditor under `uv run --no-project`, where the only thing importable beside the
+standard library is that sibling, so a fault in it fails the release run exactly as one in the
+auditor would.
+
 ```bash
-uv run --locked --group dev ruff check scripts/release_gate.py scripts/audit_action_runtimes.py
-uv run --locked --group dev ruff format --check scripts/release_gate.py scripts/audit_action_runtimes.py
-uv run --locked --group dev ty check scripts/release_gate.py scripts/audit_action_runtimes.py
+uv run --locked --group dev ruff check \
+  scripts/release_gate.py scripts/audit_action_runtimes.py scripts/_ci_report.py
+uv run --locked --group dev ruff format --check \
+  scripts/release_gate.py scripts/audit_action_runtimes.py scripts/_ci_report.py
+uv run --locked --group dev ty check \
+  scripts/release_gate.py scripts/audit_action_runtimes.py scripts/_ci_report.py
 ```
 
 Build and validate exactly the expected artifacts, then smoke-test the wheel in a fresh Python

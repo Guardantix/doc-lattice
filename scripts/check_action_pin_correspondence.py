@@ -32,20 +32,25 @@ this pin is comparable against.
 The script imports the pins rather than restating them, which is what keeps a bump from having to
 remember this file. `scripts/audit_action_runtimes.py` cannot do that because its workflow runs it
 under ``uv run --no-project``; this one runs against a synced project for exactly this reason.
+
+What the two scripts do share is how a report is written: ``scripts/_ci_report.py`` owns the
+guarded exception set, the per-write guard, and `emit`. Both reserve exit 1 for a finding, so both
+need the same guard, and holding it in one place is what keeps the two from drifting apart again.
+This file keeps its own renderers and its own annotation vocabulary.
 """
 
 from __future__ import annotations
 
 import argparse
-import contextlib
 import http.client
 import json
 import os
 import re
 import sys
 from dataclasses import dataclass
-from pathlib import Path
 from typing import TYPE_CHECKING
+
+from _ci_report import emit
 
 from doc_lattice.constants import CHECKOUT_USES, SETUP_UV_USES
 
@@ -88,10 +93,8 @@ _POINTER = (
     "establish correspondence at all, and says nothing about the pins."
 )
 _TABLE_HEADER = ("| Pin | Result | Detail |", "| --- | --- | --- |")
-# How each non-clean outcome is named in the workflow log, and the one failure that is about the
-# report rather than about a pin.
+# How each non-clean outcome is named in the workflow log.
 _LABELS = {FINDING: "correspondence finding", FAILURE: "infrastructure failure"}
-_REPORT_FAILED = "the report could not be written"
 
 
 class TransportError(RuntimeError):
@@ -375,44 +378,23 @@ def _parse_args(argv: Sequence[str] | None) -> argparse.Namespace:
     return parser.parse_args(argv)
 
 
-def emit(summary: str, outcomes: Sequence[Outcome]) -> bool:
-    """Write the run's report to every channel, and report whether all of them took it.
+def annotation_lines(outcomes: Sequence[Outcome]) -> list[str]:
+    """Render one workflow-log annotation per outcome that is not clean.
 
-    A write here can fail for the ordinary reasons any write can -- a full runner disk, a
-    `GITHUB_STEP_SUMMARY` path that is not writable -- and letting that `OSError` escape would end
-    the run on a traceback carrying the interpreter's exit 1, which is this script's *finding*
-    code. A clean check would then report as a mislabeled pin. So the report is guarded and its
-    failure is answered in the exit code instead, by the caller.
-
-    The channels are ordered by what a reader loses if a later one fails: the summary and the
-    per-outcome annotations first, and the step-summary file last, so a file that cannot be
-    written costs only itself.
+    `emit` owns the writing and knows nothing of an outcome, so the vocabulary a reader sees --
+    which kinds are worth annotating, and what each one is called -- is decided here.
 
     Args:
-        summary: The rendered report.
-        outcomes: What the check established about each pin, for the annotation lines.
+        outcomes: What the check established about each pin, in report order.
 
     Returns:
-        True when every channel took the report, False when one of them failed.
+        One ``::error::`` line per finding and per failure, in the order the pins were checked.
     """
-    try:
-        # Flushed before the per-outcome lines below, because a piped stdout is block-buffered and
-        # an unflushed summary would otherwise land after them in the workflow log.
-        print(summary, end="", flush=True)
-        for outcome in outcomes:
-            if outcome.kind != CLEAN:
-                print(f"::error::{_LABELS[outcome.kind]}: {outcome.detail}", file=sys.stderr)
-        summary_path = os.environ.get("GITHUB_STEP_SUMMARY")
-        if summary_path:
-            with Path(summary_path).open("a", encoding="utf-8") as handle:
-                handle.write(summary)
-    except OSError as error:
-        # Suppressed rather than raised: this is the report of a failed report, so the channel it
-        # would travel on is the one already known to be unreliable. The exit code carries it.
-        with contextlib.suppress(OSError):
-            print(f"::error::infrastructure failure: {_REPORT_FAILED}: {error}", file=sys.stderr)
-        return False
-    return True
+    return [
+        f"::error::{_LABELS[outcome.kind]}: {outcome.detail}"
+        for outcome in outcomes
+        if outcome.kind != CLEAN
+    ]
 
 
 def main(argv: Sequence[str] | None = None, fetch: Callable[[str], Response] = fetch_json) -> int:
@@ -431,7 +413,7 @@ def main(argv: Sequence[str] | None = None, fetch: Callable[[str], Response] = f
     """
     args = _parse_args(argv)
     outcomes = check(fetch, args.pin or SHIPPED_PINS)
-    reported = emit(render_summary(outcomes), outcomes)
+    reported = emit(render_summary(outcomes), annotation_lines(outcomes))
     kinds = {outcome.kind for outcome in outcomes}
     if FINDING in kinds:
         return 1

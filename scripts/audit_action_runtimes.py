@@ -10,20 +10,24 @@ a deprecation. AD-42 in ARCHITECTURE.md records why this runs alongside Dependab
 instead of it.
 
 The script is deliberately stdlib-only and imports nothing from ``doc_lattice``, so the auditing
-workflow can run it under ``uv run --no-project`` without resolving or installing the project.
+workflow can run it under ``uv run --no-project`` without resolving or installing the project. Its
+one local import is the sibling ``scripts/_ci_report.py``, which owns the guarded reporting
+mechanics this script shares with ``scripts/check_action_pin_correspondence.py``. That sibling is
+stdlib-only for the same reason, and it is reachable under ``--no-project`` because running a
+script by path prepends the script's own directory to ``sys.path``.
 """
 
 from __future__ import annotations
 
 import argparse
-import contextlib
 import json
 import os
 import subprocess
 import sys
 from dataclasses import dataclass
-from pathlib import Path
 from typing import TYPE_CHECKING
+
+from _ci_report import emit, guarded_write
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Iterable, Sequence
@@ -52,15 +56,6 @@ _POINTER = (
 )
 _TABLE_HEADER = ("| Job | Level | Annotation |", "| --- | --- | --- |")
 _NO_FINDINGS = "No deprecation annotations."
-# Worded exactly as `scripts/check_action_pin_correspondence.py` words it, so the two audits read
-# the same way in a log when either one's report is what failed.
-_REPORT_FAILED = "the report could not be written"
-# How a reporting write fails for reasons that are not the audit's answer. `OSError` is the disk
-# or the path. `UnicodeEncodeError` is a stream whose encoding cannot carry the text: every field
-# the summary renders -- workflow name, branch, job name, annotation message -- is upstream text,
-# and a console under an ASCII encoding raises rather than writing it. It is a `ValueError`, so
-# guarding `OSError` alone would let exactly the inversion this guard exists to prevent back in.
-_REPORT_FAILURES = (OSError, UnicodeEncodeError)
 
 
 class AuditError(RuntimeError):
@@ -473,73 +468,6 @@ def _audit(
     return run, collect_findings(audited), len(readable)
 
 
-def _append(path: str, text: str) -> None:
-    """Append text to a file, creating it when it does not exist."""
-    with Path(path).open("a", encoding="utf-8") as handle:
-        handle.write(text)
-
-
-def _guarded_write(write: Callable[..., object], *args: object, **kwargs: object) -> bool:
-    """Attempt one reporting write, and report whether it took.
-
-    A write here can fail for the ordinary reasons any write can -- a full runner disk, a
-    ``GITHUB_STEP_SUMMARY`` path that is not writable, a stream whose encoding cannot carry
-    upstream annotation text -- and letting that escape would end the run on a traceback carrying
-    the interpreter's exit 1, which is this script's *finding* code. A clean audit would then
-    report as a deprecated runtime. So the write is guarded and its failure is answered in the
-    exit code instead, by the caller.
-
-    This is one write rather than the whole report because the two callers report different
-    things. `emit` composes it per channel so that a channel that fails costs only itself, while
-    ``main``'s audit-failure branch uses it directly: no report exists to compose there, because
-    the audit never returned one.
-
-    Args:
-        write: The write to attempt.
-        *args: Positional arguments for ``write``.
-        **kwargs: Keyword arguments for ``write``.
-
-    Returns:
-        True when the write took, False when it failed for one of `_REPORT_FAILURES`.
-    """
-    try:
-        write(*args, **kwargs)
-    except _REPORT_FAILURES as error:
-        # Suppressed rather than raised: this is the report of a failed report, so the channel it
-        # would travel on may be the one already known to be unreliable. The exit code carries it.
-        with contextlib.suppress(*_REPORT_FAILURES):
-            print(f"::error::infrastructure failure: {_REPORT_FAILED}: {error}", file=sys.stderr)
-        return False
-    return True
-
-
-def emit(summary: str, findings: Sequence[Finding]) -> bool:
-    """Write the run's report to every channel, and report whether all of them took it.
-
-    Each channel is guarded on its own and every one is attempted whatever the ones before it
-    did, so a stdout that cannot be written does not also cost the log lines and the file. The
-    results are collected first and combined afterwards, which is what keeps a boolean
-    accumulator from short-circuiting a later channel away.
-
-    Args:
-        summary: The rendered job summary.
-        findings: Every deprecation annotation found, for the per-finding log lines.
-
-    Returns:
-        True when every channel took the report, False when one of them failed.
-    """
-    # Flushed before the per-finding lines below, because a piped stdout is block-buffered and an
-    # unflushed summary would otherwise land after them in the workflow log.
-    attempts = [_guarded_write(print, summary, end="", flush=True)]
-    attempts.extend(
-        _guarded_write(print, describe(finding), file=sys.stderr) for finding in findings
-    )
-    summary_path = os.environ.get("GITHUB_STEP_SUMMARY")
-    if summary_path:
-        attempts.append(_guarded_write(_append, summary_path, summary))
-    return all(attempts)
-
-
 def main(argv: Sequence[str] | None = None, fetch: Callable[[str], object] = fetch_json) -> int:
     """Audit one completed run and report its deprecation annotations.
 
@@ -557,9 +485,10 @@ def main(argv: Sequence[str] | None = None, fetch: Callable[[str], object] = fet
     try:
         run, findings, jobs_audited = _audit(fetch, args.repository, args.run_id)
     except (AuditError, OSError) as error:
-        _guarded_write(print, f"::error::{error}", file=sys.stderr)
+        guarded_write(print, f"::error::{error}", file=sys.stderr)
         return 2
-    reported = emit(render_summary(run, findings, jobs_audited), findings)
+    summary = render_summary(run, findings, jobs_audited)
+    reported = emit(summary, [describe(finding) for finding in findings])
     if findings:
         return 1
     return 0 if reported else 2
