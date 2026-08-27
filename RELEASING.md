@@ -629,6 +629,29 @@ from [SECURITY.md](SECURITY.md); the file alone does not create the channel. Ena
 not enough on its own, since a report nobody is notified about is a report nobody reads: at
 least one administrator or security manager must watch the repository for security alerts.
 
+That subscription is the one control in this section with no query above it, and the absence is
+not an oversight. It is a per-user notification preference rather than a repository setting: it
+lives on the administrator's own account, under the repository's Watch menu and under their
+global notification settings. No repository-scoped token can read or write it, so `gh api` has
+nothing to add to the block above, and a clean run of those queries says nothing about whether a
+report reaches a person.
+
+Confirmed by hand on 2026-08-27, on the single administrator's account:
+
+| Channel | Where | State |
+|---------|-------|-------|
+| Repository security alerts | doc-lattice, Watch, Custom | `Security alerts` subscribed |
+| Dependabot new-vulnerability alerts | Account, Notifications, System | Email and CLI |
+
+Re-confirm both by hand whenever you run the queries above, and read the two as one check rather
+than as a machine half and an optional manual half. The queries establish that the channel
+exists; this confirmation establishes that somebody is on the other end of it. Neither answers
+the other's question, and nothing in this repository can automate the second.
+
+A transfer is where the gap opens widest. The subscription belongs to the account rather than to
+the repository, so it does not travel with it: a new administrator starts subscribed to nothing
+while `private-vulnerability-reporting` still reports `true`. Re-confirm it as part of the move.
+
 On a transfer, secrets travel with the repository. That is the trap: they keep working under the
 new owner without any decision being made about whether they should. Audit and rotate them
 deliberately as part of the move, alongside re-registering the PyPI publisher. Do not assume the
