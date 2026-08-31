@@ -5,7 +5,9 @@ from dataclasses import asdict
 from pathlib import Path
 
 import pytest
+from markdown_it import MarkdownIt
 
+from doc_lattice.frontmatter_parser import parse_document
 from doc_lattice.markdown_compat import (
     SLUG_UNICODE_VERSION,
     anchor_ids,
@@ -117,3 +119,38 @@ def test_code_block_line_spans_covers_fenced_and_indented_blocks():
     assert (3, 5) in spans
     assert any(start <= 9 <= end for start, end in spans)
     assert not any(start <= 7 <= end for start, end in spans)
+
+
+_RENDER_PARSER = MarkdownIt("commonmark")
+
+
+@pytest.mark.parametrize(
+    ("name", "source", "expected_first_token"),
+    [
+        ("accepted", "<!-- doc-lattice\nid: a\n-->\n# H\n", "html_block"),
+        ("accepted_empty_body", "<!-- doc-lattice\n-->\n# H\n", "html_block"),
+        ("refused_bom", "﻿<!-- doc-lattice\nid: a\n-->\n# H\n", "paragraph_open"),
+        ("refused_indent_four", "    <!-- doc-lattice\nid: a\n-->\n# H\n", "code_block"),
+    ],
+)
+def test_every_envelope_byte_form_renders_as_its_pinned_block(
+    name: str, source: str, expected_first_token: str
+):
+    tokens = _RENDER_PARSER.parse(source)
+
+    assert tokens[0].type == expected_first_token, name
+
+
+def test_the_comment_envelope_never_perturbs_heading_extraction_or_spans():
+    body = "# H1\n\n## Two\ntext\n"
+    fenced = f"---\nid: a\n---\n{body}"
+    commented = f"<!-- doc-lattice\nid: a\n-->\n{body}"
+
+    _fence_meta, fence_body = parse_document(fenced, Path("a.md"))
+    _comment_meta, comment_body = parse_document(commented, Path("b.md"))
+
+    assert fence_body == comment_body == body
+    assert extract_headings(fence_body) == extract_headings(comment_body)
+    assert section_spans(extract_headings(fence_body), len(split_body_lines(fence_body))) == (
+        section_spans(extract_headings(comment_body), len(split_body_lines(comment_body)))
+    )

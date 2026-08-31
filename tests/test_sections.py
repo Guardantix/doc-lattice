@@ -1,8 +1,12 @@
 """Tests for section extraction."""
 
+from pathlib import Path
+
 import pytest
 
 import doc_lattice.sections as sections_module
+from doc_lattice.frontmatter_parser import parse_document
+from doc_lattice.hashing import content_hash
 from doc_lattice.sections import (
     Heading,
     anchor_ids,
@@ -285,3 +289,13 @@ def test_anchor_ids_marker_heading_reserves_its_github_slug():
 
 def test_anchor_ids_empty_toc_is_empty():
     assert anchor_ids([]) == []
+
+
+def test_the_drift_hash_of_a_section_is_the_same_under_both_spellings():
+    body = "# H1\n\n## Two {#two}\ntext\n"
+    _fm, fence_body = parse_document(f"---\nid: a\n---\n{body}", Path("a.md"))
+    _cm, comment_body = parse_document(f"<!-- doc-lattice\nid: a\n-->\n{body}", Path("b.md"))
+
+    assert content_hash(section_text(fence_body, (3, 4))) == content_hash(
+        section_text(comment_body, (3, 4))
+    )
