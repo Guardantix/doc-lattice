@@ -23,6 +23,12 @@ def target_content(lattice: Lattice, target_id: TargetId) -> str:
     change, which is correct: the context is part of what the downstream document derived from.
     Whole-file targets are unaffected.
 
+    One benign residual collision survives this: a parent section immediately followed by its
+    first subheading, with no text between the two heading lines, hashes identically to that
+    child, since the parent's own span runs through the child's heading and body with nothing
+    of the parent's own in between. This is spec-tolerated rather than fixed, since either
+    target id names the same bytes and an edge into either classifies drift the same way.
+
     Args:
         lattice: The built lattice.
         target_id: A resolved TargetId present in ``lattice.index``.

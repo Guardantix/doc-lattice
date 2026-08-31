@@ -300,6 +300,10 @@ Pass `--indent N` with JSON output on `check`, `lint`, `impact`, or `linear` to 
 JSON with `N` spaces per level. JSON output is selected uniformly by `--format json`; `--indent`
 without an effective `--format json` is a usage error.
 
+`graph --format json`'s `ambiguous_targets` list is lattice-wide: it names every slug-collision
+component in the loaded docs, whether or not any edge targets it. `check`, `lint`, `impact`, and
+`linear`'s JSON only ever names a collision an edge actually resolved into.
+
 Two options are global rather than per-command, so they go before the command name:
 
 | Global option | What it does |

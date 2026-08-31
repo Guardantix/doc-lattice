@@ -186,8 +186,10 @@ def to_dot(
     for upstream, source_id, is_stale, is_ambiguous in _graph_edges(
         lattice, stale_edges, ambiguous_edges
     ):
-        # An edge that is both stale and ambiguous takes the ambiguous style, since ambiguity
-        # is the stronger finding.
+        # An edge that is both stale and ambiguous takes the ambiguous style. check_lattice
+        # classifies every edge into exactly one state, so the CLI never hands this function
+        # a pair that is both; the precedence exists for a direct API caller building its own
+        # stale_edges and ambiguous_edges sets, which can overlap.
         style = (
             ' [style=dotted color="red"]' if is_ambiguous else " [style=dashed]" if is_stale else ""
         )
