@@ -207,3 +207,23 @@ def test_lint_github_annotation_ignores_a_workspace_that_excludes_the_document(
         "::error file=docs/down.md,title=doc-lattice ladder violation::"
         "down (binding) -> up (derived)\n"
     )
+
+
+def test_lint_names_an_ambiguous_target_in_human_and_json(tmp_path: Path):
+    docs = tmp_path / "docs"
+    docs.mkdir()
+    (docs / "up.md").write_text("---\nid: up\n---\n# Notes\n\n# Notes\n", encoding="utf-8")
+    (docs / "down.md").write_text(
+        "---\nid: down\nderives_from:\n  - ref: up#notes\n---\n# Down\n", encoding="utf-8"
+    )
+    # No `lattice_format` key: `Config` is extra="forbid" and does not have the field until
+    # Task 15, whose sweep step adds it here.
+    (tmp_path / ".doc-lattice.yml").write_text("docs_roots:\n  - docs\n", encoding="utf-8")
+
+    human = runner.invoke(app, ["lint", "--config", str(tmp_path / ".doc-lattice.yml")])
+    payload = runner.invoke(
+        app, ["lint", "--config", str(tmp_path / ".doc-lattice.yml"), "--format", "json"]
+    )
+
+    assert 'ambiguous with "Notes" (line 1), "Notes" (line 3)' in human.stdout
+    assert json.loads(payload.stdout)["ambiguous"][0]["target_ref"] == "up#notes"

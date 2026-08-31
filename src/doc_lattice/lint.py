@@ -2,6 +2,7 @@
 
 from dataclasses import dataclass
 
+from .check import EdgeStatus, ambiguous_edges, ambiguous_json
 from .constants import AUTHORITY_LADDER, Authority, SkipReason
 from .model import Lattice, TargetId
 from .resolve import node_for_path
@@ -30,10 +31,15 @@ class SkippedEdge:
 
 @dataclass(frozen=True, slots=True)
 class LintResult:
-    """Violations that fail the gate, plus the unjudged skips."""
+    """Violations that fail the gate, the unjudged skips, and the ambiguous edges.
+
+    ``ambiguous`` is defaulted so a caller constructing a result by hand keeps working; every
+    production construction comes from ``lint_lattice``, which fills it.
+    """
 
     violations: tuple[LadderViolation, ...]
     skipped: tuple[SkippedEdge, ...]
+    ambiguous: tuple[EdgeStatus, ...] = ()
 
 
 def lint_json(result: LintResult) -> dict:
@@ -65,6 +71,7 @@ def lint_json(result: LintResult) -> dict:
             }
             for skipped in result.skipped
         ],
+        "ambiguous": ambiguous_json(result.ambiguous),
     }
 
 
@@ -131,4 +138,8 @@ def lint_lattice(lattice: Lattice) -> LintResult:
                         target_authority=target_authority,
                     )
                 )
-    return LintResult(violations=tuple(violations), skipped=tuple(skipped))
+    return LintResult(
+        violations=tuple(violations),
+        skipped=tuple(skipped),
+        ambiguous=ambiguous_edges(lattice),
+    )

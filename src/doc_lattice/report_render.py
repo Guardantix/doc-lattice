@@ -5,7 +5,7 @@ beside their result types in check.py/impact.py/lint.py, so this is the render h
 what linear_render.py keeps in one module.
 """
 
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 
 from rich.console import Console
 from rich.markup import escape
@@ -108,6 +108,31 @@ def render_lint(console: Console, result: LintResult) -> None:
             soft_wrap=True,
         )
     console.print(_skip_summary(result), highlight=False, soft_wrap=True)
+
+
+def render_ambiguous(console: Console, statuses: Sequence[EdgeStatus]) -> None:
+    """Render ambiguous-target findings, one record per line.
+
+    The one human spelling ``lint``, ``impact``, and ``linear`` share, so the same condition
+    reads the same way wherever it is reported. ``check`` renders its own row instead, because
+    the state is part of that command's per-edge listing rather than an appended block.
+
+    Args:
+        console: Destination console.
+        statuses: Edge classifications; only ``AMBIGUOUS`` members are printed.
+    """
+    # highlight=False and soft_wrap for the reason every renderer in this module carries them:
+    # Rich's highlighter bolds bare numbers and bold survives no_color, and each record must
+    # stay one line at any width so a pipe or a grep gets the whole record.
+    for status in statuses:
+        if status.state != "AMBIGUOUS":
+            continue
+        console.print(
+            f"[red]AMBIGUOUS[/red]  {escape(status.source_id)} -> "
+            f"{escape(status.target_ref)} ({escape(format_collision(status.collision))})",
+            highlight=False,
+            soft_wrap=True,
+        )
 
 
 def render_impact(console: Console, affected: list[tuple[Node, int]]) -> None:

@@ -14,7 +14,7 @@ from doc_lattice.lint import (
     lint_lattice,
 )
 from doc_lattice.loader import build_lattice
-from doc_lattice.model import NodeMeta, ParsedDoc, RawEdge, TargetId
+from doc_lattice.model import Lattice, NodeMeta, ParsedDoc, RawEdge, TargetId
 
 
 def _doc(id_, authority=None, derives=(), body="x\n"):
@@ -73,6 +73,7 @@ def test_lint_json_returns_exact_payload_shape():
                 "reason": "target-unannotated",
             }
         ],
+        "ambiguous": [],
     }
 
 
@@ -269,3 +270,43 @@ def test_violation_iff_target_strictly_weaker_than_source(src, tgt):
     expected_violation = AUTHORITY_LADDER.index(tgt) < AUTHORITY_LADDER.index(src)
     assert (len(result.violations) == 1) == expected_violation
     assert result.skipped == ()  # both endpoints annotated
+
+
+def _ambiguous_lattice() -> Lattice:
+    return build_lattice(
+        [
+            ParsedDoc(path=Path("docs/up.md"), meta=NodeMeta(id="up"), body="# Notes\n\n# Notes\n"),
+            ParsedDoc(
+                path=Path("docs/down.md"),
+                meta=NodeMeta.model_validate({"id": "down", "derives_from": [{"ref": "up#notes"}]}),
+                body="# Down\n",
+            ),
+        ]
+    )
+
+
+def test_lint_reports_an_ambiguous_edge():
+    result = lint_lattice(_ambiguous_lattice())
+
+    assert [status.target_ref for status in result.ambiguous] == ["up#notes"]
+
+
+def test_the_lint_json_payload_carries_the_ambiguous_block():
+    payload = lint_json(lint_lattice(_ambiguous_lattice()))
+
+    assert payload["ambiguous"] == [
+        {
+            "source_id": "down",
+            "target_ref": "up#notes",
+            "target_id": "up#notes",
+            "collision": [{"label": "Notes", "line": 1}, {"label": "Notes", "line": 3}],
+        }
+    ]
+
+
+def test_a_clean_lattice_reports_an_empty_ambiguous_block():
+    lattice = build_lattice(
+        [ParsedDoc(path=Path("docs/a.md"), meta=NodeMeta(id="a"), body="# One\n")]
+    )
+
+    assert lint_json(lint_lattice(lattice))["ambiguous"] == []
