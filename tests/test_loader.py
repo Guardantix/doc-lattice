@@ -413,6 +413,16 @@ def test_a_marker_set_id_is_never_ambiguous():
     assert by_anchor["notes-1"].collision is not None
 
 
+def test_a_marker_heading_inside_a_collision_component_is_still_exempt():
+    body = "# Notes {#first}\n\n# Notes first\n"
+
+    sections = derive_file_sections(body)
+
+    by_anchor = {record.anchor: record for record in sections.sections}
+    assert by_anchor["first"].collision is None
+    assert by_anchor["notes-first-1"].collision is not None
+
+
 def test_a_cross_inventory_collision_marks_the_addressable_member():
     body = "Overview\n--------\n\ntext\n\n# Overview\n"
 
