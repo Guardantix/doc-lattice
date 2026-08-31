@@ -4,7 +4,7 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
-## [Unreleased]
+## [7.0.0] - 2026-08-31
 
 ### Migration
 
@@ -12,11 +12,21 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 refused with a pointer to this section; a zero-config run (no `.doc-lattice.yml` anywhere) is
 unaffected, since there is no file to declare it in. Three steps:
 
-1. Add `lattice_format: 2` to `.doc-lattice.yml`, as the first key. `doc-lattice init` scaffolds
-   it there for a new config.
-2. Run `doc-lattice reconcile --all` to re-bless the lattice under the 7.0 content hash, which
-   now folds a section's ancestor heading chain into its hash input.
-3. Fix any edge the reconcile run reports `AMBIGUOUS`, newly surfaced by that same hash change.
+1. Add `lattice_format: 2` to `.doc-lattice.yml`, as the first key. doc-lattice 7 refuses to run
+   without it, and every earlier release refuses to run with it, so the two never operate on the
+   same tree by accident. A zero-config project has nothing to add.
+2. The section content hash now includes the target's ancestor heading chain, so every `seen`
+   value on a section that sits under a parent heading mismatches once. Run
+   `doc-lattice reconcile --all` to re-bless the lattice. Whole-file refs and top-level
+   sections are unaffected.
+3. An edge whose target id sits in a slug-collision component now fails `AMBIGUOUS`, `check`
+   exits 1 on it, and `reconcile` refuses to write its `seen`. Fix each one by rewording a
+   colliding heading or giving the target an explicit `{#anchor}` marker.
+
+To make a tracked file's metadata invisible on GitHub, replace its opening `---` with
+`<!-- doc-lattice`, replace its closing `---` with `-->`, and rerun `check`. The YAML between
+them is unchanged. A file whose id or any other value contains `--` keeps the fence spelling or
+renames the value.
 
 ## [6.0.0] - 2026-08-25
 
