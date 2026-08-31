@@ -57,7 +57,7 @@ def test_check_human_output_is_byte_identical(lattice_dir: Path, monkeypatch):
         "BROKEN        gdd -> ghost\n"
         "STALE         pc-design -> art-direction#accent\n"
         "UNRECONCILED  pc-design -> art-direction#motion\n"
-        "3 edges: 0 OK, 1 STALE, 1 UNRECONCILED, 1 BROKEN\n"
+        "3 edges: 0 OK, 1 STALE, 1 UNRECONCILED, 1 BROKEN, 0 AMBIGUOUS\n"
     )
 
 
@@ -217,7 +217,7 @@ def test_check_only_filters_human_output(lattice_dir: Path, monkeypatch):
     assert all("STALE" in line for line in rows)
     # --only narrows the rows; the summary keeps counting every classified edge, so it
     # deliberately does not sum to the number of rows above it.
-    assert summary == "3 edges: 0 OK, 1 STALE, 1 UNRECONCILED, 1 BROKEN"
+    assert summary == "3 edges: 0 OK, 1 STALE, 1 UNRECONCILED, 1 BROKEN, 0 AMBIGUOUS"
 
 
 def test_check_only_filters_json_output(lattice_dir: Path, monkeypatch):
@@ -234,7 +234,7 @@ def test_check_only_is_case_insensitive(lattice_dir: Path, monkeypatch):
     *rows, summary = [line for line in result.stdout.splitlines() if line.strip()]
     assert rows
     assert all("STALE" in line for line in rows)
-    assert summary == "3 edges: 0 OK, 1 STALE, 1 UNRECONCILED, 1 BROKEN"
+    assert summary == "3 edges: 0 OK, 1 STALE, 1 UNRECONCILED, 1 BROKEN, 0 AMBIGUOUS"
 
 
 def test_check_only_unknown_state_exits_2(lattice_dir: Path, monkeypatch):
@@ -259,7 +259,7 @@ def test_check_only_ok_still_exits_1_on_drift(lattice_dir: Path, monkeypatch):
     result = runner.invoke(app, ["check", "--only", "OK"])
     assert result.exit_code == 1
     # No OK edge to list, yet the run still states the verdict rather than printing nothing.
-    assert result.stdout == "3 edges: 0 OK, 1 STALE, 1 UNRECONCILED, 1 BROKEN\n"
+    assert result.stdout == "3 edges: 0 OK, 1 STALE, 1 UNRECONCILED, 1 BROKEN, 0 AMBIGUOUS\n"
 
 
 def test_check_human_output_omits_ok_rows_by_default(tmp_path: Path, monkeypatch):
@@ -275,7 +275,7 @@ def test_check_human_output_omits_ok_rows_by_default(tmp_path: Path, monkeypatch
     assert result.stdout == (
         "BROKEN        zdown -> ghost\n"
         "UNRECONCILED  zdown -> up#other\n"
-        "3 edges: 1 OK, 0 STALE, 1 UNRECONCILED, 1 BROKEN\n"
+        "3 edges: 1 OK, 0 STALE, 1 UNRECONCILED, 1 BROKEN, 0 AMBIGUOUS\n"
     )
 
 
@@ -290,7 +290,8 @@ def test_check_only_ok_still_shows_ok_rows(tmp_path: Path, monkeypatch):
 
     assert result.exit_code == 1
     assert result.stdout == (
-        "OK            mid -> up#sec\n3 edges: 1 OK, 0 STALE, 1 UNRECONCILED, 1 BROKEN\n"
+        "OK            mid -> up#sec\n"
+        "3 edges: 1 OK, 0 STALE, 1 UNRECONCILED, 1 BROKEN, 0 AMBIGUOUS\n"
     )
 
 
@@ -396,7 +397,7 @@ def test_check_human_summary_is_present_on_a_clean_tree(tmp_path: Path, monkeypa
     assert result.exit_code == 0
     # A problem-free graph is the verdict line alone: the default listing is problem-only, and
     # the verdict is what keeps a clean run explicit rather than silent.
-    assert result.stdout == "1 edge: 1 OK, 0 STALE, 0 UNRECONCILED, 0 BROKEN\n"
+    assert result.stdout == "1 edge: 1 OK, 0 STALE, 0 UNRECONCILED, 0 BROKEN, 0 AMBIGUOUS\n"
 
 
 def test_check_human_summary_is_present_when_there_are_no_edges(tmp_path: Path, monkeypatch):
@@ -408,7 +409,7 @@ def test_check_human_summary_is_present_when_there_are_no_edges(tmp_path: Path, 
     result = runner.invoke(app, ["check"])
 
     assert result.exit_code == 0
-    assert result.stdout == "0 edges: 0 OK, 0 STALE, 0 UNRECONCILED, 0 BROKEN\n"
+    assert result.stdout == "0 edges: 0 OK, 0 STALE, 0 UNRECONCILED, 0 BROKEN, 0 AMBIGUOUS\n"
 
 
 def test_check_json_summary_covers_every_state_including_zero_counts(
@@ -417,7 +418,13 @@ def test_check_json_summary_covers_every_state_including_zero_counts(
     monkeypatch.chdir(lattice_dir)
     result = runner.invoke(app, ["check", "--format", "json"])
     payload = json.loads(result.stdout)
-    assert payload["summary"] == {"OK": 0, "STALE": 1, "UNRECONCILED": 1, "BROKEN": 1}
+    assert payload["summary"] == {
+        "OK": 0,
+        "STALE": 1,
+        "UNRECONCILED": 1,
+        "BROKEN": 1,
+        "AMBIGUOUS": 0,
+    }
     assert set(payload["summary"]) == set(get_args(EdgeState))
     assert sum(payload["summary"].values()) == len(payload["edges"])
 
@@ -447,7 +454,8 @@ def test_check_json_edge_records_are_unchanged_by_the_summary(lattice_dir: Path,
         ("pc-design", "art-direction#motion"),
     ]
     assert all(
-        set(edge) == {"source_id", "target_ref", "target_id", "state", "expected", "actual"}
+        set(edge)
+        == {"source_id", "target_ref", "target_id", "state", "expected", "actual", "collision"}
         for edge in payload["edges"]
     )
 
@@ -817,3 +825,29 @@ def test_check_github_annotation_ignores_a_workspace_that_excludes_the_document(
     assert result.stdout == (
         "::error file=docs/down.md,title=doc-lattice BROKEN::down -> ghost is BROKEN\n"
     )
+
+
+def test_check_exits_one_on_an_ambiguous_edge_and_names_it_in_both_formats(tmp_path: Path):
+    docs = tmp_path / "docs"
+    docs.mkdir()
+    (docs / "up.md").write_text("---\nid: up\n---\n# Notes\n\n# Notes\n", encoding="utf-8")
+    (docs / "down.md").write_text(
+        "---\nid: down\nderives_from:\n  - ref: up#notes\n---\n# Down\n", encoding="utf-8"
+    )
+    # No `lattice_format` key: Config does not have the field until Task 15, whose sweep adds it.
+    config = tmp_path / ".doc-lattice.yml"
+    config.write_text("docs_roots:\n  - docs\n", encoding="utf-8")
+
+    human = runner.invoke(app, ["check", "--config", str(config)])
+    payload = runner.invoke(app, ["check", "--config", str(config), "--format", "json"])
+
+    assert human.exit_code == 1
+    assert payload.exit_code == 1
+    assert 'ambiguous with "Notes" (line 1), "Notes" (line 3)' in human.stdout
+    edge = json.loads(payload.stdout)["edges"][0]
+    assert edge["state"] == "AMBIGUOUS"
+    assert edge["collision"] == [
+        {"label": "Notes", "line": 1},
+        {"label": "Notes", "line": 3},
+    ]
+    assert json.loads(payload.stdout)["summary"]["AMBIGUOUS"] == 1

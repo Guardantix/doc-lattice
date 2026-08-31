@@ -75,7 +75,8 @@ def register_check(app: typer.Typer) -> None:
             typer.Option(
                 "--only",
                 help=(
-                    "Show only these states (repeatable): OK, STALE, UNRECONCILED, BROKEN. "
+                    "Show only these states (repeatable): OK, STALE, UNRECONCILED, BROKEN, "
+                    "AMBIGUOUS. "
                     "Without it, human output lists problem edges only; pass --only OK to "
                     "list OK edges. Filters display only; the exit code and the summary "
                     "counts always reflect every edge."

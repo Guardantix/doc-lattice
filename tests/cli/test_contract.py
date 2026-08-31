@@ -269,7 +269,7 @@ def test_no_lever_pty_output_still_carries_ansi_styling():
     assert b"\x1b[" in stderr, stderr
     plain = _pty_plain_text(stderr)
     assert "unknown --only state(s): 123" in plain
-    assert "valid: BROKEN, OK, STALE, UNRECONCILED" in plain
+    assert "valid: AMBIGUOUS, BROKEN, OK, STALE, UNRECONCILED" in plain
 
 
 def test_create_runtime_disabled_console_strips_bold_and_link_markup(monkeypatch, tmp_path: Path):

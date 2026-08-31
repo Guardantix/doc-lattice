@@ -79,7 +79,10 @@ LATTICE_INTENT_KEYS: frozenset[str] = frozenset({"authority", "derives_from", "t
 LocationKind = Literal["file", "section"]
 VALID_LOCATION_KINDS: frozenset[str] = frozenset(get_args(LocationKind))
 
-EdgeState = Literal["OK", "STALE", "UNRECONCILED", "BROKEN"]
+# "AMBIGUOUS" is last so the ordered form keeps every earlier state in its published position.
+# It is a first-class state, not an advisory: the same condition gets the same verdict in every
+# command, and a warning-only design would leave CI green on a lattice reconcile itself refuses.
+EdgeState = Literal["OK", "STALE", "UNRECONCILED", "BROKEN", "AMBIGUOUS"]
 # EDGE_STATES is the ordered form, in Literal declaration order. Report output that must be
 # deterministic (the check summary breakdown) iterates it; VALID_EDGE_STATES stays the
 # membership test and must never drive output order, being a frozenset.

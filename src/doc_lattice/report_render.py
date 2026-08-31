@@ -13,7 +13,7 @@ from rich.markup import escape
 from .check import EdgeStatus
 from .constants import EDGE_STATES, EdgeState
 from .lint import LintResult
-from .model import Node
+from .model import Node, format_collision
 from .path_utils import format_path_for_display
 
 _STATE_COL_WIDTH = 13  # widest EdgeState ("UNRECONCILED") is 12 chars, plus one trailing space
@@ -25,6 +25,7 @@ _STATE_COLORS: dict[EdgeState, str] = {
     "STALE": "yellow",
     "UNRECONCILED": "yellow",
     "BROKEN": "red",
+    "AMBIGUOUS": "red",
 }
 
 
@@ -73,9 +74,10 @@ def render_statuses(
     # Rich's wrapping would leave on a narrow console. Same fix GTX-2 applied to render_impact.
     for status in statuses:
         color = _STATE_COLORS[status.state]
+        detail = f" ({escape(format_collision(status.collision))})" if status.collision else ""
         console.print(
             f"[{color}]{status.state:<{_STATE_COL_WIDTH}}[/{color}] "
-            f"{escape(status.source_id)} -> {escape(status.target_ref)}",
+            f"{escape(status.source_id)} -> {escape(status.target_ref)}{detail}",
             highlight=False,
             soft_wrap=True,
         )

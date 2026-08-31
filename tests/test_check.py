@@ -5,6 +5,7 @@ from pathlib import Path
 
 from doc_lattice.check import (
     EdgeStatus,
+    ambiguous_edges,
     check_lattice,
     has_drift,
     statuses_json,
@@ -14,7 +15,7 @@ from doc_lattice.config import load_config
 from doc_lattice.constants import EDGE_STATES
 from doc_lattice.hashing import content_hash
 from doc_lattice.loader import build_lattice
-from doc_lattice.model import NodeMeta, ParsedDoc, RawEdge, TargetId
+from doc_lattice.model import Lattice, NodeMeta, ParsedDoc, RawEdge, TargetId
 from doc_lattice.orchestrate import load_lattice
 from doc_lattice.resolve import target_content
 from doc_lattice.sections import build_toc, section_spans, section_text
@@ -49,6 +50,7 @@ def test_statuses_json_returns_exact_payload_shape():
                 "state": "STALE",
                 "expected": "old-hash",
                 "actual": "new-hash",
+                "collision": [],
             },
             {
                 "source_id": "broken",
@@ -57,9 +59,10 @@ def test_statuses_json_returns_exact_payload_shape():
                 "state": "BROKEN",
                 "expected": None,
                 "actual": None,
+                "collision": [],
             },
         ],
-        "summary": {"OK": 0, "STALE": 1, "UNRECONCILED": 0, "BROKEN": 1},
+        "summary": {"OK": 0, "STALE": 1, "UNRECONCILED": 0, "BROKEN": 1, "AMBIGUOUS": 0},
     }
 
 
@@ -72,14 +75,14 @@ def test_summarize_statuses_covers_every_state_including_zero_counts():
 
     summary = summarize_statuses(statuses)
 
-    assert summary == {"OK": 2, "STALE": 1, "UNRECONCILED": 0, "BROKEN": 0}
+    assert summary == {"OK": 2, "STALE": 1, "UNRECONCILED": 0, "BROKEN": 0, "AMBIGUOUS": 0}
     assert tuple(summary) == EDGE_STATES
 
 
 def test_summarize_statuses_of_no_edges_is_all_zeroes():
     summary = summarize_statuses([])
 
-    assert summary == {"OK": 0, "STALE": 0, "UNRECONCILED": 0, "BROKEN": 0}
+    assert summary == {"OK": 0, "STALE": 0, "UNRECONCILED": 0, "BROKEN": 0, "AMBIGUOUS": 0}
     assert sum(summary.values()) == 0
 
 
@@ -95,7 +98,13 @@ def test_statuses_json_summary_counts_are_independent_of_the_serialized_edges():
     payload = statuses_json(displayed, summarize_statuses(every))
 
     assert [edge["state"] for edge in payload["edges"]] == ["STALE"]
-    assert payload["summary"] == {"OK": 1, "STALE": 1, "UNRECONCILED": 0, "BROKEN": 0}
+    assert payload["summary"] == {
+        "OK": 1,
+        "STALE": 1,
+        "UNRECONCILED": 0,
+        "BROKEN": 0,
+        "AMBIGUOUS": 0,
+    }
 
 
 def test_statuses_json_summary_of_a_sparse_counter_names_every_state():
@@ -105,7 +114,13 @@ def test_statuses_json_summary_of_a_sparse_counter_names_every_state():
 
     payload = statuses_json(statuses, Counter(status.state for status in statuses))
 
-    assert payload["summary"] == {"OK": 1, "STALE": 0, "UNRECONCILED": 0, "BROKEN": 0}
+    assert payload["summary"] == {
+        "OK": 1,
+        "STALE": 0,
+        "UNRECONCILED": 0,
+        "BROKEN": 0,
+        "AMBIGUOUS": 0,
+    }
 
 
 def test_check_classifies_each_state(lattice_dir: Path):
@@ -230,3 +245,55 @@ def test_has_drift_false_when_all_ok():
     assert all(s.state == "OK" for s in statuses)
     assert all(s.expected == s.actual for s in statuses)  # OK means locked == current
     assert has_drift(statuses) is False
+
+
+def test_the_edge_state_domain_ends_with_ambiguous():
+    assert EDGE_STATES == ("OK", "STALE", "UNRECONCILED", "BROKEN", "AMBIGUOUS")
+
+
+def _ambiguous_lattice() -> Lattice:
+    return build_lattice(
+        [
+            ParsedDoc(path=Path("docs/up.md"), meta=NodeMeta(id="up"), body="# Notes\n\n# Notes\n"),
+            ParsedDoc(
+                path=Path("docs/down.md"),
+                meta=NodeMeta.model_validate(
+                    {"id": "down", "derives_from": [{"ref": "up#notes", "seen": "a" * 32}]}
+                ),
+                body="# Down\n",
+            ),
+        ]
+    )
+
+
+def test_an_edge_into_a_collision_component_is_ambiguous():
+    statuses = check_lattice(_ambiguous_lattice())
+
+    assert [status.state for status in statuses] == ["AMBIGUOUS"]
+    assert statuses[0].actual is None
+    assert statuses[0].expected == "a" * 32
+    assert [member.label for member in statuses[0].collision] == ["Notes", "Notes"]
+
+
+def test_check_reports_drift_on_an_ambiguous_edge():
+    assert has_drift(check_lattice(_ambiguous_lattice())) is True
+
+
+def test_ambiguous_edges_finds_the_same_rows_without_hashing():
+    lattice = _ambiguous_lattice()
+
+    assert ambiguous_edges(lattice) == tuple(
+        status for status in check_lattice(lattice) if status.state == "AMBIGUOUS"
+    )
+
+
+def test_the_check_json_payload_carries_the_collision():
+    statuses = check_lattice(_ambiguous_lattice())
+
+    payload = statuses_json(statuses, summarize_statuses(statuses))
+
+    assert payload["edges"][0]["collision"] == [
+        {"label": "Notes", "line": 1},
+        {"label": "Notes", "line": 3},
+    ]
+    assert payload["summary"]["AMBIGUOUS"] == 1
