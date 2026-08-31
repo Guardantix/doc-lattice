@@ -12,7 +12,9 @@ from doc_lattice.markdown_compat import (
     SLUG_UNICODE_VERSION,
     anchor_ids,
     code_block_line_spans,
+    collision_components,
     extract_headings,
+    full_heading_inventory,
     github_heading_ids,
     github_ids_for_texts,
     github_slug,
@@ -154,3 +156,62 @@ def test_the_comment_envelope_never_perturbs_heading_extraction_or_spans():
     assert section_spans(extract_headings(fence_body), len(split_body_lines(fence_body))) == (
         section_spans(extract_headings(comment_body), len(split_body_lines(comment_body)))
     )
+
+
+def test_the_full_inventory_sees_every_heading_form_github_assigns_an_id_to():
+    body = "Overview\n--------\n\ntext\n\n# Overview\n\n> ## Quoted\n\n- ### Nested\n"
+
+    inventory = full_heading_inventory(body)
+
+    assert [(h.text, h.line, h.github_id) for h in inventory] == [
+        ("Overview", 1, "overview"),
+        ("Overview", 6, "overview-1"),
+        ("Quoted", 8, "quoted"),
+        ("Nested", 10, "nested"),
+    ]
+
+
+def test_the_inventory_ids_agree_with_the_shared_slugger():
+    body = "# Notes\n\n# Notes\n\n# Notes-1\n"
+
+    inventory = full_heading_inventory(body)
+
+    assert [h.github_id for h in inventory] == github_ids_for_texts(h.text for h in inventory)
+
+
+def _components(body: str) -> list[list[str]]:
+    return [
+        [f"{h.text}@{h.line}" for h in component]
+        for component in collision_components(full_heading_inventory(body))
+    ]
+
+
+def test_chained_dedup_suffixes_pull_every_shifted_heading_into_one_component():
+    body = "# Notes\n\n# Notes\n\n# Notes-1\n\n# Notes-1-1\n"
+
+    assert _components(body) == [["Notes@1", "Notes@3", "Notes-1@5", "Notes-1-1@7"]]
+
+
+def test_a_heading_a_probe_never_reached_stays_out_of_the_component():
+    body = "# Notes\n\n# Other\n\n# Notes\n"
+
+    assert _components(body) == [["Notes@1", "Notes@5"]]
+
+
+def test_probe_completeness_pulls_in_a_heading_only_a_probe_touches():
+    # "Other" renamed to "Notes-1": the third heading's base request is still only `notes`, and
+    # its final id shifts from `notes-1` to `notes-2`, so a rule reading requests alone would
+    # call this clean while a rename of the middle heading silently rebinds the third.
+    body = "# Notes\n\n# Notes-1\n\n# Notes\n"
+
+    assert _components(body) == [["Notes@1", "Notes-1@3", "Notes@5"]]
+
+
+def test_a_cross_inventory_collision_is_one_component():
+    body = "Overview\n--------\n\ntext\n\n# Overview\n"
+
+    assert _components(body) == [["Overview@1", "Overview@6"]]
+
+
+def test_a_document_with_no_repeated_slug_has_no_components():
+    assert _components("# One\n\n# Two\n\n# Three\n") == []

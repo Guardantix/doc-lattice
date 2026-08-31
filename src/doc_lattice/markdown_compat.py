@@ -56,6 +56,23 @@ class Heading:
     line: int
 
 
+@dataclass(frozen=True, slots=True)
+class SluggedHeading:
+    """One heading in the full GitHub inventory, with the ids its allocation examined.
+
+    ``probes`` is every candidate id the document-order deduplicator tried for this
+    heading, its base slug first and each dedup suffix after, ending with the id it
+    kept. Ambiguity is derived from the probes rather than from bases or final ids,
+    because dedup examines ids it never emits, and an id a later heading merely probed
+    is one a rename can hand it.
+    """
+
+    text: str
+    line: int
+    github_id: str
+    probes: tuple[str, ...]
+
+
 class _SourceMapState(StateBlock):
     """Minimal line-map state for markdown-it-py's pinned block rules.
 
@@ -260,6 +277,18 @@ class _Slugger:
         self._seen[result] = 0
         return result
 
+    def slug_with_probes(self, text: str) -> tuple[str, tuple[str, ...]]:
+        """Return the next unique slug for heading content and every candidate it examined."""
+        base = github_slug(text)
+        result = base
+        probes = [base]
+        while result in self._seen:
+            self._seen[base] += 1
+            result = f"{base}-{self._seen[base]}"
+            probes.append(result)
+        self._seen[result] = 0
+        return result, tuple(probes)
+
 
 def github_ids_for_texts(texts: Iterable[str]) -> list[str]:
     """Return the GitHub heading id for each raw heading text, in document order.
@@ -316,6 +345,94 @@ def github_heading_ids(headings: list[Heading]) -> list[str]:
         pinned github-slugger collision rule.
     """
     return github_ids_for_texts(heading.text for heading in headings)
+
+
+def full_heading_inventory(body: str) -> list[SluggedHeading]:
+    """Return every heading a GitHub render assigns an id to, with its allocation trace.
+
+    Wider than ``extract_headings`` on purpose: this reads the pinned parser's unrestricted
+    CommonMark stream, so setext headings, ATX headings indented one to three spaces, and
+    headings nested in a list item or a block quote all arrive. That is the inventory
+    GitHub allocates ids from, and a collision between a form the engine addresses and one
+    it does not is the only way the lattice id and the GitHub fragment can diverge.
+    Addressability itself is unchanged; running *allocation* over this inventory is a
+    separate follow-up (GTX-277).
+
+    Args:
+        body: Markdown document text.
+
+    Returns:
+        One record per heading in document order, ids deduplicated by the pinned
+        github-slugger collision rule.
+
+    Raises:
+        RuntimeError: If the pinned parser returns a malformed heading token pair.
+    """
+    normalized = normalize_newlines(body).replace("\0", "�")
+    tokens = _PARSER.parse(normalized)
+    slugger = _Slugger()
+    inventory: list[SluggedHeading] = []
+    for index, token in enumerate(tokens):
+        if token.type != "heading_open":
+            continue
+        content = tokens[index + 1] if index + 1 < len(tokens) else None
+        if content is None or content.type != "inline" or token.map is None:
+            msg = f"{MARKDOWN_COMPAT_VERSION} returned a malformed heading token pair"
+            raise RuntimeError(msg)
+        github_id, probes = slugger.slug_with_probes(content.content)
+        inventory.append(
+            SluggedHeading(
+                text=content.content,
+                line=token.map[0] + 1,
+                github_id=github_id,
+                probes=probes,
+            )
+        )
+    return inventory
+
+
+def collision_components(
+    inventory: list[SluggedHeading],
+) -> list[tuple[SluggedHeading, ...]]:
+    """Group headings whose ids move together under a reword into collision components.
+
+    During allocation, every candidate id a heading examines (its base slug and each dedup
+    suffix tried) links that heading to the id's current holder. The connected components of
+    that graph are the collision components, and every generated id in a component is
+    ambiguous: rewording any member can hand a member's id to a different heading, which
+    resolves without breaking and therefore reads OK or STALE rather than BROKEN.
+
+    Args:
+        inventory: Headings in document order, from ``full_heading_inventory``.
+
+    Returns:
+        Each component of more than one heading, members in document order, components
+        ordered by their first member. A heading in no component is not returned.
+    """
+    parent = list(range(len(inventory)))
+
+    def find(node: int) -> int:
+        while parent[node] != node:
+            parent[node] = parent[parent[node]]
+            node = parent[node]
+        return node
+
+    def union(left: int, right: int) -> None:
+        left_root, right_root = find(left), find(right)
+        if left_root != right_root:
+            parent[max(left_root, right_root)] = min(left_root, right_root)
+
+    holder: dict[str, int] = {}
+    for index, heading in enumerate(inventory):
+        for probe in heading.probes:
+            if probe in holder:
+                union(index, holder[probe])
+        holder[heading.github_id] = index
+
+    grouped: dict[int, list[SluggedHeading]] = {}
+    for index, heading in enumerate(inventory):
+        grouped.setdefault(find(index), []).append(heading)
+    return [tuple(members) for _root, members in sorted(grouped.items()) if len(members) > 1]
 
 
 def anchor_ids(headings: list[Heading]) -> list[str]:
