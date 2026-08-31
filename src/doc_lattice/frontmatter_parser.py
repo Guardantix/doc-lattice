@@ -212,7 +212,38 @@ def split_frontmatter(text: str, source: Path) -> tuple[str | None, str]:
     return (None, text) if parts is None else (parts.raw_meta, parts.body)
 
 
-def parse_meta(raw_meta: str | None, source: Path) -> ParsedMeta:
+def refuse_double_hyphen(raw_meta: str, source: Path, *, first_body_line: int) -> None:
+    """Refuse a comment envelope body carrying the substring ``--``.
+
+    ``--`` inside an HTML comment is where the HTML specification and CommonMark versions
+    disagree, and the failure mode is silent and user-facing: a legal but unlucky id such as
+    ``foo--bar`` could terminate or invalidate the comment in some renderer and turn the
+    invisible envelope into rendered text. Refusing the substring outright is stricter than
+    GitHub requires today and keeps the invisibility guarantee independent of renderer behavior.
+    The refusal is scoped to the comment spelling; the fence spelling accepts ``--`` as it always
+    has, so converting a file that uses such an id means renaming the id or keeping the fence.
+
+    Args:
+        raw_meta: The envelope's inner YAML text.
+        source: The file the envelope came from, for error messages.
+        first_body_line: The 1-based file line ``raw_meta``'s first line occupies, so the
+            diagnostic names a line the author can jump to.
+
+    Raises:
+        FrontmatterError: If any line of ``raw_meta`` contains ``--``.
+    """
+    for offset, line in enumerate(raw_meta.split("\n")):
+        if "--" in line:
+            msg = (
+                f"the doc-lattice comment envelope in {format_path_for_display(source)} contains "
+                f"'--' on line {first_body_line + offset}; HTML comments give '--' no agreed "
+                "meaning, so a renderer may end the comment there and print the envelope as "
+                f"text. Rename the value, or keep the '{_FENCE}' fence spelling for this file"
+            )
+            raise FrontmatterError(msg, source=source)
+
+
+def parse_meta(raw_meta: str | None, source: Path, *, kind: EnvelopeKind = "fence") -> ParsedMeta:
     """Classify a raw frontmatter block, validating it into NodeMeta when it names a node.
 
     A block with no ``id`` is graded by what else it declares. Carrying any of
@@ -221,9 +252,15 @@ def parse_meta(raw_meta: str | None, source: Path) -> ParsedMeta:
     Anything else is metadata this engine does not own, and is skipped as ``"id-less"`` for the
     caller to warn about. A file that never opened a fence is ``"untracked"`` and says nothing.
 
+    The fence spelling degrades softly, because it has innocent readings (Jekyll frontmatter, a
+    thematic break). ``<!-- doc-lattice`` has exactly one reading: it declares lattice intent by
+    name, so the comment spelling fails closed instead. Any body that is not a mapping carrying
+    ``id`` is an error, and there is no untracked or id-less tier for it.
+
     Args:
         raw_meta: The YAML frontmatter text, or None when the file opened no fence.
         source: The file the frontmatter came from, for error messages.
+        kind: The envelope spelling, either "fence" or "comment"; defaults to "fence".
 
     Returns:
         The validated node and its disposition, or a null node and the reason it was skipped.
@@ -231,7 +268,8 @@ def parse_meta(raw_meta: str | None, source: Path) -> ParsedMeta:
     Raises:
         UnreadableDocError: If the YAML cannot be parsed.
         FrontmatterError: If the frontmatter has an unknown or malformed key, or declares
-            lattice intent with no ``id``.
+            lattice intent with no ``id`` (or if ``kind`` is "comment" and the body cannot be
+            parsed into a mapping with an ``id``).
     """
     if raw_meta is None:
         return _UNTRACKED
@@ -245,8 +283,22 @@ def parse_meta(raw_meta: str | None, source: Path) -> ParsedMeta:
     # is the same untracked prose as a file with no fence. Warning on it would fire on any
     # document that merely opens with a thematic break.
     if not isinstance(data, dict):
+        if kind == "comment":
+            msg = (
+                f"the doc-lattice comment envelope in {format_path_for_display(source)} does not "
+                "hold a YAML mapping, so it declares no 'id'; the envelope names this engine, so "
+                "an unusable body is an error rather than untracked prose"
+            )
+            raise FrontmatterError(msg, source=source)
         return _UNTRACKED
     if "id" not in data:
+        if kind == "comment":
+            msg = (
+                f"the doc-lattice comment envelope in {format_path_for_display(source)} has no "
+                "'id' key, so the file and every edge it declares would be dropped from the "
+                "lattice; add an 'id' (check it for a typo)"
+            )
+            raise FrontmatterError(msg, source=source)
         return _id_less(data, source)
     try:
         meta = NodeMeta.model_validate(data)

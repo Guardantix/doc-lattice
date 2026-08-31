@@ -14,6 +14,7 @@ from doc_lattice.error_types import FrontmatterError, UnreadableDocError
 from doc_lattice.frontmatter_parser import (
     _OPENER_NEAR_MISS,
     parse_meta,
+    refuse_double_hyphen,
     split_frontmatter,
     split_frontmatter_parts,
 )
@@ -993,3 +994,42 @@ def test_a_near_miss_opener_is_an_actionable_error_not_untracked_prose(opener: s
 def test_an_ordinary_html_comment_on_line_one_stays_untracked():
     assert split_frontmatter_parts("<!-- notes -->\n# Body\n", Path("a.md")) is None
     assert split_frontmatter_parts("<!-- doc-lattice notes -->\n# B\n", Path("a.md")) is None
+
+
+@pytest.mark.parametrize(
+    "raw_meta",
+    ["", "just a scalar\n", "- one\n- two\n", "title: PC\nlayer: design\n"],
+)
+def test_a_comment_envelope_without_an_id_fails_closed(raw_meta: str):
+    with pytest.raises(FrontmatterError) as excinfo:
+        parse_meta(raw_meta, Path("a.md"), kind="comment")
+
+    message = str(excinfo.value)
+    assert "doc-lattice comment envelope" in message
+    assert "'id'" in message
+
+
+def test_the_same_bodies_stay_soft_under_the_fence_spelling():
+    assert parse_meta("", Path("a.md")).disposition == "untracked"
+    assert parse_meta("- one\n", Path("a.md")).disposition == "untracked"
+    assert parse_meta("title: PC\n", Path("a.md")).disposition == "id-less"
+
+
+def test_a_comment_envelope_with_an_id_parses_like_a_fence():
+    outcome = parse_meta("id: pc\ntitle: PC\n", Path("a.md"), kind="comment")
+
+    assert outcome.disposition == "tracked"
+    assert outcome.meta == NodeMeta(id="pc", title="PC")
+
+
+def test_a_double_hyphen_in_a_comment_envelope_body_is_refused_by_line():
+    with pytest.raises(FrontmatterError) as excinfo:
+        refuse_double_hyphen("id: pc\nlayer: foo--bar\n", Path("a.md"), first_body_line=2)
+
+    message = str(excinfo.value)
+    assert "line 3" in message
+    assert "'--'" in message
+
+
+def test_a_body_without_a_double_hyphen_is_accepted():
+    assert refuse_double_hyphen("id: pc\nseen: abc123\n", Path("a.md"), first_body_line=2) is None
