@@ -1,7 +1,7 @@
 """Domain types for the lattice graph."""
 
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Annotated
 
@@ -172,12 +172,45 @@ class Location:
 
 
 @dataclass(frozen=True, slots=True)
+class CollisionMember:
+    """One heading in a slug-collision component, ready to name in any sink.
+
+    ``label`` is already sanitized by ``text_utils.safe_heading_label`` at derivation time, so
+    the cached and uncached paths cannot disagree about it. ``line`` is the heading's 1-based
+    source line in the document body.
+    """
+
+    label: str
+    line: int
+
+
+def format_collision(members: tuple[CollisionMember, ...]) -> str:
+    """Render a collision component as the one phrase every sink prints.
+
+    Args:
+        members: The component's headings in document order.
+
+    Returns:
+        A single-line phrase naming each member and its line. The caller applies its own
+        quoting; the labels carry no control character, so the phrase is safe to embed.
+    """
+    listed = ", ".join(f'"{member.label}" (line {member.line})' for member in members)
+    return f"ambiguous with {listed}"
+
+
+@dataclass(frozen=True, slots=True)
 class SectionRecord:
-    """One anchored section: its resolved anchor id and inclusive 1-indexed line span."""
+    """One anchored section: its resolved anchor id, inclusive 1-indexed line span, and any
+    slug-collision component it belongs to.
+
+    ``collision`` is None for a section whose id is unambiguous, which includes every id set by
+    an explicit ``{#anchor}`` marker: being reword-stable is what the marker is for.
+    """
 
     anchor: str
     start: int
     end: int
+    collision: tuple[CollisionMember, ...] | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -247,7 +280,9 @@ class Lattice:
     to the set of source node ids that derive from it. ``ancestors`` maps a section
     anchor id to the anchored sections (outermost to innermost) whose spans contain it.
     ``file_id_by_path`` and ``anchors_by_path`` are path lookups precomputed by the loader
-    so resolution, impact, and rendering avoid scanning the index per edge.
+    so resolution, impact, and rendering avoid scanning the index per edge. ``collisions`` maps
+    every section TargetId whose id sits in a slug-collision component to that component's
+    members, so an edge into one can be classified and named without re-deriving anything.
 
     The maps are typed ``Mapping`` to signal that the lattice is read-only once built;
     cross-map consistency is an invariant guaranteed by ``build_lattice``.
@@ -259,3 +294,4 @@ class Lattice:
     ancestors: Mapping[TargetId, tuple[TargetId, ...]]
     file_id_by_path: Mapping[Path, str]
     anchors_by_path: Mapping[Path, frozenset[TargetId]]
+    collisions: Mapping[TargetId, tuple[CollisionMember, ...]] = field(default_factory=dict)

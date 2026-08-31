@@ -4,7 +4,12 @@ import pytest
 from hypothesis import given
 from hypothesis import strategies as st
 
-from doc_lattice.text_utils import first_control_index, is_control_char, strip_control_chars
+from doc_lattice.text_utils import (
+    first_control_index,
+    is_control_char,
+    safe_heading_label,
+    strip_control_chars,
+)
 
 
 def test_strips_escape_and_controls():
@@ -75,3 +80,18 @@ def test_first_control_index_agrees_with_strip_control_chars(text: str):
     # did not move the other would show up here rather than as a diagnostic that names a
     # position nothing was removed at.
     assert (first_control_index(text) is None) == (strip_control_chars(text) == text)
+
+
+@pytest.mark.parametrize(
+    ("raw", "expected"),
+    [
+        ("\x1b]0;title\x07Setup", "]0;titleSetup"),
+        ("\x9bmSetup", "mSetup"),
+        ("Setup\x7f", "Setup"),
+        ("Se\x00tup", "Setup"),
+        ("Ordinary Heading", "Ordinary Heading"),
+        ("Ünïcode ok", "Ünïcode ok"),
+    ],
+)
+def test_safe_heading_label_strips_every_control_range(raw: str, expected: str):
+    assert safe_heading_label(raw) == expected

@@ -10,7 +10,7 @@ from pathlib import Path
 from pydantic import BaseModel, ConfigDict
 
 from ..constants import FrontmatterDisposition
-from ..model import FileSections, NodeMeta, ParsedDoc, ParsedMeta, SectionRecord
+from ..model import CollisionMember, FileSections, NodeMeta, ParsedDoc, ParsedMeta, SectionRecord
 
 
 class StatRecord(BaseModel):
@@ -22,14 +22,30 @@ class StatRecord(BaseModel):
     mtime_ns: int
 
 
+class CollisionMemberModel(BaseModel):
+    """The serialized form of one member of a slug-collision component."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    label: str
+    line: int
+
+
 class SectionRecordModel(BaseModel):
-    """The serialized form of one anchored section span."""
+    """The serialized form of one anchored section span and its collision provenance.
+
+    ``collision`` is defaulted rather than required, unlike ``Entry.disposition``, because a
+    section that is in no component genuinely has none to record and a default of None cannot be
+    read as a silent drop. Entries written before the field existed are discarded by the
+    ``CACHE_VERSION`` bump that lands with it, never reinterpreted.
+    """
 
     model_config = ConfigDict(extra="forbid")
 
     anchor: str
     start: int
     end: int
+    collision: list[CollisionMemberModel] | None = None
 
 
 class NodePayload(BaseModel):
@@ -105,7 +121,19 @@ def reconstruct_doc(entry: Entry, path: Path) -> ParsedDoc | None:
         return None
     sections = FileSections(
         total_lines=node.total_lines,
-        sections=tuple(SectionRecord(r.anchor, r.start, r.end) for r in node.sections),
+        sections=tuple(
+            SectionRecord(
+                anchor=r.anchor,
+                start=r.start,
+                end=r.end,
+                collision=(
+                    None
+                    if r.collision is None
+                    else tuple(CollisionMember(label=m.label, line=m.line) for m in r.collision)
+                ),
+            )
+            for r in node.sections
+        ),
     )
     return ParsedDoc(path=path, meta=node.meta, body=node.body, sections=sections)
 
@@ -140,7 +168,16 @@ def make_entry(  # noqa: PLR0913
             body=body,
             total_lines=sections.total_lines,
             sections=[
-                SectionRecordModel(anchor=r.anchor, start=r.start, end=r.end)
+                SectionRecordModel(
+                    anchor=r.anchor,
+                    start=r.start,
+                    end=r.end,
+                    collision=(
+                        None
+                        if r.collision is None
+                        else [CollisionMemberModel(label=m.label, line=m.line) for m in r.collision]
+                    ),
+                )
                 for r in sections.sections
             ],
         )

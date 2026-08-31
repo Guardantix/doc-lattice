@@ -10,6 +10,7 @@ import doc_lattice.loader as loader_module
 from doc_lattice.error_types import DuplicateIdError
 from doc_lattice.loader import _line_count, _record_ancestors, build_lattice, derive_file_sections
 from doc_lattice.model import (
+    CollisionMember,
     FileSections,
     NodeMeta,
     ParsedDoc,
@@ -387,3 +388,47 @@ def test_ancestors_stack_pass_matches_reference_fixed_cases(levels: list[int]) -
 @given(st.lists(st.integers(min_value=1, max_value=6), min_size=1, max_size=60))
 def test_ancestors_stack_pass_matches_reference_generated(levels: list[int]) -> None:
     _assert_matches_reference(levels)
+
+
+def test_derive_file_sections_records_collision_provenance():
+    body = "# Notes\n\n# Notes\n"
+
+    sections = derive_file_sections(body)
+
+    assert [record.anchor for record in sections.sections] == ["notes", "notes-1"]
+    for record in sections.sections:
+        assert record.collision == (
+            CollisionMember(label="Notes", line=1),
+            CollisionMember(label="Notes", line=3),
+        )
+
+
+def test_a_marker_set_id_is_never_ambiguous():
+    body = "# Notes {#first}\n\n# Notes\n\n# Notes\n"
+
+    sections = derive_file_sections(body)
+
+    by_anchor = {record.anchor: record for record in sections.sections}
+    assert by_anchor["first"].collision is None
+    assert by_anchor["notes-1"].collision is not None
+
+
+def test_a_cross_inventory_collision_marks_the_addressable_member():
+    body = "Overview\n--------\n\ntext\n\n# Overview\n"
+
+    sections = derive_file_sections(body)
+
+    assert [record.anchor for record in sections.sections] == ["overview"]
+    assert sections.sections[0].collision == (
+        CollisionMember(label="Overview", line=1),
+        CollisionMember(label="Overview", line=6),
+    )
+
+
+def test_build_lattice_exposes_collisions_by_target_id():
+    docs = [ParsedDoc(path=Path("docs/a.md"), meta=NodeMeta(id="a"), body="# Notes\n\n# Notes\n")]
+
+    lattice = build_lattice(docs)
+
+    assert lattice.collisions[TargetId("a", "notes")][0].label == "Notes"
+    assert TargetId("a") not in lattice.collisions

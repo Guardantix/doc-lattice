@@ -231,3 +231,26 @@ def test_file_sections_survive_cache_codec_round_trip(body: str) -> None:
     assert reconstructed is not None
     assert reconstructed.sections == original
     assert reconstructed.body == body
+
+
+def test_collision_provenance_round_trips_through_the_cache():
+    sections = derive_file_sections("# Notes\n\n# Notes\n")
+    entry = make_entry(
+        b"# Notes\n\n# Notes\n",
+        ParsedMeta(meta=NodeMeta.model_validate({"id": "a"}), disposition="tracked"),
+        "# Notes\n\n# Notes\n",
+        sections,
+        _fake_stat(),  # ty: ignore[invalid-argument-type]
+        ROOT,
+    )
+
+    revived = Entry.model_validate_json(entry.model_dump_json())
+    doc = reconstruct_doc(revived, Path("docs/a.md"))
+
+    assert doc is not None
+    assert doc.sections is not None
+    assert doc.sections.sections == sections.sections
+
+
+def test_the_cache_version_is_six():
+    assert CACHE_VERSION == 6

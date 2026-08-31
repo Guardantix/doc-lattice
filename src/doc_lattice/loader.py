@@ -4,7 +4,9 @@ import warnings
 from collections import defaultdict
 
 from .error_types import DuplicateIdError
+from .markdown_compat import collision_components, full_heading_inventory
 from .model import (
+    CollisionMember,
     Edge,
     FileSections,
     Lattice,
@@ -17,30 +19,62 @@ from .model import (
 )
 from .path_utils import format_path_for_display
 from .sections import anchor_ids, build_toc, section_spans, split_body_lines
+from .text_utils import safe_heading_label
 
 
 def derive_file_sections(body: str) -> FileSections:
-    """Derive a document's total line count and anchored section spans.
+    """Derive a document's total line count, anchored section spans, and collision provenance.
 
-    This is the single derivation the load cache stores and replays: the TOC, its
-    de-duped anchor ids, and each heading's inclusive line span, so ``build_lattice``
-    consumes the same values whether it derives them or reads them from the cache.
+    This is the single derivation the load cache stores and replays: the TOC, its de-duped
+    anchor ids, each heading's inclusive line span, and, for a heading whose id sits in a
+    slug-collision component, the component's members as safe display labels. AD-12 requires a
+    cache hit to match the uncached result exactly, and a diagnostic naming colliding headings
+    cannot be reconstructed from a boolean, so the members are derived here and persisted.
 
     Args:
-        body: The verbatim document body after the frontmatter fence.
+        body: The verbatim document body after the frontmatter envelope.
 
     Returns:
-        A FileSections with the 1-based total line count and one SectionRecord per
-        heading, in document order.
+        A FileSections with the 1-based total line count and one SectionRecord per heading, in
+        document order.
     """
     total_lines = _line_count(body)
     toc = build_toc(body)
-    records: list[SectionRecord] = []
     anchors = anchor_ids(toc)
     spans = section_spans(toc, total_lines)
-    for anchor, (start_line, end_line) in zip(anchors, spans, strict=True):
-        records.append(SectionRecord(anchor=anchor, start=start_line, end=end_line))
+    members_by_line = _collision_members_by_line(body)
+    records: list[SectionRecord] = []
+    for heading, anchor, (start_line, end_line) in zip(toc, anchors, spans, strict=True):
+        # A marker-set id is reword-stable by construction, so it is never ambiguous.
+        collision = None if heading.anchor is not None else members_by_line.get(heading.line)
+        records.append(
+            SectionRecord(anchor=anchor, start=start_line, end=end_line, collision=collision)
+        )
     return FileSections(total_lines=total_lines, sections=tuple(records))
+
+
+def _collision_members_by_line(body: str) -> dict[int, tuple[CollisionMember, ...]]:
+    """Map each colliding heading's source line to its component's safe display members.
+
+    Keyed by line because that is what the two heading inventories share: the full GitHub
+    inventory and the addressable ATX subset read the same normalized text, so a heading both
+    see occupies the same 1-based line in each.
+
+    Args:
+        body: The verbatim document body.
+
+    Returns:
+        One entry per heading in a collision component, in the full inventory's terms.
+    """
+    found: dict[int, tuple[CollisionMember, ...]] = {}
+    for component in collision_components(full_heading_inventory(body)):
+        members = tuple(
+            CollisionMember(label=safe_heading_label(heading.text), line=heading.line)
+            for heading in component
+        )
+        for heading in component:
+            found[heading.line] = members
+    return found
 
 
 def build_lattice(docs: list[ParsedDoc]) -> Lattice:
@@ -59,6 +93,7 @@ def build_lattice(docs: list[ParsedDoc]) -> Lattice:
     index: dict[TargetId, Location] = {}
     sources: dict[TargetId, str] = {}
     ancestors: dict[TargetId, tuple[TargetId, ...]] = {}
+    collisions: dict[TargetId, tuple[CollisionMember, ...]] = {}
 
     for doc in docs:
         file_id = doc.meta.id
@@ -78,6 +113,8 @@ def build_lattice(docs: list[ParsedDoc]) -> Lattice:
             span = (record.start, record.end)
             spans[tid] = span
             anchored.append(tid)
+            if record.collision is not None:
+                collisions[tid] = record.collision
             _register(
                 tid,
                 Location(path=doc.path, kind="section", span=span),
@@ -119,6 +156,7 @@ def build_lattice(docs: list[ParsedDoc]) -> Lattice:
         ancestors=ancestors,
         file_id_by_path=file_id_by_path,
         anchors_by_path=anchors_by_path,
+        collisions=collisions,
     )
 
 

@@ -6,6 +6,7 @@ import pytest
 from pydantic import ValidationError as PydanticValidationError
 
 from doc_lattice.model import (
+    CollisionMember,
     Edge,
     Lattice,
     Location,
@@ -13,7 +14,9 @@ from doc_lattice.model import (
     NodeMeta,
     ParsedDoc,
     RawEdge,
+    SectionRecord,
     TargetId,
+    format_collision,
     parse_ref,
 )
 
@@ -274,3 +277,13 @@ def test_rawedge_rejects_a_control_character_in_ref_and_seen():
         RawEdge.model_validate({"ref": "a#b\x1b"})
     with pytest.raises(PydanticValidationError):
         RawEdge.model_validate({"ref": "a#b", "seen": "h\x1b"})
+
+
+def test_format_collision_names_every_member_with_its_line():
+    members = (CollisionMember(label="Setup", line=3), CollisionMember(label="Setup", line=9))
+
+    assert format_collision(members) == 'ambiguous with "Setup" (line 3), "Setup" (line 9)'
+
+
+def test_a_section_record_carries_no_collision_by_default():
+    assert SectionRecord(anchor="a", start=1, end=2).collision is None

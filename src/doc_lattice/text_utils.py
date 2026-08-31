@@ -24,6 +24,26 @@ def strip_control_chars(text: str) -> str:
     return "".join(ch for ch in text if not is_control_char(ch))
 
 
+def safe_heading_label(text: str) -> str:
+    """Return heading text in the one representation every sink that names a heading prints.
+
+    Naming a colliding heading puts raw Markdown body content into terminal, CI-log, DOT, and
+    Mermaid sinks for the first time. AD-35's refusal covers frontmatter values only, and a
+    heading is not a frontmatter value, so heading text is cleaned rather than refused: refusing
+    it would make an unremarkable document unloadable over a character no reader sees. The
+    derivation stores the already-cleaned label, so a cached run and an uncached run cannot
+    diverge on sanitization. Each sink still applies its own quoting (Rich markup escaping, DOT
+    and Mermaid string quoting) on top of this.
+
+    Args:
+        text: Raw inline heading source.
+
+    Returns:
+        The text with every C0 control, DEL, and C1 control removed.
+    """
+    return strip_control_chars(text)
+
+
 def is_control_char(char: str) -> bool:
     """Report whether one character is a terminal control character.
 
