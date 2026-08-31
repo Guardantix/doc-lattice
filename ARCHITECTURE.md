@@ -949,7 +949,15 @@ accepted the spelling in one environment and refused it in another while the rer
 explicitly, which settles the spelling as supported rather than parser-conditional; AD-33 records
 that decision and the alternative it was chosen over.
 
-**Layer 2a: the envelope.** These are lexical rather than structural, and a declared version has a
+**Layer 2a: declared envelopes.** The rewriter operates purely on the inner YAML and re-emits the
+file's original delimiters byte-for-byte, so the two envelopes, the `---` fence here and the
+`<!-- doc-lattice` comment AD-44 adds, share every inner layer (semantic schema, supported YAML
+spellings, occurrence addressing) by construction. Reconcile never converts one spelling to the
+other, in either direction; a file rewritten under this layer keeps whichever envelope it opened
+with. The comment envelope's own grammar, the byte-exact opener, the closing line, and the `--`
+refusal, is AD-44's to record rather than restated here.
+
+The fence spelling's own rules are lexical rather than structural, and a declared version has a
 constraint the matrix cannot show. The block opens and closes on a line whose stripped text is
 exactly `---`, so space on either side of either fence is accepted, leading indentation included.
 A leading run of UTF-8 byte-order marks may precede the opening fence; the whole run is stripped
@@ -2173,3 +2181,155 @@ a failure mode live without editing constants the parity tests hold every copy t
 necessarily after merge. The standing cost is four API reads a month, and one more workflow whose
 own wiring is asserted by `tests/test_action_pin_correspondence_workflow.py`, since a scheduled
 notice that quietly stops running looks exactly like a repository whose pins are all correct.
+
+### AD-44: Metadata is GitHub-invisible by a second envelope, and auto-slug identity is made safe to use
+
+**Date:** 2026-08-31
+**Status:** Accepted
+**Context:** Every tracked file carries YAML frontmatter inside `---` fences, and GitHub renders
+that block as a table at the top of the rendered file, which for a README means the repository
+landing page. Both current adopters publish or plan to publish on GitHub, and the visible metadata
+was the stated blocker for doc-lattice adopting itself (GTX-168) and for colinear's public docs
+(GTX-451). Section identity was already GitHub-friendly on the addressed side: an unmarked
+column-zero ATX heading resolves to its computed GitHub slug (AD-13's `anchor_ids`), so no engine
+change was needed there, only a convention recommending it. That convention exposed a silent
+failure mode adversarial review found rather than invented: GitHub's slug deduplication is
+document-order, so rewording one of two colliding headings can hand the shared id to the other
+heading rather than break the ref, and the rebinding can be undetectable when both section bodies
+are byte-identical. Closing that hole turned a documentation-only change into an engine change.
+**Decision:** Accept a second spelling of the metadata block, the identical YAML wrapped in an
+HTML comment instead of `---` fences, and close the auto-slug hazard the recommendation opens.
+
+**Dual spelling, forever.** Both spellings are accepted unconditionally, with no config knob to
+select or forbid one. AD-15 governs: a selector here would be speculative configuration, since
+nothing needs to forbid either spelling, and reserving one against a future need this design does
+not have would be the exact pattern AD-15 removed rather than repeat.
+
+**Byte-exact opener, no BOM, near-miss is an error.** The comment opener is deliberately stricter
+than the fence rule: it must be exactly `<!-- doc-lattice` at column zero, the first bytes of the
+file, with no leading indentation and no trailing text beyond the line terminator. A first line
+whose *trimmed* form matches but whose spelling does not (indentation, trailing whitespace, case
+variance) is an actionable opener-format error at exit 2, never ordinary untracked prose, checked
+before untracked classification so a whitespace typo cannot make the intended node silently vanish
+from the lattice under a green gate. No BOM is tolerated before the opener, unlike the fence
+spelling's long-standing BOM allowance: on `markdown-it-py==4.2.0`, the pinned parser AD-13
+depends on, a BOM-prefixed `<!-- doc-lattice` line parses as an ordinary paragraph rather than an
+`html_block`, so a tolerated BOM there would make the "invisible" envelope render. A BOM before the
+opener is therefore itself a near-miss error rather than a silently accepted variant, and every
+accepted and rejected byte form is pinned by a renderer-parity test rather than inherited from the
+fence grammar by analogy.
+
+**The `--` refusal, on input and on rewritten output.** A comment envelope body must not contain
+the substring `--`, because that substring is where the HTML specification and CommonMark versions
+disagree on comment termination, and the failure mode is silent and user-facing: a legal id such
+as `foo--bar` could end or invalidate the comment in some renderer and turn the invisible envelope
+into rendered text. The refusal is enforced the second time as well as the first: the reconcile
+rewriter can re-spell content beyond the value it targets (adversarial review produced a YAML
+alias-relocation candidate where an escaped `"--"` value could be re-emitted as a literal `--`), so
+the raw `--` validator runs again against the rewritten envelope body before the transaction stages
+the write, and a violation refuses the rewrite with an actionable message rather than being
+reasoned away as impossible. This is the AD-35 refuse-don't-respell spirit applied to a second
+value class: a hazard proven to exist is closed by a gate, not by an argument about what the
+rewriter is supposed to touch. The refusal is scoped to the comment spelling; the fence spelling
+accepts `--` as it always has, so a file whose id needs `--` keeps the fence spelling.
+
+**Fail-closed classification, because the envelope names this engine.** The fence spelling's soft
+tiers exist because a fenced block has innocent readings (Jekyll frontmatter, a thematic break), so
+a non-mapping or id-less fenced block degrades to untracked prose or a warning rather than an
+error. `<!-- doc-lattice` has exactly one reading: it declares lattice intent by name. There is
+therefore no untracked or id-less-warning tier for the comment spelling; any body that is not a
+mapping carrying `id` (empty, scalar, list, mapping without `id`) is an exit-2 `FRONTMATTER_ERROR`
+with an actionable message, matching the way a fenced block that declares intent through
+`derives_from`, `authority`, or `tickets` but has no `id` is already a tool error rather than a
+skip.
+
+**Auto-slug convention, with the marker as the reword-stable opt-in.** A GitHub-published repo
+should use auto-slug section identity and omit `{#anchor}` markers, since the marker syntax exists
+for the case auto-slug does not cover: an author who wants a heading reworded without moving its
+id. The two are not competing designs; the marker is the escape hatch auto-slug's convenience
+trades away.
+
+**Probe-complete ambiguous-target detection and the reconcile refusal.** Ambiguity is derived from
+the slugger's full allocation trace, not from final ids or from the bases headings request, because
+either of those under-detects. Dedup suffixes chain across bases (`Notes`, `Notes` in turn generate
+`notes`, `notes-1`, and a reword of the first shifts every later one), and dedup *probes* an id it
+never emits (in `Notes`, `Other`, `Notes`, the third heading probes `notes-1` while only
+base-requesting `notes`, so a rule built on requests alone frees exactly the id that rebinds when
+`Other` is later renamed to `Notes-1`). The rule is therefore that every candidate id a heading
+examines during allocation, its base and each suffix tried, links that heading to the id's current
+holder, and the connected components of that graph are collision components: every id in one is
+ambiguous, and an id set by an explicit marker is never a member, since being reword-stable is what
+the marker is for. `AMBIGUOUS` is a first-class edge state rather than an advisory, ranked and
+reported everywhere `BROKEN` is: `check` exits 1 on it, `lint` reports it, and every
+graph-consuming command names the colliding headings in both human and JSON output, because a
+warning-only design would leave CI green on a lattice `reconcile` itself refuses. `reconcile`
+refuses to write `seen` for an `AMBIGUOUS` edge, with a message naming the fix (reword one
+colliding heading, or mark the target), in the AD-35 refuse-don't-guess spirit: the tool declines
+to bless a dependency its own declaration cannot unambiguously name.
+
+**Full-inventory collision tracing, ATX-only addressability preserved.** Collision tracing runs
+over the full GitHub heading inventory, not the addressable subset AD-13 restricts *addressing* to,
+because GitHub allocates ids to setext, indented, and nested headings the engine does not address,
+and a mixed-form collision (a setext `Overview` followed by `# Overview`) is the only way the
+lattice id and the GitHub fragment can diverge. Widening *addressability* itself to those forms
+remains out of scope, by the CLAUDE.md separation between the link-target inventory and section
+identity: this design pulls an addressable member into a cross-inventory collision component
+without changing what the engine addresses. Running *allocation* over the full inventory, rather
+than only tracing collisions against it, is the deliberately deferred GTX-277 follow-up.
+
+**The context-inclusive target hash.** A section's drift hash input becomes its ancestor heading
+chain (raw inline heading source, the same source the slugger reads) prepended to the section's own
+content, rather than the section's content alone. Two byte-identical sections under different
+parents used to hash identically, which defeated the `AMBIGUOUS` net in the case where a collision
+is created and dissolved inside one change: add one product's `Setup` and rename another's in the
+same commit, and `#setup` transfers between products with no run ever seeing a collision and the
+old `seen` still matching. Folding ancestry into the hash makes a moved or reparented section, or
+one whose ancestor is reworded, go STALE even though its own bytes did not change, which is correct
+because the context is part of what the downstream document derived from. Whole-file targets hash
+the document body exactly as before and are unaffected, since a whole-file target has no ancestor
+chain to fold in.
+
+**The `lattice_format` version-skew guard, and why zero-config is exempt.** Both adopters run
+engine versions pinned in more than one place, so the format and hash changes above must fail loud
+under version skew rather than silently: a pre-v7 engine reading a converted repository would
+classify every comment envelope as prose and report green with nodes missing, and an older
+reconciler could rewrite v7-scheme hashes with old-scheme values. The guard is a required config
+key: v7 refuses to run against a `.doc-lattice.yml` that omits `lattice_format: 2`, with an
+actionable error pointing at CHANGELOG's migration section, and `scaffold` writes the key into
+every new config. A run with no config file at all is exempt, because there is no file to declare
+the key in and an ad hoc zero-config run has no installation to skew against; the requirement binds
+exactly when a config file is read, never on the absence of one. Older engines reject the key for
+free, with zero cooperation from code that predates this design: `Config` is `strict=True,
+extra="forbid"`, so every pre-v7 engine hard-errors on the unknown key before loading or
+reconciling anything. The hash algorithm is not separately namespaced; a second version channel
+beside the config key would be redundant surface, which is the same reasoning AD-15 applies to a
+spelling selector above.
+
+**Safe heading display, and why headings are cleaned rather than refused.** Naming a colliding
+heading puts raw Markdown body content into terminal, CI-log, DOT, and Mermaid sinks for the first
+time; AD-35's control-character refusal covers frontmatter values only, and a heading is not one.
+`text_utils.strip_control_chars`, scoped by AD-34 to the network-sourced Linear data and `init`
+input it was written for, is widened by one more caller rather than by relaxing that scope: a new
+`safe_heading_label` wraps it for heading text specifically, and every sink that names a heading
+(`check`, `lint`, `impact`, `graph`, `linear`) prints through it before that sink's own quoting
+(Rich markup escaping, DOT and Mermaid string quoting). Cleaning rather than refusing is the
+deliberate departure from AD-35: AD-35 refuses a frontmatter value because that value participates
+in identity and structured output, but a heading is body content, unrestricted Markdown a document
+author already controls, and refusing to load a document over a control character in a heading no
+reader would ever see there would make an otherwise unremarkable document unloadable. The persisted
+collision-component provenance stores the already-cleaned labels, so a cached run and an uncached
+run cannot diverge on sanitization, matching the AD-29 pattern of treating a derived disposition as
+cached data rather than a parse-time side effect.
+
+**Consequences:** This ships in the v7 major release rather than as an additive minor, because the
+context-inclusive hash invalidates every existing `seen` value on a section reached through a
+parent heading once, and an edge into a pre-existing collision component newly fails `AMBIGUOUS`;
+CHANGELOG.md owns the migration steps and README.md owns the resulting user-facing contract
+(the `AMBIGUOUS` drift state, the second frontmatter spelling, and the "Publishing on GitHub"
+recommendation). Existing `---` lattices, Mainspring's included, keep their spelling untouched and
+are affected only by the v7 semantics, never by a forced conversion; reconcile never converts one
+spelling to the other in either direction (AD-31's Layer 2a amendment). Widening *allocation* to
+the full heading inventory (GTX-277), a path-derived id for id-less files, and a sidecar metadata
+manifest were all considered and are recorded as out of scope in the design this record replaces
+with a durable decision; none of the three is a gap this record leaves open by omission, each was
+weighed and declined on its own terms.
