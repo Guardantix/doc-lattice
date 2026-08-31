@@ -21,6 +21,8 @@ from .constants import (
     EnvelopeKind,
 )
 from .error_types import FrontmatterError, UnreadableDocError
+from .hashing import normalize_newlines
+from .markdown_compat import code_block_line_spans
 from .model import NodeMeta, ParsedMeta
 from .path_utils import format_path_for_display
 from .validation_render import format_validation_error
@@ -51,6 +53,7 @@ _LOADER = SafeYamlLoader(parser="pure")
 # The two node-free outcomes are immutable and carry no per-file state, so they are shared.
 _UNTRACKED = ParsedMeta(meta=None, disposition="untracked")
 _ID_LESS = ParsedMeta(meta=None, disposition="id-less")
+_MISPLACED = ParsedMeta(meta=None, disposition="misplaced-envelope")
 # Rendered in place of a field path when pydantic reports no location. NodeMeta declares no
 # model-level validator today, and a non-mapping block is returned as untracked before it ever
 # reaches validation, so this is defensive: it exists so a future whole-block rule cannot
@@ -243,6 +246,31 @@ def refuse_double_hyphen(raw_meta: str, source: Path, *, first_body_line: int) -
             raise FrontmatterError(msg, source=source)
 
 
+def detect_misplaced_envelope(text: str) -> bool:
+    """Report whether an untracked document carries the comment opener where it will not be read.
+
+    Two stage on purpose. The substring pre-check is what every ordinary document pays, and the
+    markdown-it parse runs only on the rare file that actually holds the sentinel, so a
+    README quoting the syntax in a fenced example is answered correctly without charging every
+    other file for the parse.
+
+    Args:
+        text: The full file text of a document that opened no envelope.
+
+    Returns:
+        True when a line stripping to the opener sits outside every code block.
+    """
+    if COMMENT_ENVELOPE_OPEN not in text:
+        return False
+    coded = code_block_line_spans(text)
+    for number, line in enumerate(normalize_newlines(text).split("\n"), start=1):
+        if line.strip() != COMMENT_ENVELOPE_OPEN:
+            continue
+        if not any(start <= number <= end for start, end in coded):
+            return True
+    return False
+
+
 def parse_meta(raw_meta: str | None, source: Path, *, kind: EnvelopeKind = "fence") -> ParsedMeta:
     """Classify a raw frontmatter block, validating it into NodeMeta when it names a node.
 
@@ -338,7 +366,7 @@ def parse_document(text: str, source: Path) -> tuple[ParsedMeta, str]:
     """
     parts = split_frontmatter_parts(text, source)
     if parts is None:
-        return _UNTRACKED, text
+        return (_MISPLACED if detect_misplaced_envelope(text) else _UNTRACKED), text
     if parts.kind == "comment":
         refuse_double_hyphen(
             parts.raw_meta,

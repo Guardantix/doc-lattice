@@ -70,7 +70,9 @@ def test_location_kinds_match_literal():
 
 def test_frontmatter_dispositions_match_literal():
     assert frozenset(get_args(FrontmatterDisposition)) == VALID_FRONTMATTER_DISPOSITIONS
-    assert {"tracked", "untracked", "id-less"} == set(VALID_FRONTMATTER_DISPOSITIONS)
+    assert {"tracked", "untracked", "id-less", "misplaced-envelope"} == set(
+        VALID_FRONTMATTER_DISPOSITIONS
+    )
 
 
 def test_yaml_parsers_match_literal():

@@ -179,6 +179,28 @@ def extract_headings(body: str) -> list[Heading]:
     return headings
 
 
+def code_block_line_spans(body: str) -> list[tuple[int, int]]:
+    """Return the 1-based inclusive line spans of every code block a render would show.
+
+    Read from the pinned parser's full CommonMark parse rather than from the adapter's
+    restricted heading scan, because the caller asks a rendering question ("would a reader see
+    this as sample text") rather than an addressing one. Both fenced blocks and indented ones
+    count, since either turns the text it holds into a quoted example.
+
+    Args:
+        body: Markdown document text.
+
+    Returns:
+        ``(start, end)`` line ranges in document order, both bounds inclusive.
+    """
+    normalized = normalize_newlines(body).replace("\0", "�")
+    spans: list[tuple[int, int]] = []
+    for token in _PARSER.parse(normalized):
+        if token.type in ("fence", "code_block") and token.map is not None:
+            spans.append((token.map[0] + 1, token.map[1]))
+    return spans
+
+
 def _is_final_sigma(text: str, index: int) -> bool:
     for position in range(index - 1, -1, -1):
         character = text[position]

@@ -13,6 +13,7 @@ from doc_lattice.constants import LATTICE_INTENT_KEYS
 from doc_lattice.error_types import FrontmatterError, UnreadableDocError
 from doc_lattice.frontmatter_parser import (
     _OPENER_NEAR_MISS,
+    detect_misplaced_envelope,
     parse_document,
     parse_meta,
     refuse_double_hyphen,
@@ -1063,3 +1064,33 @@ def test_parse_document_leaves_prose_untracked():
 
     assert outcome.disposition == "untracked"
     assert body == "# No frontmatter\n"
+
+
+def test_a_misplaced_envelope_below_line_one_is_detected():
+    text = "# Title\n\n<!-- doc-lattice\nid: pc\n-->\n"
+
+    outcome, body = parse_document(text, Path("a.md"))
+
+    assert outcome.disposition == "misplaced-envelope"
+    assert outcome.meta is None
+    assert body == text
+
+
+def test_a_quoted_envelope_example_is_not_a_misplacement():
+    text = "# Title\n\n```markdown\n<!-- doc-lattice\nid: pc\n-->\n```\n"
+
+    outcome, _body = parse_document(text, Path("a.md"))
+
+    assert outcome.disposition == "untracked"
+
+
+def test_a_tracked_file_quoting_the_other_spelling_stays_tracked():
+    text = "---\nid: pc\n---\n# Body\n\n<!-- doc-lattice\nid: other\n-->\n"
+
+    outcome, _body = parse_document(text, Path("a.md"))
+
+    assert outcome.disposition == "tracked"
+
+
+def test_the_substring_precheck_short_circuits_a_file_without_the_sentinel():
+    assert detect_misplaced_envelope("# Title\n\nordinary prose\n") is False

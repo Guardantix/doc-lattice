@@ -108,6 +108,34 @@ def _report_reused_anchors(reused: bool, path: Path) -> None:
     )
 
 
+def _report_misplaced_envelope(disposition: FrontmatterDisposition, path: Path) -> None:
+    """Report an untracked file carrying the comment envelope where it will not be read.
+
+    A separate function from ``_report_skip`` for the reason that shapes ``_report_skip``
+    itself: Python renders a warning with its raising location and filters repeats by that
+    location, so two diagnostics sharing one site would suppress each other. ``stacklevel``
+    stays at its default 1 for the same reason, and every load path funnels here so a warm run
+    reproduces what the cold run it replays said.
+
+    The message deliberately does not open with ``skipping ``, matching
+    ``_report_reused_anchors``: AD-29 records that ``PYTHONWARNINGS`` cannot single out the
+    id-less skip because ``discovery.py``'s symlink-escape warning shares that prefix.
+
+    Args:
+        disposition: What the parse concluded about the file. Only ``"misplaced-envelope"``
+            is reported.
+        path: The discovered path as this checkout sees it, named in the message.
+    """
+    if disposition != "misplaced-envelope":
+        return
+    warnings.warn(
+        f"misplaced doc-lattice envelope in {format_path_for_display(path)}: the "
+        "'<!-- doc-lattice' opener is only read as the file's first line, so this file is not a "
+        "lattice node; move the envelope to the top of the file",
+        stacklevel=1,
+    )
+
+
 def _load_uncached(project: ProjectConfig) -> Lattice:
     """Today's cache-free load path, unchanged."""
     parsed: list[ParsedDoc] = []
@@ -118,6 +146,7 @@ def _load_uncached(project: ProjectConfig) -> Lattice:
         outcome, body = parse_document(text, path)
         _report_skip(outcome.disposition, path)
         _report_reused_anchors(outcome.reused_anchors, path)
+        _report_misplaced_envelope(outcome.disposition, path)
         if outcome.meta is None:
             continue
         parsed.append(ParsedDoc(path=path, meta=outcome.meta, body=body))
@@ -152,6 +181,7 @@ def _load_cached(
             state.claim(rel_key, result.refreshed_stat)
             _report_skip(result.disposition, doc_path)
             _report_reused_anchors(result.reused_anchors, doc_path)
+            _report_misplaced_envelope(result.disposition, doc_path)
             if result.doc is not None:
                 parsed.append(result.doc)
             continue
@@ -159,6 +189,7 @@ def _load_cached(
         outcome, body = parse_document(text, doc_path)
         _report_skip(outcome.disposition, doc_path)
         _report_reused_anchors(outcome.reused_anchors, doc_path)
+        _report_misplaced_envelope(outcome.disposition, doc_path)
         meta = outcome.meta
         sections = derive_file_sections(body) if meta is not None else None
         state.replace(

@@ -549,3 +549,25 @@ def test_a_comment_spelling_document_becomes_a_node(tmp_path: Path):
 
     assert set(lattice.nodes_by_id) == {"up", "down"}
     assert TargetId("up", "section") in lattice.index
+
+
+def test_the_misplacement_warning_replays_on_every_cache_tier(tmp_path: Path, monkeypatch):
+    monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path / "cache"))
+    docs = tmp_path / "docs"
+    docs.mkdir()
+    (docs / "late.md").write_text("# Title\n\n<!-- doc-lattice\nid: late\n-->\n", encoding="utf-8")
+    (tmp_path / ".doc-lattice.yml").write_text(
+        "docs_roots:\n  - docs\ncache_key: parity\ncache_trust_stat: true\n",
+        encoding="utf-8",
+    )
+    project = load_config(None, tmp_path)
+
+    messages = []
+    for _ in range(3):
+        with warnings.catch_warnings(record=True) as captured:
+            warnings.simplefilter("always")
+            load_lattice(project)
+        messages.append([str(entry.message) for entry in captured])
+
+    assert messages[0] == messages[1] == messages[2]
+    assert any("misplaced doc-lattice envelope" in message for message in messages[0])

@@ -9,6 +9,7 @@ import pytest
 from doc_lattice.markdown_compat import (
     SLUG_UNICODE_VERSION,
     anchor_ids,
+    code_block_line_spans,
     extract_headings,
     github_heading_ids,
     github_ids_for_texts,
@@ -106,3 +107,13 @@ def test_slug_lowercase_uses_pinned_javascript_unicode_data() -> None:
     assert github_slug("\ua7cb\u03a3") == "\u0264\u03c2"
     assert github_slug("\u1c89\u03a3") == "\u03c2"
     assert github_slug("A\u03a3\u1ad0A") == "a\u03c3a"
+
+
+def test_code_block_line_spans_covers_fenced_and_indented_blocks():
+    body = "# H\n\n```\n<!-- doc-lattice\n```\n\ntext\n\n    indented\n"
+
+    spans = code_block_line_spans(body)
+
+    assert (3, 5) in spans
+    assert any(start <= 9 <= end for start, end in spans)
+    assert not any(start <= 7 <= end for start, end in spans)
