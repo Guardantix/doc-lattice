@@ -904,7 +904,7 @@ class TestConfigSinks:
         project.mkdir()
         entry = f"../{HOSTILE.replace('.md', '-outside.md')}"
         (project / ".doc-lattice.yml").write_text(
-            f"docs_roots: [{json.dumps(entry)}]\n", encoding="utf-8"
+            f"lattice_format: 2\ndocs_roots: [{json.dumps(entry)}]\n", encoding="utf-8"
         )
 
         with pytest.raises(ConfigError) as exc:
@@ -921,7 +921,7 @@ class TestConfigSinks:
         entry = HOSTILE.replace(".md", ".txt")
         (project / entry).write_text("x", encoding="utf-8")
         (project / ".doc-lattice.yml").write_text(
-            f"docs_roots: [{json.dumps(entry)}]\n", encoding="utf-8"
+            f"lattice_format: 2\ndocs_roots: [{json.dumps(entry)}]\n", encoding="utf-8"
         )
 
         with pytest.raises(ConfigError) as exc:
@@ -940,7 +940,7 @@ class TestConfigSinks:
         project.mkdir()
         entry = "../outside/"
         (project / ".doc-lattice.yml").write_text(
-            f"docs_roots: [{json.dumps(entry)}]\n", encoding="utf-8"
+            f"lattice_format: 2\ndocs_roots: [{json.dumps(entry)}]\n", encoding="utf-8"
         )
 
         with pytest.raises(ConfigError) as exc:

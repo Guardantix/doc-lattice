@@ -100,6 +100,7 @@ def test_commented_example_keys_stay_valid_against_config_schema():
     # Pin the whole set, not a sample: a newly scaffolded commented key would otherwise be
     # uncommented, loaded, and then silently unexamined by this test.
     assert cfg.model_fields_set == {
+        "lattice_format",
         "docs_roots",
         "ignore_globs",
         "cache_key",
@@ -152,6 +153,13 @@ def test_render_config_round_trips_any_linear_team(team):
 @given(root=_scalars)
 def test_render_config_round_trips_any_docs_root(root):
     assert _load(render_config((root,), None)).docs_roots == [root]
+
+
+def test_the_scaffolded_config_declares_the_lattice_format_first():
+    text = render_config(("docs",), None)
+
+    assert "lattice_format: 2\n" in text
+    assert text.index("lattice_format:") < text.index("docs_roots:")
 
 
 def test_snippets_pin_pypi_version_and_python():

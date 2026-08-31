@@ -96,7 +96,9 @@ def test_cached_and_uncached_loads_reject_unclosed_frontmatter_identically(
     with pytest.raises(UnreadableDocError) as uncached:
         load_lattice(load_config(None, tmp_path))
 
-    (tmp_path / ".doc-lattice.yml").write_text("cache_key: unclosed\n", encoding="utf-8")
+    (tmp_path / ".doc-lattice.yml").write_text(
+        "lattice_format: 2\ncache_key: unclosed\n", encoding="utf-8"
+    )
     with pytest.raises(UnreadableDocError) as cached:
         load_lattice(load_config(None, tmp_path))
 
@@ -156,7 +158,7 @@ def test_ignore_globs_exclude_nodes(tmp_path: Path):
     (docs / "kept.md").write_text("---\nid: kept\n---\n# Kept\n", encoding="utf-8")
     (docs / "drafts" / "wip.md").write_text("---\nid: wip\n---\n# WIP\n", encoding="utf-8")
     (tmp_path / ".doc-lattice.yml").write_text(
-        'docs_roots: ["docs"]\nignore_globs: ["drafts/**"]\n', encoding="utf-8"
+        'lattice_format: 2\ndocs_roots: ["docs"]\nignore_globs: ["drafts/**"]\n', encoding="utf-8"
     )
     project = load_config(None, tmp_path)
     lat = load_lattice(project)
@@ -171,7 +173,7 @@ def test_multiple_docs_roots_combine(tmp_path: Path):
     (tmp_path / "design" / "a.md").write_text("---\nid: a\n---\n# A\n", encoding="utf-8")
     (tmp_path / "production" / "b.md").write_text("---\nid: b\n---\n# B\n", encoding="utf-8")
     (tmp_path / ".doc-lattice.yml").write_text(
-        'docs_roots: ["design", "production"]\n', encoding="utf-8"
+        'lattice_format: 2\ndocs_roots: ["design", "production"]\n', encoding="utf-8"
     )
     project = load_config(None, tmp_path)
     lat = load_lattice(project)
@@ -192,7 +194,7 @@ def test_load_lattice_deduplicates_in_project_symlink_target(
     link = docs / "linked.md"
     link.symlink_to(Path("../shared/spec.md"))
 
-    config_lines = ['docs_roots: ["docs", "shared"]']
+    config_lines = ["lattice_format: 2", 'docs_roots: ["docs", "shared"]']
     if cache_enabled:
         config_lines.append("cache_key: symlink-test")
     (project_root / ".doc-lattice.yml").write_text("\n".join(config_lines) + "\n", encoding="utf-8")
@@ -205,7 +207,7 @@ def test_load_lattice_deduplicates_in_project_symlink_target(
 
 
 def _with_cache(tmp_path: Path, *, trust_stat: bool = False) -> Path:
-    lines = ["cache_key: testslot"]
+    lines = ["lattice_format: 2", "cache_key: testslot"]
     if trust_stat:
         lines.append("cache_trust_stat: true")
     (tmp_path / ".doc-lattice.yml").write_text("\n".join(lines) + "\n", encoding="utf-8")
@@ -325,11 +327,14 @@ def test_mixed_directory_and_file_docs_roots_load_identically_cached_and_uncache
     )
     config_path = tmp_path / ".doc-lattice.yml"
 
-    config_path.write_text("docs_roots: [docs, ARCHITECTURE.md]\n", encoding="utf-8")
+    config_path.write_text(
+        "lattice_format: 2\ndocs_roots: [docs, ARCHITECTURE.md]\n", encoding="utf-8"
+    )
     uncached = load_lattice(load_config(None, tmp_path))
 
     config_path.write_text(
-        "docs_roots: [docs, ARCHITECTURE.md]\ncache_key: mixed-file-root\n", encoding="utf-8"
+        "lattice_format: 2\ndocs_roots: [docs, ARCHITECTURE.md]\ncache_key: mixed-file-root\n",
+        encoding="utf-8",
     )
     cold = load_lattice(load_config(None, tmp_path))  # writes the cache
     warm = load_lattice(load_config(None, tmp_path))  # reads it back
@@ -557,7 +562,7 @@ def test_the_misplacement_warning_replays_on_every_cache_tier(tmp_path: Path, mo
     docs.mkdir()
     (docs / "late.md").write_text("# Title\n\n<!-- doc-lattice\nid: late\n-->\n", encoding="utf-8")
     (tmp_path / ".doc-lattice.yml").write_text(
-        "docs_roots:\n  - docs\ncache_key: parity\ncache_trust_stat: true\n",
+        "lattice_format: 2\ndocs_roots:\n  - docs\ncache_key: parity\ncache_trust_stat: true\n",
         encoding="utf-8",
     )
     project = load_config(None, tmp_path)

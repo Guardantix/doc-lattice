@@ -122,7 +122,9 @@ def test_check_github_annotation_keeps_config_subdir_prefix(
         "---\nid: down\nderives_from:\n  - ref: ghost\n---\n# Down\nbody\n",
         encoding="utf-8",
     )
-    (project / ".doc-lattice.yml").write_text("docs_roots:\n  - docs\n", encoding="utf-8")
+    (project / ".doc-lattice.yml").write_text(
+        "lattice_format: 2\ndocs_roots:\n  - docs\n", encoding="utf-8"
+    )
     monkeypatch.chdir(tmp_path)
     if with_workspace:
         monkeypatch.setenv("GITHUB_WORKSPACE", str(tmp_path))
@@ -375,7 +377,7 @@ def test_check_reports_unreconciled_for_a_file_docs_root(tmp_path: Path, monkeyp
         encoding="utf-8",
     )
     (tmp_path / ".doc-lattice.yml").write_text(
-        "docs_roots: [docs, ARCHITECTURE.md]\n", encoding="utf-8"
+        "lattice_format: 2\ndocs_roots: [docs, ARCHITECTURE.md]\n", encoding="utf-8"
     )
     monkeypatch.chdir(tmp_path)
 
@@ -683,7 +685,9 @@ def test_check_id_less_stderr_is_byte_identical_uncached_cold_and_warm(tmp_path:
     env = {"XDG_CACHE_HOME": str(tmp_path / "xdg")}
 
     uncached = _check_in(tmp_path, env)
-    (tmp_path / ".doc-lattice.yml").write_text("cache_key: idless\n", encoding="utf-8")
+    (tmp_path / ".doc-lattice.yml").write_text(
+        "lattice_format: 2\ncache_key: idless\n", encoding="utf-8"
+    )
     cold = _check_in(tmp_path, env)  # writes the cache
     warm = _check_in(tmp_path, env)  # every file served from it
 
@@ -706,7 +710,9 @@ def test_check_reused_anchor_stderr_names_the_file_and_survives_a_warm_cache(tmp
     env = {"XDG_CACHE_HOME": str(tmp_path / "xdg")}
 
     uncached = _check_in(tmp_path, env)
-    (tmp_path / ".doc-lattice.yml").write_text("cache_key: anchored\n", encoding="utf-8")
+    (tmp_path / ".doc-lattice.yml").write_text(
+        "lattice_format: 2\ncache_key: anchored\n", encoding="utf-8"
+    )
     cold = _check_in(tmp_path, env)  # writes the cache
     warm = _check_in(tmp_path, env)  # the node is served from it
 
@@ -765,7 +771,9 @@ def _nested_annotation_project(tmp_path: Path) -> tuple[Path, Path]:
         "---\nid: down\nderives_from:\n  - ref: ghost\n---\n# Down\nbody\n",
         encoding="utf-8",
     )
-    (tmp_path / ".doc-lattice.yml").write_text("docs_roots:\n  - docs\n", encoding="utf-8")
+    (tmp_path / ".doc-lattice.yml").write_text(
+        "lattice_format: 2\ndocs_roots:\n  - docs\n", encoding="utf-8"
+    )
     nested = tmp_path / "tools" / "scripts"
     nested.mkdir(parents=True)
     return nested, docs / "down.md"
@@ -834,9 +842,8 @@ def test_check_exits_one_on_an_ambiguous_edge_and_names_it_in_both_formats(tmp_p
     (docs / "down.md").write_text(
         "---\nid: down\nderives_from:\n  - ref: up#notes\n---\n# Down\n", encoding="utf-8"
     )
-    # No `lattice_format` key: Config does not have the field until Task 15, whose sweep adds it.
     config = tmp_path / ".doc-lattice.yml"
-    config.write_text("docs_roots:\n  - docs\n", encoding="utf-8")
+    config.write_text("lattice_format: 2\ndocs_roots:\n  - docs\n", encoding="utf-8")
 
     human = runner.invoke(app, ["check", "--config", str(config)])
     payload = runner.invoke(app, ["check", "--config", str(config), "--format", "json"])

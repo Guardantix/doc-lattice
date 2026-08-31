@@ -23,7 +23,9 @@ def test_load_writes_current_root_at_ledger_tail(tmp_path, monkeypatch):
     doc = tmp_path / "docs" / "a.md"
     doc.parent.mkdir(parents=True)
     doc.write_text("---\nid: a\n---\n# A\n", encoding="utf-8")
-    (tmp_path / ".doc-lattice.yml").write_text("cache_key: tail\n", encoding="utf-8")
+    (tmp_path / ".doc-lattice.yml").write_text(
+        "lattice_format: 2\ncache_key: tail\n", encoding="utf-8"
+    )
 
     load_lattice(load_config(None, tmp_path))
 
@@ -40,7 +42,9 @@ def test_fully_warm_same_root_run_writes_nothing(tmp_path, monkeypatch):
     doc.parent.mkdir(parents=True)
     doc.write_text(text, encoding="utf-8")
     (doc.parent / "plain.md").write_text("# Plain\n", encoding="utf-8")
-    (tmp_path / ".doc-lattice.yml").write_text("cache_key: warm\n", encoding="utf-8")
+    (tmp_path / ".doc-lattice.yml").write_text(
+        "lattice_format: 2\ncache_key: warm\n", encoding="utf-8"
+    )
     project = load_config(None, tmp_path)
     load_lattice(project)
     path = cache_path("warm", os.environ)
@@ -59,7 +63,9 @@ def test_version_1_non_node_cache_cannot_hide_unclosed_frontmatter(tmp_path, mon
     docs.mkdir()
     doc = docs / "broken.md"
     doc.write_text("---\nid: vanished\n# Missing close\n", encoding="utf-8")
-    (tmp_path / ".doc-lattice.yml").write_text("cache_key: legacy\n", encoding="utf-8")
+    (tmp_path / ".doc-lattice.yml").write_text(
+        "lattice_format: 2\ncache_key: legacy\n", encoding="utf-8"
+    )
     root = str(tmp_path.resolve())
     st = doc.stat()
     old_cache = CacheFile(
@@ -93,7 +99,9 @@ def test_version_2_cached_sections_are_rederived(tmp_path, monkeypatch):
         "---\nid: a\n---\n``` invalid`info\n# Visible\n```\n",
         encoding="utf-8",
     )
-    (tmp_path / ".doc-lattice.yml").write_text("cache_key: old-sections\n", encoding="utf-8")
+    (tmp_path / ".doc-lattice.yml").write_text(
+        "lattice_format: 2\ncache_key: old-sections\n", encoding="utf-8"
+    )
     project = load_config(None, tmp_path)
 
     load_lattice(project)
@@ -179,7 +187,7 @@ def test_default_tier_matches_uncached_under_random_edits(tmp_path_factory, edit
         cached_cfg.unlink(missing_ok=True)
         reference = _run_check(load_config(None, base))
         # Default-tier cached run (verify tier), sharing one XDG home across iterations.
-        cached_cfg.write_text("cache_key: prop\n", encoding="utf-8")
+        cached_cfg.write_text("lattice_format: 2\ncache_key: prop\n", encoding="utf-8")
         os.environ["XDG_CACHE_HOME"] = str(xdg)
         try:
             cached_result = _run_check(load_config(None, base))
@@ -197,7 +205,7 @@ def test_require_verified_load_sees_fresh_content_after_same_stat_rewrite(tmp_pa
     doc = docs / "a.md"
     doc.write_text("---\nid: a\n---\n# A\naaaa\n", encoding="utf-8")
     (tmp_path / ".doc-lattice.yml").write_text(
-        "cache_key: rv\ncache_trust_stat: true\n", encoding="utf-8"
+        "lattice_format: 2\ncache_key: rv\ncache_trust_stat: true\n", encoding="utf-8"
     )
     load_lattice(load_config(None, tmp_path))  # warm the cache, populating the stat hint
     st = doc.stat()
@@ -226,7 +234,7 @@ def test_trust_stat_serves_unreadable_file_from_cache_a_documented_caveat(tmp_pa
     doc = docs / "a.md"
     doc.write_text("---\nid: a\n---\n# A\naaaa\n", encoding="utf-8")
     (tmp_path / ".doc-lattice.yml").write_text(
-        "cache_key: unread\ncache_trust_stat: true\n", encoding="utf-8"
+        "lattice_format: 2\ncache_key: unread\ncache_trust_stat: true\n", encoding="utf-8"
     )
     load_lattice(load_config(None, tmp_path))  # warm the cache, populating the stat hint
     st = doc.stat()
@@ -253,7 +261,9 @@ def test_verify_tier_serves_schema_valid_node_corruption_a_documented_limit(tmp_
     docs.mkdir()
     doc = docs / "a.md"
     doc.write_text("---\nid: a\n---\n# A\nreal body\n", encoding="utf-8")
-    (tmp_path / ".doc-lattice.yml").write_text("cache_key: corrupt\n", encoding="utf-8")
+    (tmp_path / ".doc-lattice.yml").write_text(
+        "lattice_format: 2\ncache_key: corrupt\n", encoding="utf-8"
+    )
     load_lattice(load_config(None, tmp_path))  # warm the cache
     # Tamper with the stored body while leaving file_sha256 (and the on-disk file) intact.
     path = cache_path("corrupt", {"XDG_CACHE_HOME": str(tmp_path / "xdg")})

@@ -143,6 +143,7 @@ def test_init_delegates_create_only_write_to_shared_persistence(tmp_path: Path, 
     assert target == tmp_path / ".doc-lattice.yml"
     assert data == (
         b"# doc-lattice configuration. See https://github.com/Guardantix/doc-lattice\n"
+        b"lattice_format: 2\n"
         b"docs_roots:\n"
         b"  - docs\n"
         b"# ignore_globs:\n"

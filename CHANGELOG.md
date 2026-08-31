@@ -6,6 +6,18 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Migration
+
+`.doc-lattice.yml` must now declare `lattice_format: 2`. A config file that omits the key is
+refused with a pointer to this section; a zero-config run (no `.doc-lattice.yml` anywhere) is
+unaffected, since there is no file to declare it in. Three steps:
+
+1. Add `lattice_format: 2` to `.doc-lattice.yml`, as the first key. `doc-lattice init` scaffolds
+   it there for a new config.
+2. Run `doc-lattice reconcile --all` to re-bless the lattice under the 7.0 content hash, which
+   now folds a section's ancestor heading chain into its hash input.
+3. Fix any edge the reconcile run reports `AMBIGUOUS`, newly surfaced by that same hash change.
+
 ## [6.0.0] - 2026-08-25
 
 ### Migration

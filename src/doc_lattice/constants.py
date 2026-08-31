@@ -169,6 +169,15 @@ VALID_RECONCILE_SELECTOR_MODES: frozenset[str] = frozenset(get_args(ReconcileSel
 RECONCILE_JOURNAL_NAME: str = ".doc-lattice-reconcile.json"
 RECONCILE_JOURNAL_VERSION: Literal[2] = 2
 RECONCILE_JOURNAL_LEGACY_VERSION: Literal[1] = 1
+
+# The lattice format this engine reads, declared as `lattice_format` in `.doc-lattice.yml` and
+# required there from 7.0. Both skew directions fail loud with no cooperation from code that
+# predates the feature: a v7 engine refuses a config that omits the key, and every pre-v7 engine
+# refuses one that carries it, because `Config` is `strict=True, extra="forbid"`. Literal-typed
+# because `Config` pins the field to this exact value. The hash scheme is deliberately not
+# versioned separately: the config boundary is the guard, and a second version channel would be
+# redundant surface (AD-15 spirit).
+LATTICE_FORMAT_VERSION: Literal[2] = 2
 PERSISTENCE_TEMP_SUFFIX: str = ".tmp"
 RECONCILE_BEFORE_IMAGE_INFIX: str = ".doc-lattice-before."
 RECONCILE_AFTER_IMAGE_INFIX: str = ".doc-lattice-after."

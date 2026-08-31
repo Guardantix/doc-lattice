@@ -76,7 +76,7 @@ def test_graph_json_includes_a_file_docs_root_node(tmp_path: Path, monkeypatch):
         encoding="utf-8",
     )
     (tmp_path / ".doc-lattice.yml").write_text(
-        "docs_roots: [docs, ARCHITECTURE.md]\n", encoding="utf-8"
+        "lattice_format: 2\ndocs_roots: [docs, ARCHITECTURE.md]\n", encoding="utf-8"
     )
     monkeypatch.chdir(tmp_path)
 

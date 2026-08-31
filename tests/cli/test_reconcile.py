@@ -176,7 +176,9 @@ def test_reconcile_writes_through_in_project_symlink(tmp_path: Path, monkeypatch
     shared = project_root / "shared"
     docs.mkdir(parents=True)
     shared.mkdir()
-    (project_root / ".doc-lattice.yml").write_text('docs_roots: ["docs"]\n', encoding="utf-8")
+    (project_root / ".doc-lattice.yml").write_text(
+        'lattice_format: 2\ndocs_roots: ["docs"]\n', encoding="utf-8"
+    )
     (docs / "up.md").write_text("---\nid: up\n---\n# Up {#sec}\nupstream\n", encoding="utf-8")
     target = shared / "down.md"
     target.write_text(
@@ -635,7 +637,7 @@ def test_reconcile_dry_run_does_not_mutate_external_load_cache(
     cache_file.parent.mkdir(parents=True)
     cache_file.write_bytes(b"existing cache sentinel\n")
     (lattice_dir / ".doc-lattice.yml").write_text(
-        "cache_key: dry-run-proof\ncache_trust_stat: true\n",
+        "lattice_format: 2\ncache_key: dry-run-proof\ncache_trust_stat: true\n",
         encoding="utf-8",
     )
     project_before = _tree_snapshot(lattice_dir)
@@ -1300,7 +1302,7 @@ def test_reconcile_all_cached_matches_uncached_bytes(lattice_dir: Path, tmp_path
     env = {"XDG_CACHE_HOME": str(tmp_path / "xdg"), "NO_COLOR": "1"}
     uncached = _run(["reconcile", "--all"], lattice_dir, env)
     (twin / ".doc-lattice.yml").write_text(
-        "cache_key: recon\ncache_trust_stat: true\n", encoding="utf-8"
+        "lattice_format: 2\ncache_key: recon\ncache_trust_stat: true\n", encoding="utf-8"
     )
     cached = _run(["reconcile", "--all"], twin, env)
     assert cached.exit_code == uncached.exit_code

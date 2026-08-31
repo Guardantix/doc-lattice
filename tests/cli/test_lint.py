@@ -150,7 +150,9 @@ def test_lint_exits_2_on_bad_config(tmp_path: Path, monkeypatch):
 def _nested_lint_project(tmp_path: Path) -> Path:
     """Write a ladder violation at the checkout root and return a nested cwd inside it."""
     _write_lint_docs(tmp_path)
-    (tmp_path / ".doc-lattice.yml").write_text("docs_roots:\n  - docs\n", encoding="utf-8")
+    (tmp_path / ".doc-lattice.yml").write_text(
+        "lattice_format: 2\ndocs_roots:\n  - docs\n", encoding="utf-8"
+    )
     nested = tmp_path / "tools" / "scripts"
     nested.mkdir(parents=True)
     return nested
@@ -216,9 +218,9 @@ def test_lint_names_an_ambiguous_target_in_human_and_json(tmp_path: Path):
     (docs / "down.md").write_text(
         "---\nid: down\nderives_from:\n  - ref: up#notes\n---\n# Down\n", encoding="utf-8"
     )
-    # No `lattice_format` key: `Config` is extra="forbid" and does not have the field until
-    # Task 15, whose sweep step adds it here.
-    (tmp_path / ".doc-lattice.yml").write_text("docs_roots:\n  - docs\n", encoding="utf-8")
+    (tmp_path / ".doc-lattice.yml").write_text(
+        "lattice_format: 2\ndocs_roots:\n  - docs\n", encoding="utf-8"
+    )
 
     human = runner.invoke(app, ["lint", "--config", str(tmp_path / ".doc-lattice.yml")])
     payload = runner.invoke(
