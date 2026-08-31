@@ -331,10 +331,13 @@ def test_check_without_only_shows_all_states(lattice_dir: Path, monkeypatch):
 
 
 def test_check_exits_2_on_bad_config(tmp_path: Path, monkeypatch):
-    (tmp_path / ".doc-lattice.yml").write_text("docs_roots: ['../x']\n", encoding="utf-8")
+    (tmp_path / ".doc-lattice.yml").write_text(
+        "lattice_format: 2\ndocs_roots: ['../x']\n", encoding="utf-8"
+    )
     monkeypatch.chdir(tmp_path)
     result = runner.invoke(app, ["check"])
     assert result.exit_code == 2
+    assert "resolves outside the project root" in result.stderr
 
 
 def test_check_error_handler_escapes_markup_in_message(tmp_path: Path, monkeypatch):

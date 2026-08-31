@@ -141,10 +141,13 @@ def test_lint_json_reports_skips(tmp_path: Path, monkeypatch):
 
 
 def test_lint_exits_2_on_bad_config(tmp_path: Path, monkeypatch):
-    (tmp_path / ".doc-lattice.yml").write_text("docs_roots: ['../x']\n", encoding="utf-8")
+    (tmp_path / ".doc-lattice.yml").write_text(
+        "lattice_format: 2\ndocs_roots: ['../x']\n", encoding="utf-8"
+    )
     monkeypatch.chdir(tmp_path)
     result = runner.invoke(app, ["lint"])
     assert result.exit_code == 2
+    assert "resolves outside the project root" in result.stderr
 
 
 def _nested_lint_project(tmp_path: Path) -> Path:
