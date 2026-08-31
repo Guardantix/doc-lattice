@@ -123,7 +123,8 @@ def test_split_frontmatter_detects_crlf_fences():
 @given(st.text())
 def test_split_frontmatter_identity_when_no_opening_fence(text):
     first_line = text.lstrip("﻿").split("\n", 1)[0]
-    assume(first_line.strip() != "---" and first_line != "<!-- doc-lattice")
+    # Exclude fence and comment envelope openers, including the near-miss raise surface.
+    assume(first_line.strip() != "---" and not first_line.startswith("<!-- doc-lattice"))
     raw, body = split_frontmatter(text, Path("a.md"))
     assert raw is None
     assert body == text
