@@ -2554,3 +2554,100 @@ def test_apply_reconcile_unparseable_frontmatter_carries_the_document():
         apply_reconcile("---\nid: [unclosed\n---\nbody\n", {"a#x": "newhash"}, path)
 
     assert exc.value.source == path
+
+
+COMMENT_DOWNSTREAM = (
+    "<!-- doc-lattice\n"
+    "id: down\n"
+    "derives_from:\n"
+    "  - ref: up#one\n"
+    "    seen: oldoldoldoldoldoldoldoldoldoldol\n"
+    "-->\n"
+    "# Down\nbody\n"
+)
+
+
+def test_reconcile_rewrites_a_comment_envelope_and_preserves_its_delimiters():
+    new_text, applied = apply_reconcile(COMMENT_DOWNSTREAM, {"up#one": "b" * 32}, Path("down.md"))
+
+    assert applied == {"up#one"}
+    assert new_text.startswith("<!-- doc-lattice\n")
+    assert "\n-->\n# Down\nbody\n" in new_text
+    assert "---" not in new_text
+    assert f"seen: {'b' * 32}" in new_text
+
+
+def test_reconcile_never_converts_a_fence_to_a_comment_envelope():
+    text = (
+        "---\nid: down\nderives_from:\n  - ref: up#one\n"
+        "    seen: oldoldoldoldoldoldoldoldoldoldol\n---\n# Down\n"
+    )
+
+    new_text, applied = apply_reconcile(text, {"up#one": "b" * 32}, Path("down.md"))
+
+    assert applied == {"up#one"}
+    assert new_text.startswith("---\n")
+    assert "<!-- doc-lattice" not in new_text
+
+
+def test_a_rewrite_that_would_introduce_a_double_hyphen_is_refused():
+    text = (
+        "<!-- doc-lattice\nid: down\nderives_from:\n  - ref: up#one\n"
+        "    seen: oldoldoldoldoldoldoldoldoldoldol\n-->\n# Down\n"
+    )
+
+    with pytest.raises(UnreadableDocError) as excinfo:
+        apply_reconcile(text, {"up#one": "aa--bb" + "c" * 26}, Path("down.md"))
+
+    message = str(excinfo.value)
+    assert "'--'" in message
+    assert "nothing was rewritten" in message
+
+
+def test_the_alias_relocation_candidate_is_pinned_either_way_its_verdict_lands():
+    # Adversarial review's candidate: an escaped "--" reachable through a relocated seen anchor.
+    # Whatever the rewriter does with it, the outcome is closed by this gate rather than by
+    # reasoning about the rewriter. Either the rewrite is refused, or the re-emitted envelope
+    # still holds no raw "--".
+    text = (
+        "<!-- doc-lattice\n"
+        "id: down\n"
+        'marker: &m "a\\u002D\\u002Db"\n'
+        "derives_from:\n"
+        "  - ref: up#one\n"
+        "    seen: *m\n"
+        "-->\n"
+        "# Down\n"
+    )
+
+    try:
+        new_text, applied = apply_reconcile(text, {"up#one": "b" * 32}, Path("down.md"))
+    except UnreadableDocError as exc:
+        # Both outcomes are pinned by one test, so `pytest.raises` cannot wrap the call: a
+        # rewritten-clean verdict falls through to the assertions below instead of raising.
+        assert "nothing was rewritten" in str(exc)  # noqa: PT017
+        return
+    if applied:
+        envelope = new_text.split("\n-->\n", 1)[0]
+        assert "--" not in envelope.removeprefix("<!-- doc-lattice\n")
+
+
+def test_reconcile_refuses_to_bless_an_ambiguous_edge():
+    lattice = build_lattice(
+        [
+            ParsedDoc(path=Path("docs/up.md"), meta=NodeMeta(id="up"), body="# Notes\n\n# Notes\n"),
+            ParsedDoc(
+                path=Path("docs/down.md"),
+                meta=NodeMeta.model_validate({"id": "down", "derives_from": [{"ref": "up#notes"}]}),
+                body="# Down\n",
+            ),
+        ]
+    )
+
+    with pytest.raises(ValidationError) as excinfo:
+        reconcile(lattice, "down", ref=None, reconcile_all=False)
+
+    message = str(excinfo.value)
+    assert 'ambiguous with "Notes" (line 1), "Notes" (line 3)' in message
+    assert "reword" in message
+    assert "{#anchor}" in message
