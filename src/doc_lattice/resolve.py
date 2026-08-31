@@ -4,21 +4,32 @@ from pathlib import Path
 
 from .error_types import BrokenRefError
 from .hashing import content_hash
+from .markdown_compat import strip_heading_anchor
 from .model import Lattice, Node, TargetId
 from .path_utils import format_path_for_display
-from .sections import section_text
+from .sections import section_text, split_body_lines
 
 
 def target_content(lattice: Lattice, target_id: TargetId) -> str:
     """Return the content a target id covers, for hashing.
+
+    A section target's content is prefixed with its ancestor heading chain, so context is part
+    of target identity. Two byte-identical sections under different parents (a templated
+    ``### Setup`` under ``## Product A`` and ``## Product B``) no longer hash the same, which is
+    what closes the transient-collision hole: adding B's ``Setup`` and renaming A's in one
+    change would otherwise transfer ``#setup`` between products with no run ever seeing a
+    collision and the old ``seen`` still matching. A section that moves under a different
+    parent, or whose ancestor is reworded, therefore goes STALE even when its own bytes did not
+    change, which is correct: the context is part of what the downstream document derived from.
+    Whole-file targets are unaffected.
 
     Args:
         lattice: The built lattice.
         target_id: A resolved TargetId present in ``lattice.index``.
 
     Returns:
-        The whole node body for a ``file`` location, or the anchored section text for a
-        ``section`` location.
+        The whole node body for a ``file`` location, or the ancestor heading chain followed by
+        the anchored section text for a ``section`` location.
 
     Raises:
         BrokenRefError: If ``target_id`` is not in the index.
@@ -30,7 +41,32 @@ def target_content(lattice: Lattice, target_id: TargetId) -> str:
     node = node_for_path(lattice, location.path)
     if location.kind == "file":
         return node.body
-    return section_text(node.body, location.span)
+    section = section_text(node.body, location.span)
+    chain = ancestor_headings(lattice, target_id)
+    return "\n".join([*chain, section]) if chain else section
+
+
+def ancestor_headings(lattice: Lattice, target_id: TargetId) -> tuple[str, ...]:
+    """Return each enclosing section's heading line, outermost first.
+
+    The marker is removed with ``strip_heading_anchor``, which is the same treatment
+    ``sections.section_text`` gives a section's own heading line, so adding or removing a
+    ``{#anchor}`` on an ancestor does not restale every descendant edge.
+
+    Args:
+        lattice: The built lattice.
+        target_id: A resolved section TargetId present in ``lattice.index``.
+
+    Returns:
+        The ancestors' heading source lines, outermost first, empty for a top-level section.
+    """
+    ancestors = lattice.ancestors.get(target_id, ())
+    if not ancestors:
+        return ()
+    lines = split_body_lines(node_for_path(lattice, lattice.index[target_id].path).body)
+    return tuple(
+        strip_heading_anchor(lines[lattice.index[ancestor].span[0] - 1]) for ancestor in ancestors
+    )
 
 
 def cached_target_hash(lattice: Lattice, target_id: TargetId, cache: dict[TargetId, str]) -> str:

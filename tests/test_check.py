@@ -17,7 +17,7 @@ from doc_lattice.hashing import content_hash
 from doc_lattice.loader import build_lattice
 from doc_lattice.model import Lattice, NodeMeta, ParsedDoc, RawEdge, TargetId
 from doc_lattice.orchestrate import load_lattice
-from doc_lattice.resolve import target_content
+from doc_lattice.resolve import cached_target_hash, target_content
 from doc_lattice.sections import build_toc, section_spans, section_text
 
 
@@ -297,3 +297,63 @@ def test_the_check_json_payload_carries_the_collision():
         {"label": "Notes", "line": 3},
     ]
     assert payload["summary"]["AMBIGUOUS"] == 1
+
+
+def test_a_pre_v7_seen_value_on_a_nested_target_reads_stale_and_re_blesses():
+    body = "# Parent\n\n## Child\nbody\n"
+    up = ParsedDoc(path=Path("docs/up.md"), meta=NodeMeta(id="up"), body=body)
+    pre_v7 = content_hash(section_text(body, (3, 4)))
+    down = ParsedDoc(
+        path=Path("docs/down.md"),
+        meta=NodeMeta.model_validate(
+            {"id": "down", "derives_from": [{"ref": "up#child", "seen": pre_v7}]}
+        ),
+        body="# Down\n",
+    )
+    lattice = build_lattice([up, down])
+
+    assert check_lattice(lattice)[0].state == "STALE"
+
+    re_blessed = cached_target_hash(lattice, TargetId("up", "child"), {})
+    revived = build_lattice(
+        [
+            up,
+            ParsedDoc(
+                path=down.path,
+                meta=NodeMeta.model_validate(
+                    {"id": "down", "derives_from": [{"ref": "up#child", "seen": re_blessed}]}
+                ),
+                body=down.body,
+            ),
+        ]
+    )
+    assert check_lattice(revived)[0].state == "OK"
+
+
+def test_rewording_an_ancestor_stales_a_child_targeted_edge():
+    before = build_lattice(
+        [
+            ParsedDoc(
+                path=Path("docs/up.md"), meta=NodeMeta(id="up"), body="# Parent\n\n## Child\nbody\n"
+            )
+        ]
+    )
+    seen = cached_target_hash(before, TargetId("up", "child"), {})
+    after = build_lattice(
+        [
+            ParsedDoc(
+                path=Path("docs/up.md"),
+                meta=NodeMeta(id="up"),
+                body="# Reworded Parent\n\n## Child\nbody\n",
+            ),
+            ParsedDoc(
+                path=Path("docs/down.md"),
+                meta=NodeMeta.model_validate(
+                    {"id": "down", "derives_from": [{"ref": "up#child", "seen": seen}]}
+                ),
+                body="# Down\n",
+            ),
+        ]
+    )
+
+    assert check_lattice(after)[0].state == "STALE"

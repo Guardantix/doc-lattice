@@ -8,7 +8,8 @@ from doc_lattice.error_types import BrokenRefError
 from doc_lattice.hashing import content_hash
 from doc_lattice.loader import build_lattice
 from doc_lattice.model import Lattice, Location, Node, NodeMeta, ParsedDoc, TargetId
-from doc_lattice.resolve import cached_target_hash, node_for_path, target_content
+from doc_lattice.resolve import ancestor_headings, cached_target_hash, node_for_path, target_content
+from doc_lattice.sections import section_text
 
 
 def _lattice() -> Lattice:
@@ -46,8 +47,9 @@ def test_target_content_section_exact_via_build_lattice():
     body = "# Up {#up-top}\nintro\n\n## Accent {#accent}\naccent body\nmore\n"
     docs = [ParsedDoc(Path("up.md"), NodeMeta(id="up"), body)]
     lat = build_lattice(docs)
-    # heading line keeps its text but loses the {#anchor} marker; span runs to EOF
-    assert target_content(lat, TargetId("up", "accent")) == "## Accent\naccent body\nmore"
+    # heading line keeps its text but loses the {#anchor} marker; span runs to EOF, and the
+    # ancestor chain (its own anchor stripped too) prefixes the section
+    assert target_content(lat, TargetId("up", "accent")) == "# Up\n## Accent\naccent body\nmore"
 
 
 def test_target_content_file_is_whole_body():
@@ -99,3 +101,53 @@ def test_node_for_path_unowned_path_raises():
         node_for_path(_lattice(), Path("unknown.md"))
     assert exc.value.code == "BROKEN_REF"
     assert "unknown.md" in str(exc.value)
+
+
+def _two_products() -> Lattice:
+    body = (
+        "# Products\n\n"
+        "## Product A\n\n"
+        "### Setup\nrun the installer\n\n"
+        "## Product B\n\n"
+        "### Setup\nrun the installer\n"
+    )
+    return build_lattice([ParsedDoc(path=Path("docs/p.md"), meta=NodeMeta(id="p"), body=body)])
+
+
+def test_identical_sections_under_different_parents_hash_differently():
+    lattice = _two_products()
+    cache: dict[TargetId, str] = {}
+
+    first = cached_target_hash(lattice, TargetId("p", "setup"), cache)
+    second = cached_target_hash(lattice, TargetId("p", "setup-1"), cache)
+
+    assert first != second
+
+
+def test_the_ancestor_chain_is_the_heading_lines_outermost_first():
+    lattice = _two_products()
+
+    assert ancestor_headings(lattice, TargetId("p", "setup")) == ("# Products", "## Product A")
+
+
+def test_a_top_level_section_hashes_exactly_its_own_text():
+    lattice = build_lattice(
+        [ParsedDoc(path=Path("docs/a.md"), meta=NodeMeta(id="a"), body="# Only\nbody\n")]
+    )
+
+    assert target_content(lattice, TargetId("a", "only")) == section_text(
+        lattice.nodes_by_id["a"].body, (1, 2)
+    )
+
+
+def test_a_whole_file_target_is_unaffected_by_context():
+    lattice = _two_products()
+
+    assert target_content(lattice, TargetId("p")) == lattice.nodes_by_id["p"].body
+
+
+def test_a_marker_removed_from_an_ancestor_heading_does_not_change_the_chain():
+    body = "## Parent {#parent}\n\n### Child\nbody\n"
+    lattice = build_lattice([ParsedDoc(path=Path("docs/a.md"), meta=NodeMeta(id="a"), body=body)])
+
+    assert ancestor_headings(lattice, TargetId("a", "child")) == ("## Parent",)
