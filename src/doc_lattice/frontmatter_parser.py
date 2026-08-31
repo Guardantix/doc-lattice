@@ -5,6 +5,7 @@ disposition it returns is what the caller reports from, so the cache-free, cold-
 warm-cache paths can all warn from a single site.
 """
 
+import re
 import warnings
 from dataclasses import dataclass
 from pathlib import Path
@@ -27,6 +28,12 @@ from .yaml_boundary import YAML_LOAD_ERRORS, SafeYamlLoader
 from .yaml_error_render import format_yaml_error_for_display
 
 _FENCE = "---"
+# A first line that means the comment envelope but is not spelled exactly. The opener is
+# byte-exact on purpose, and a byte-exact rule with no near-miss tier would let a trailing space
+# make the intended node vanish from the lattice under a green gate, so the near miss is an
+# error rather than ordinary prose. Deliberately wider than the whitespace forms: an author who
+# writes `<!--doc-lattice` or `<!-- DOC-LATTICE` meant the envelope just as plainly.
+_OPENER_NEAR_MISS = re.compile(r"^\s*<!--\s*doc-lattice\s*$", re.IGNORECASE)
 _BOM = chr(0xFEFF)  # UTF-8 byte-order mark; strip a leading one so the opening fence is detected
 # Pinned to the pure Python parser. The two ruamel parsers do not accept the same documents, so
 # leaving the choice to ruamel made a document's tracked status depend on whether the optional
@@ -119,11 +126,12 @@ def split_frontmatter_parts(text: str, source: Path) -> FrontmatterParts | None:
             )
             raise FrontmatterError(msg, source=source)
         return _split_envelope(prefix, lines, "comment", source)
-    if lines[0].startswith(COMMENT_ENVELOPE_OPEN) and lines[0] != COMMENT_ENVELOPE_OPEN:
+    if _OPENER_NEAR_MISS.fullmatch(lines[0]):
         msg = (
-            f"doc-lattice comment envelope in {format_path_for_display(source)} is malformed: "
-            "the opener must be byte-exact and end at column zero with no trailing characters, "
-            "not line-folded with CRLF; use '---' fence spelling or normalize line endings to LF"
+            f"line 1 of {format_path_for_display(source)} means the doc-lattice comment "
+            "envelope but is not spelled exactly; the opener must be the first line and "
+            f"exactly '{COMMENT_ENVELOPE_OPEN}' at column zero, with no indentation, no "
+            "trailing whitespace, and no case variance"
         )
         raise FrontmatterError(msg, source=source)
     return None

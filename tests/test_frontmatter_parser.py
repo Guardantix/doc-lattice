@@ -12,6 +12,7 @@ import doc_lattice.frontmatter_parser as frontmatter_parser_module
 from doc_lattice.constants import LATTICE_INTENT_KEYS
 from doc_lattice.error_types import FrontmatterError, UnreadableDocError
 from doc_lattice.frontmatter_parser import (
+    _OPENER_NEAR_MISS,
     parse_meta,
     split_frontmatter,
     split_frontmatter_parts,
@@ -123,8 +124,10 @@ def test_split_frontmatter_detects_crlf_fences():
 @given(st.text())
 def test_split_frontmatter_identity_when_no_opening_fence(text):
     first_line = text.lstrip("﻿").split("\n", 1)[0]
-    # Exclude fence and comment envelope openers, including the near-miss raise surface.
-    assume(first_line.strip() != "---" and not first_line.startswith("<!-- doc-lattice"))
+    assume(first_line.strip() != "---")
+    # The comment envelope claims line 1 too, and a first line that means it without spelling it
+    # exactly is an error rather than an identity, so both are drawn out of this property.
+    assume(_OPENER_NEAR_MISS.fullmatch(first_line) is None)
     raw, body = split_frontmatter(text, Path("a.md"))
     assert raw is None
     assert body == text
@@ -961,3 +964,32 @@ def test_a_crlf_comment_envelope_is_read_after_the_normalization_every_load_does
     assert parts is not None
     assert parts.kind == "comment"
     assert parts.raw_meta == "id: pc\n"
+
+
+@pytest.mark.parametrize(
+    "opener",
+    [
+        "<!-- doc-lattice ",
+        " <!-- doc-lattice",
+        "    <!-- doc-lattice",
+        "\t<!-- doc-lattice",
+        "<!-- DOC-LATTICE",
+        "<!--doc-lattice",
+        "<!--  doc-lattice",
+        "<!-- doc-lattice\t",
+    ],
+)
+def test_a_near_miss_opener_is_an_actionable_error_not_untracked_prose(opener: str):
+    text = f"{opener}\nid: pc\n-->\n# Body\n"
+
+    with pytest.raises(FrontmatterError) as excinfo:
+        split_frontmatter_parts(text, Path("near.md"))
+
+    message = str(excinfo.value)
+    assert "'<!-- doc-lattice'" in message
+    assert "first line" in message
+
+
+def test_an_ordinary_html_comment_on_line_one_stays_untracked():
+    assert split_frontmatter_parts("<!-- notes -->\n# Body\n", Path("a.md")) is None
+    assert split_frontmatter_parts("<!-- doc-lattice notes -->\n# B\n", Path("a.md")) is None
