@@ -338,3 +338,28 @@ def test_a_persisted_label_is_already_sanitized_so_both_paths_agree():
 
     assert members[0].label == 'A]0;x"b\\cm'
     assert members[0].label == members[1].label
+
+
+def test_identical_components_in_different_files_each_keep_their_row():
+    lattice = build_lattice(
+        [
+            ParsedDoc(path=Path("docs/up.md"), meta=NodeMeta(id="up"), body="# Notes\n\n# Notes\n"),
+            ParsedDoc(
+                path=Path("docs/zzz.md"), meta=NodeMeta(id="zzz"), body="# Notes\n\n# Notes\n"
+            ),
+        ]
+    )
+
+    payload = to_json(lattice, set(), frozenset())
+
+    assert [entry["target_id"] for entry in payload["ambiguous_targets"]] == [
+        "up#notes",
+        "zzz#notes",
+    ]
+
+    dot = to_dot(lattice, set(), frozenset())
+    mermaid = to_mermaid(lattice, set(), frozenset())
+    assert '// ambiguous up#notes: "Notes" (line 1), "Notes" (line 3)' in dot
+    assert '// ambiguous zzz#notes: "Notes" (line 1), "Notes" (line 3)' in dot
+    assert '%% ambiguous up#notes: "Notes" (line 1), "Notes" (line 3)' in mermaid
+    assert '%% ambiguous zzz#notes: "Notes" (line 1), "Notes" (line 3)' in mermaid

@@ -13,19 +13,27 @@ def _ambiguous_components(lattice: Lattice) -> list[tuple[TargetId, tuple[Collis
     repeat the same finding twice under two ids. This collapses that back to one row per
     component, keyed under the lexicographically smallest ref.
 
+    The dedup key is scoped to ``(file_id, members)`` rather than ``members`` alone: within one
+    file an identical members tuple is necessarily the same component, since one set of lines
+    cannot hold two components, but two different files can coincidentally produce
+    value-equal members tuples (the same headings at the same line numbers) for two genuinely
+    distinct components. Keying on the bare tuple would wrongly merge those and drop one file's
+    row from the naming block.
+
     Args:
         lattice: The built lattice.
 
     Returns:
         Component rows sorted by the canonical target ref.
     """
-    canonical: dict[tuple[CollisionMember, ...], TargetId] = {}
+    canonical: dict[tuple[str, tuple[CollisionMember, ...]], TargetId] = {}
     for target_id, members in lattice.collisions.items():
-        current = canonical.get(members)
+        key = (target_id.file_id, members)
+        current = canonical.get(key)
         if current is None or target_id.as_ref() < current.as_ref():
-            canonical[members] = target_id
+            canonical[key] = target_id
     return sorted(
-        ((target_id, members) for members, target_id in canonical.items()),
+        ((target_id, members) for (_file_id, members), target_id in canonical.items()),
         key=lambda item: item[0].as_ref(),
     )
 
