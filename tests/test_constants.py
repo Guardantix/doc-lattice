@@ -8,6 +8,8 @@ from doc_lattice.constants import (
     CHECKOUT_REF,
     CHECKOUT_USES,
     CHECKOUT_VERSION,
+    COMMENT_ENVELOPE_CLOSE,
+    COMMENT_ENVELOPE_OPEN,
     EDGE_STATES,
     SETUP_UV_REF,
     SETUP_UV_USES,
@@ -15,6 +17,7 @@ from doc_lattice.constants import (
     VALID_AUTHORITIES,
     VALID_BLOCKED_REASONS,
     VALID_EDGE_STATES,
+    VALID_ENVELOPE_KINDS,
     VALID_FRONTMATTER_DISPOSITIONS,
     VALID_LAYERS,
     VALID_LINEAR_STATE_TYPES,
@@ -26,6 +29,7 @@ from doc_lattice.constants import (
     Authority,
     BlockedReason,
     EdgeState,
+    EnvelopeKind,
     FrontmatterDisposition,
     Layer,
     LinearStateType,
@@ -130,3 +134,10 @@ def test_action_refs_are_approved_full_commit_shas():
 def test_composed_uses_fragments_join_both_halves():
     assert f"actions/checkout@{CHECKOUT_REF} # {CHECKOUT_VERSION}" == CHECKOUT_USES
     assert f"astral-sh/setup-uv@{SETUP_UV_REF} # {SETUP_UV_VERSION}" == SETUP_UV_USES
+
+
+def test_envelope_kind_domain_is_derived_from_the_literal():
+    assert frozenset(get_args(EnvelopeKind)) == VALID_ENVELOPE_KINDS
+    assert {"fence", "comment"} == VALID_ENVELOPE_KINDS
+    assert COMMENT_ENVELOPE_OPEN == "<!-- doc-lattice"
+    assert COMMENT_ENVELOPE_CLOSE == "-->"

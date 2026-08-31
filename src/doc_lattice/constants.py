@@ -39,6 +39,22 @@ AUTHORITY_LADDER: tuple[Authority, ...] = ("exploratory", "derived", "binding")
 FrontmatterDisposition = Literal["tracked", "untracked", "id-less"]
 VALID_FRONTMATTER_DISPOSITIONS: frozenset[str] = frozenset(get_args(FrontmatterDisposition))
 
+# Which envelope a metadata-bearing file declares its frontmatter with. Both spellings are
+# accepted unconditionally and forever (AD-44); there is no selector, because nothing needs to
+# forbid either one. "fence" is the historical `---` block. "comment" is the HTML comment GitHub
+# renders as nothing, which is what lets a tracked README keep a clean landing page. The kind is
+# derived from the file at read time and deliberately not cached: reconcile rereads the file it
+# rewrites anyway.
+EnvelopeKind = Literal["fence", "comment"]
+VALID_ENVELOPE_KINDS: frozenset[str] = frozenset(get_args(EnvelopeKind))
+
+# The comment envelope's two delimiter lines, byte-exact. The opener admits no whitespace
+# variance at all, unlike the fence rule, because CommonMark reads a four-space-indented opener
+# as an indented code block and would print the "invisible" envelope as literal text while
+# doc-lattice tracked the file.
+COMMENT_ENVELOPE_OPEN: str = "<!-- doc-lattice"
+COMMENT_ENVELOPE_CLOSE: str = "-->"
+
 # Which ruamel parser a YAML boundary reads through. The two members are not symmetric and the
 # domain exists to keep them from reading as though they were. "pure" is a pin: it fixes the
 # accepted document set regardless of what else an adopter has installed. "platform-default" is

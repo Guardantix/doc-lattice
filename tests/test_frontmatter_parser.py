@@ -869,3 +869,22 @@ def test_the_carried_document_is_the_spelling_the_caller_passed():
         parse_meta("id: x\nlayer: bogus\n", source)
 
     assert exc.value.source == source
+
+
+def test_fence_split_reports_its_kind_and_inner_yaml_offsets():
+    text = "﻿---   \nid: pc\n---  \n# Body\n"
+
+    parts = split_frontmatter_parts(text, Path("a.md"))
+
+    assert parts is not None
+    assert parts.kind == "fence"
+    assert text[parts.meta_start : parts.meta_end] == parts.raw_meta
+    assert parts.raw_meta == "id: pc\n"
+
+
+def test_fence_split_offsets_are_empty_for_an_empty_block():
+    parts = split_frontmatter_parts("---\n---\n# Body\n", Path("a.md"))
+
+    assert parts is not None
+    assert parts.raw_meta == ""
+    assert parts.meta_start == parts.meta_end

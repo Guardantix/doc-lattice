@@ -13,7 +13,11 @@ from typing import Any
 from pydantic import ValidationError
 from ruamel.yaml.error import ReusedAnchorWarning
 
-from .constants import LATTICE_INTENT_KEYS
+from .constants import (
+    COMMENT_ENVELOPE_CLOSE,
+    LATTICE_INTENT_KEYS,
+    EnvelopeKind,
+)
 from .error_types import FrontmatterError, UnreadableDocError
 from .model import NodeMeta, ParsedMeta
 from .path_utils import format_path_for_display
@@ -50,13 +54,21 @@ _ROOT_LOCATION = "<frontmatter>"
 class FrontmatterParts:
     """Every source piece a document's frontmatter block is spelled with.
 
+    ``open_fence`` and ``close_fence`` hold the envelope's opening and closing delimiter line
+    whichever spelling the file uses, so the byte-exact rewriter reattaches what the author
+    wrote without branching on ``kind``.
+
     Attributes:
-        prefix: A leading byte-order mark, which precedes the opening fence.
-        open_fence: The opening fence line as written, any surrounding space included.
-        raw_meta: The YAML between the fences, empty when the block holds none.
-        close_fence: The closing fence line as written.
-        close_fence_newline: The newline ending the closing fence, empty at end of file.
+        prefix: A leading byte-order mark, which precedes the opening delimiter.
+        open_fence: The opening delimiter line as written, any surrounding space included.
+        raw_meta: The YAML between the delimiters, empty when the block holds none.
+        close_fence: The closing delimiter line as written.
+        close_fence_newline: The newline ending the closing delimiter, empty at end of file.
         body: Everything after that newline.
+        kind: Which envelope the file declared.
+        meta_start: Offset into the original text where ``raw_meta`` begins.
+        meta_end: Offset into the original text where ``raw_meta`` ends, so
+            ``text[meta_start:meta_end] == raw_meta`` for either spelling.
     """
 
     prefix: str
@@ -65,13 +77,16 @@ class FrontmatterParts:
     close_fence: str
     close_fence_newline: str
     body: str
+    kind: EnvelopeKind
+    meta_start: int
+    meta_end: int
 
 
 def split_frontmatter_parts(text: str, source: Path) -> FrontmatterParts | None:
     """Split a document into every piece its frontmatter block is written with.
 
     ``split_frontmatter`` returns the two pieces a reader needs. This returns the rest of
-    them as well, since a byte-exact rewrite has to put back the fences the author wrote,
+    them as well, since a byte-exact rewrite has to put back the delimiters the author wrote,
     and any byte-order mark before them, rather than the spelling this engine would choose.
 
     Args:
@@ -79,34 +94,75 @@ def split_frontmatter_parts(text: str, source: Path) -> FrontmatterParts | None:
         source: The file the frontmatter came from, for error messages.
 
     Returns:
-        The document's frontmatter pieces, or None if it does not open with a fence.
+        The document's frontmatter pieces, or None if it opens neither envelope.
 
     Raises:
-        UnreadableDocError: If an opening fence has no closing fence.
+        UnreadableDocError: If an opening delimiter has no closing delimiter.
     """
     # Strip a leading UTF-8 BOM (U+FEFF) so a file saved with one still has its opening
     # "---" fence recognized on line 0 instead of being read as having no frontmatter.
     stripped = text.lstrip(_BOM)
+    prefix = text[: len(text) - len(stripped)]
     lines = stripped.split("\n")
-    if not lines or lines[0].strip() != _FENCE:
+    if not lines:
         return None
-    for closing_fence_index, line in enumerate(lines[1:], start=1):
-        if line.strip() == _FENCE:
-            raw_meta = "\n".join(lines[1:closing_fence_index])
-            # Splitting on newlines leaves the closing fence as the final element only when
-            # the file ends on it, so a last line here is what shows the newline was there.
-            trailing = "\n" if closing_fence_index < len(lines) - 1 else ""
-            return FrontmatterParts(
-                text[: len(text) - len(stripped)],
-                lines[0],
-                raw_meta + "\n" if raw_meta else "",
-                line,
-                trailing,
-                "\n".join(lines[closing_fence_index + 1 :]),
-            )
-    msg = (
-        f"unclosed YAML frontmatter in {format_path_for_display(source)}: add a closing '---' fence"
-    )
+    if lines[0].strip() == _FENCE:
+        return _split_envelope(prefix, lines, "fence", source)
+    return None
+
+
+def _split_envelope(
+    prefix: str, lines: list[str], kind: EnvelopeKind, source: Path
+) -> FrontmatterParts:
+    """Split an already-recognized envelope into its pieces.
+
+    Args:
+        prefix: The leading byte-order mark, empty when the file carries none.
+        lines: The BOM-stripped document split on newlines.
+        kind: The envelope the opening line declared.
+        source: The file the frontmatter came from, for error messages.
+
+    Returns:
+        The document's frontmatter pieces.
+
+    Raises:
+        UnreadableDocError: If the opening delimiter has no closing delimiter.
+    """
+    closer = _FENCE if kind == "fence" else COMMENT_ENVELOPE_CLOSE
+    for closing_index, line in enumerate(lines[1:], start=1):
+        # The fence rule has always tolerated surrounding space on its closing line. The comment
+        # closer does not, for the reason its opener does not: an indented "-->" is not a comment
+        # terminator to CommonMark either.
+        matched = line.strip() == closer if kind == "fence" else line == closer
+        if not matched:
+            continue
+        raw_meta = "\n".join(lines[1:closing_index])
+        # Splitting on newlines leaves the closing delimiter as the final element only when
+        # the file ends on it, so a last line here is what shows the newline was there.
+        trailing = "\n" if closing_index < len(lines) - 1 else ""
+        meta_start = len(prefix) + len(lines[0]) + 1
+        meta_end = meta_start + (len(raw_meta) + 1 if raw_meta else 0)
+        return FrontmatterParts(
+            prefix,
+            lines[0],
+            raw_meta + "\n" if raw_meta else "",
+            line,
+            trailing,
+            "\n".join(lines[closing_index + 1 :]),
+            kind,
+            meta_start,
+            meta_end,
+        )
+    if kind == "fence":
+        msg = (
+            f"unclosed YAML frontmatter in {format_path_for_display(source)}: "
+            "add a closing '---' fence"
+        )
+    else:
+        msg = (
+            f"unclosed doc-lattice comment envelope in {format_path_for_display(source)}: "
+            "add a closing '-->' line at column zero"
+        )
     raise UnreadableDocError(msg, source=source)
 
 
