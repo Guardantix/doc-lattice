@@ -15,6 +15,7 @@ from ruamel.yaml.error import ReusedAnchorWarning
 
 from .constants import (
     COMMENT_ENVELOPE_CLOSE,
+    COMMENT_ENVELOPE_OPEN,
     LATTICE_INTENT_KEYS,
     EnvelopeKind,
 )
@@ -98,6 +99,7 @@ def split_frontmatter_parts(text: str, source: Path) -> FrontmatterParts | None:
 
     Raises:
         UnreadableDocError: If an opening delimiter has no closing delimiter.
+        FrontmatterError: If a comment envelope is preceded by a byte-order mark.
     """
     # Strip a leading UTF-8 BOM (U+FEFF) so a file saved with one still has its opening
     # "---" fence recognized on line 0 instead of being read as having no frontmatter.
@@ -108,6 +110,22 @@ def split_frontmatter_parts(text: str, source: Path) -> FrontmatterParts | None:
         return None
     if lines[0].strip() == _FENCE:
         return _split_envelope(prefix, lines, "fence", source)
+    if lines[0] == COMMENT_ENVELOPE_OPEN:
+        if prefix:
+            msg = (
+                f"doc-lattice comment envelope in {format_path_for_display(source)} is preceded "
+                "by a byte-order mark, which stops Markdown renderers reading it as a comment, "
+                f"so it would print as text; remove the mark or use the '{_FENCE}' fence spelling"
+            )
+            raise FrontmatterError(msg, source=source)
+        return _split_envelope(prefix, lines, "comment", source)
+    if lines[0].startswith(COMMENT_ENVELOPE_OPEN) and lines[0] != COMMENT_ENVELOPE_OPEN:
+        msg = (
+            f"doc-lattice comment envelope in {format_path_for_display(source)} is malformed: "
+            "the opener must be byte-exact and end at column zero with no trailing characters, "
+            "not line-folded with CRLF; use '---' fence spelling or normalize line endings to LF"
+        )
+        raise FrontmatterError(msg, source=source)
     return None
 
 

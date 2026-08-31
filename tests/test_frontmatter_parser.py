@@ -16,6 +16,7 @@ from doc_lattice.frontmatter_parser import (
     split_frontmatter,
     split_frontmatter_parts,
 )
+from doc_lattice.hashing import normalize_newlines
 from doc_lattice.model import NodeMeta, RawEdge
 from doc_lattice.yaml_boundary import YAML_LOAD_ERRORS, SafeYamlLoader
 from doc_lattice.yaml_error_render import format_yaml_error_for_display
@@ -122,7 +123,7 @@ def test_split_frontmatter_detects_crlf_fences():
 @given(st.text())
 def test_split_frontmatter_identity_when_no_opening_fence(text):
     first_line = text.lstrip("﻿").split("\n", 1)[0]
-    assume(first_line.strip() != "---")
+    assume(first_line.strip() != "---" and first_line != "<!-- doc-lattice")
     raw, body = split_frontmatter(text, Path("a.md"))
     assert raw is None
     assert body == text
@@ -888,3 +889,74 @@ def test_fence_split_offsets_are_empty_for_an_empty_block():
     assert parts is not None
     assert parts.raw_meta == ""
     assert parts.meta_start == parts.meta_end
+
+
+COMMENT_DOC = "<!-- doc-lattice\nid: pc\ntitle: PC\n-->\n# Body\ntext\n"
+
+
+def test_comment_envelope_is_split_like_a_fence():
+    parts = split_frontmatter_parts(COMMENT_DOC, Path("a.md"))
+
+    assert parts is not None
+    assert parts.kind == "comment"
+    assert parts.prefix == ""
+    assert parts.open_fence == "<!-- doc-lattice"
+    assert parts.raw_meta == "id: pc\ntitle: PC\n"
+    assert parts.close_fence == "-->"
+    assert parts.close_fence_newline == "\n"
+    assert parts.body == "# Body\ntext\n"
+    assert COMMENT_DOC[parts.meta_start : parts.meta_end] == parts.raw_meta
+
+
+def test_comment_envelope_body_ends_at_the_first_column_zero_terminator():
+    text = "<!-- doc-lattice\nid: pc\n  -->\n-->\n# Body\n"
+
+    parts = split_frontmatter_parts(text, Path("a.md"))
+
+    assert parts is not None
+    assert parts.raw_meta == "id: pc\n  -->\n"
+    assert parts.body == "# Body\n"
+
+
+def test_unclosed_comment_envelope_is_a_hard_error():
+    with pytest.raises(UnreadableDocError) as excinfo:
+        split_frontmatter_parts("<!-- doc-lattice\nid: x\n# no terminator\n", Path("broken.md"))
+
+    assert "unclosed doc-lattice comment envelope" in str(excinfo.value)
+    assert "'-->'" in str(excinfo.value)
+
+
+def test_a_byte_order_mark_before_the_comment_opener_is_refused():
+    with pytest.raises(FrontmatterError) as excinfo:
+        split_frontmatter_parts("﻿" + COMMENT_DOC, Path("bom.md"))
+
+    assert "byte-order mark" in str(excinfo.value)
+    assert "'---'" in str(excinfo.value)
+
+
+def test_comment_syntax_below_line_one_is_ordinary_content():
+    text = "---\nid: pc\n---\n# Body\n\n<!-- doc-lattice\nid: other\n-->\n"
+
+    parts = split_frontmatter_parts(text, Path("a.md"))
+
+    assert parts is not None
+    assert parts.kind == "fence"
+    assert "<!-- doc-lattice" in parts.body
+
+
+def test_a_crlf_comment_envelope_is_read_after_the_normalization_every_load_does():
+    # `discovery.decode_doc` translates CRLF and lone CR to LF before any splitter sees the
+    # text, which is what the fence suite's own CRLF case relies on. The fence grammar
+    # tolerates a raw `\r` anyway because it compares `line.strip()`; the comment grammar is
+    # byte-exact and does not, so a raw CRLF opener lands in the near-miss tier and fails loud
+    # rather than vanishing. Both halves are pinned, since the difference is deliberate.
+    raw = "<!-- doc-lattice\r\nid: pc\r\n-->\r\n# Body\r\n"
+
+    with pytest.raises(FrontmatterError):
+        split_frontmatter_parts(raw, Path("a.md"))
+
+    parts = split_frontmatter_parts(normalize_newlines(raw), Path("a.md"))
+
+    assert parts is not None
+    assert parts.kind == "comment"
+    assert parts.raw_meta == "id: pc\n"
