@@ -15,13 +15,15 @@ unaffected, since there is no file to declare it in. Three steps:
 1. Add `lattice_format: 2` to `.doc-lattice.yml`, as the first key. doc-lattice 7 refuses to run
    without it, and every earlier release refuses to run with it, so the two never operate on the
    same tree by accident. A zero-config project has nothing to add.
-2. The section content hash now includes the target's ancestor heading chain, so every `seen`
+2. An edge whose target id sits in a slug-collision component now fails `AMBIGUOUS`, `check`
+   exits 1 on it, and `reconcile` refuses to write its `seen`. Fix each one first, by rewording a
+   colliding heading or giving the target an explicit `{#anchor}` marker, before running the
+   re-bless in step 3: the refusal is run-scoped, so `reconcile --all` writes no `seen` values
+   at all while any edge in the run is still ambiguous, not just the ambiguous one.
+3. The section content hash now includes the target's ancestor heading chain, so every `seen`
    value on a section that sits under a parent heading mismatches once. Run
    `doc-lattice reconcile --all` to re-bless the lattice. Whole-file refs and top-level
    sections are unaffected.
-3. An edge whose target id sits in a slug-collision component now fails `AMBIGUOUS`, `check`
-   exits 1 on it, and `reconcile` refuses to write its `seen`. Fix each one by rewording a
-   colliding heading or giving the target an explicit `{#anchor}` marker.
 
 To make a tracked file's metadata invisible on GitHub, replace its opening `---` with
 `<!-- doc-lattice`, replace its closing `---` with `-->`, and rerun `check`. The YAML between

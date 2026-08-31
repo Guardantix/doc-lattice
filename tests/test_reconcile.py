@@ -2651,3 +2651,4 @@ def test_reconcile_refuses_to_bless_an_ambiguous_edge():
     assert 'ambiguous with "Notes" (line 1), "Notes" (line 3)' in message
     assert "reword" in message
     assert "{#anchor}" in message
+    assert "no seen values were written, fix every ambiguous edge before re-running" in message
