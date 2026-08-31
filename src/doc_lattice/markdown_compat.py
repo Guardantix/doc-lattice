@@ -435,6 +435,38 @@ def collision_components(
     return [tuple(members) for _root, members in sorted(grouped.items()) if len(members) > 1]
 
 
+def addressable_heading_inventory(headings: list[Heading]) -> list[SluggedHeading]:
+    """Return the addressable TOC's own slug-allocation trace, one record per heading.
+
+    ``full_heading_inventory`` traces allocation over the full CommonMark parse, which misses a
+    heading the restricted addressable scanner still addresses: a column-zero ``#`` line inside
+    an HTML comment or another container the full parse renders as inert is not a heading token
+    there, but ``extract_headings`` is not container-aware and reads it as one anyway. This
+    traces the same allocation over ``build_toc``'s own output instead, so a caller can union
+    both traces' collision components and catch either direction of the mismatch.
+
+    Slug source is ``Heading.text``, the same input ``anchor_ids`` slugs, and allocation runs
+    over every heading in document order regardless of an explicit marker, matching
+    ``github_heading_ids``'s dedup state -- a marker-set heading still occupies a slot in the
+    document-order sequence even though its own id comes from the marker, not the slug.
+
+    Args:
+        headings: The addressable ATX subset from ``build_toc``, in document order.
+
+    Returns:
+        One record per heading in document order, ids deduplicated by the pinned
+        github-slugger collision rule.
+    """
+    slugger = _Slugger()
+    inventory: list[SluggedHeading] = []
+    for heading in headings:
+        github_id, probes = slugger.slug_with_probes(heading.text)
+        inventory.append(
+            SluggedHeading(text=heading.text, line=heading.line, github_id=github_id, probes=probes)
+        )
+    return inventory
+
+
 def anchor_ids(headings: list[Heading]) -> list[str]:
     """Return one explicit or generated addressable id per heading.
 

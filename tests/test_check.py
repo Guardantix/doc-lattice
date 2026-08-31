@@ -287,6 +287,33 @@ def test_ambiguous_edges_finds_the_same_rows_without_hashing():
     )
 
 
+def test_an_edge_into_an_addressable_only_collision_is_ambiguous():
+    # The commented-out second "Overview" is invisible to the full CommonMark parse but still
+    # addressed by the restricted scanner, so the collision only shows up in the addressable
+    # inventory's own trace. An edge into the surviving "overview" id must still go AMBIGUOUS.
+    lattice = build_lattice(
+        [
+            ParsedDoc(
+                path=Path("docs/up.md"),
+                meta=NodeMeta(id="up"),
+                body="# Overview\n\ntext\n\n<!--\n# Overview\n-->\n",
+            ),
+            ParsedDoc(
+                path=Path("docs/down.md"),
+                meta=NodeMeta.model_validate(
+                    {"id": "down", "derives_from": [{"ref": "up#overview", "seen": "a" * 32}]}
+                ),
+                body="# Down\n",
+            ),
+        ]
+    )
+
+    statuses = check_lattice(lattice)
+
+    assert [status.state for status in statuses] == ["AMBIGUOUS"]
+    assert [member.label for member in statuses[0].collision] == ["Overview", "Overview"]
+
+
 def test_the_check_json_payload_carries_the_collision():
     statuses = check_lattice(_ambiguous_lattice())
 

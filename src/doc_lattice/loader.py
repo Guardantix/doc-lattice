@@ -4,7 +4,11 @@ import warnings
 from collections import defaultdict
 
 from .error_types import DuplicateIdError
-from .markdown_compat import collision_components, full_heading_inventory
+from .markdown_compat import (
+    addressable_heading_inventory,
+    collision_components,
+    full_heading_inventory,
+)
 from .model import (
     CollisionMember,
     Edge,
@@ -18,7 +22,7 @@ from .model import (
     parse_ref,
 )
 from .path_utils import format_path_for_display
-from .sections import anchor_ids, build_toc, section_spans, split_body_lines
+from .sections import Heading, anchor_ids, build_toc, section_spans, split_body_lines
 from .text_utils import safe_heading_label
 
 
@@ -42,7 +46,7 @@ def derive_file_sections(body: str) -> FileSections:
     toc = build_toc(body)
     anchors = anchor_ids(toc)
     spans = section_spans(toc, total_lines)
-    members_by_line = _collision_members_by_line(body)
+    members_by_line = _collision_members_by_line(body, toc)
     records: list[SectionRecord] = []
     for heading, anchor, (start_line, end_line) in zip(toc, anchors, spans, strict=True):
         # A marker-set id is reword-stable by construction, so it is never ambiguous.
@@ -53,27 +57,38 @@ def derive_file_sections(body: str) -> FileSections:
     return FileSections(total_lines=total_lines, sections=tuple(records))
 
 
-def _collision_members_by_line(body: str) -> dict[int, tuple[CollisionMember, ...]]:
+def _collision_members_by_line(
+    body: str, toc: list[Heading]
+) -> dict[int, tuple[CollisionMember, ...]]:
     """Map each colliding heading's source line to its component's safe display members.
 
     Keyed by line because that is what the two heading inventories share: the full GitHub
     inventory and the addressable ATX subset read the same normalized text, so a heading both
-    see occupies the same 1-based line in each.
+    see occupies the same 1-based line in each. Tracing collisions over only one inventory
+    leaves a hole: the full inventory misses a heading the addressable scanner still addresses
+    (a column-zero ``#`` line inside an HTML comment or another container the full parse treats
+    as inert), so that heading's ambiguity would never surface. Both inventories' components are
+    unioned by line to close that hole in either direction; a line present in both is not
+    double-counted, and the full inventory's record wins when both saw it, since it is the
+    inventory the existing cases and this function's return contract were already written
+    against.
 
     Args:
         body: The verbatim document body.
+        toc: The addressable ATX subset, from ``build_toc(body)``.
 
     Returns:
-        One entry per heading in a collision component, in the full inventory's terms.
+        One entry per heading in a collision component, in either inventory's terms.
     """
     found: dict[int, tuple[CollisionMember, ...]] = {}
-    for component in collision_components(full_heading_inventory(body)):
-        members = tuple(
-            CollisionMember(label=safe_heading_label(heading.text), line=heading.line)
-            for heading in component
-        )
-        for heading in component:
-            found[heading.line] = members
+    for inventory in (full_heading_inventory(body), addressable_heading_inventory(toc)):
+        for component in collision_components(inventory):
+            members = tuple(
+                CollisionMember(label=safe_heading_label(heading.text), line=heading.line)
+                for heading in component
+            )
+            for heading in component:
+                found.setdefault(heading.line, members)
     return found
 
 

@@ -435,6 +435,22 @@ def test_a_cross_inventory_collision_marks_the_addressable_member():
     )
 
 
+def test_an_addressable_only_collision_is_traced_via_the_addressable_toc():
+    # The restricted scanner is not container-aware, so it addresses this second "Overview" even
+    # though it sits inside an HTML comment the full CommonMark parse renders as inert; the full
+    # inventory alone would see only the first heading and report no collision at all.
+    body = "# Overview\n\ntext\n\n<!--\n# Overview\n-->\n"
+
+    sections = derive_file_sections(body)
+
+    assert [record.anchor for record in sections.sections] == ["overview", "overview-1"]
+    for record in sections.sections:
+        assert record.collision == (
+            CollisionMember(label="Overview", line=1),
+            CollisionMember(label="Overview", line=6),
+        )
+
+
 def test_build_lattice_exposes_collisions_by_target_id():
     docs = [ParsedDoc(path=Path("docs/a.md"), meta=NodeMeta(id="a"), body="# Notes\n\n# Notes\n")]
 
