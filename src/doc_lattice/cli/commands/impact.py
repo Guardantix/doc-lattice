@@ -4,6 +4,7 @@ from typing import Annotated
 
 import typer
 
+from ...check import ambiguous_edges
 from ...constants import VALID_BASIC_OUTPUT_FORMATS
 from ...impact import impact as impact_walk
 from ...impact import impact_json
@@ -52,7 +53,8 @@ def register_impact(app: typer.Typer) -> None:
             project = runtime.project(config)
             lattice = runtime.lattice(project)
             affected = impact_walk(lattice, token, max_depth=depth)
+            ambiguous = ambiguous_edges(lattice)
         if selection.format == "json":
-            write_json(runtime, impact_json(affected), indent=selection.indent)
+            write_json(runtime, impact_json(affected, ambiguous), indent=selection.indent)
         else:
-            render_impact(runtime.stdout, affected)
+            render_impact(runtime.stdout, affected, ambiguous)

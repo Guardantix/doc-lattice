@@ -1,9 +1,11 @@
 """Tests for graph rendering."""
 
+import json
 from pathlib import Path
 
+from doc_lattice.check import ambiguous_edges
 from doc_lattice.loader import build_lattice
-from doc_lattice.model import NodeMeta, ParsedDoc, RawEdge, TargetId
+from doc_lattice.model import Lattice, NodeMeta, ParsedDoc, RawEdge, TargetId
 from doc_lattice.render import to_dot, to_json, to_mermaid
 
 
@@ -176,12 +178,16 @@ def test_json_has_nodes_and_edges_sorted_by_id():
         {"id": "down", "title": None, "layer": None, "authority": None, "path": "down.md"},
         {"id": "up", "title": "Up", "layer": None, "authority": None, "path": "up.md"},
     ]
-    assert payload["edges"] == [{"upstream": "up", "downstream": "down", "stale": False}]
+    assert payload["edges"] == [
+        {"upstream": "up", "downstream": "down", "stale": False, "ambiguous": False}
+    ]
 
 
 def test_json_marks_stale_edges():
     payload = to_json(_lattice(), {("down", TargetId("up", "u"))})
-    assert payload["edges"] == [{"upstream": "up", "downstream": "down", "stale": True}]
+    assert payload["edges"] == [
+        {"upstream": "up", "downstream": "down", "stale": True, "ambiguous": False}
+    ]
 
 
 def test_json_edge_set_matches_mermaid_edge_set():
@@ -234,7 +240,9 @@ def test_json_collapses_section_edges_with_stale_or():
     ]
     lat = build_lattice(docs)
     payload = to_json(lat, {("down", TargetId("up", "b"))})
-    assert payload["edges"] == [{"upstream": "up", "downstream": "down", "stale": True}]
+    assert payload["edges"] == [
+        {"upstream": "up", "downstream": "down", "stale": True, "ambiguous": False}
+    ]
 
 
 def test_json_node_fields_include_layer_authority_and_path():
@@ -249,4 +257,84 @@ def test_json_node_fields_include_layer_authority_and_path():
 
 def test_empty_lattice_renders_json_headers_only():
     empty = build_lattice([])
-    assert to_json(empty, set()) == {"nodes": [], "edges": []}
+    assert to_json(empty, set()) == {"nodes": [], "edges": [], "ambiguous_targets": []}
+
+
+def _ambiguous_lattice() -> Lattice:
+    return build_lattice(
+        [
+            ParsedDoc(path=Path("docs/up.md"), meta=NodeMeta(id="up"), body="# Notes\n\n# Notes\n"),
+            ParsedDoc(
+                path=Path("docs/down.md"),
+                meta=NodeMeta.model_validate({"id": "down", "derives_from": [{"ref": "up#notes"}]}),
+                body="# Down\n",
+            ),
+        ]
+    )
+
+
+def test_graph_json_marks_the_edge_and_names_the_colliding_headings():
+    lattice = _ambiguous_lattice()
+    ambiguous = {
+        (status.source_id, status.target_id)
+        for status in ambiguous_edges(lattice)
+        if status.target_id is not None
+    }
+
+    payload = to_json(lattice, set(), ambiguous)
+
+    assert payload["edges"][0]["ambiguous"] is True
+    assert payload["ambiguous_targets"] == [
+        {
+            "target_id": "up#notes",
+            "members": [{"label": "Notes", "line": 1}, {"label": "Notes", "line": 3}],
+        }
+    ]
+
+
+def test_dot_and_mermaid_mark_the_edge_and_comment_the_component():
+    lattice = _ambiguous_lattice()
+    ambiguous = {
+        (status.source_id, status.target_id)
+        for status in ambiguous_edges(lattice)
+        if status.target_id is not None
+    }
+
+    dot = to_dot(lattice, set(), ambiguous)
+    mermaid = to_mermaid(lattice, set(), ambiguous)
+
+    assert 'style=dotted color="red"' in dot
+    assert '// ambiguous up#notes: "Notes" (line 1), "Notes" (line 3)' in dot
+    assert "-. ambiguous .->" in mermaid
+    assert '%% ambiguous up#notes: "Notes" (line 1), "Notes" (line 3)' in mermaid
+
+
+def _hostile_lattice() -> Lattice:
+    # One heading text carrying an OSC introducer, a CSI introducer, a DEL, a DOT-hostile
+    # backslash and quote, and a Mermaid-hostile quote. The label is sanitized at derivation
+    # time, so every sink names the same cleaned text and then applies its own quoting.
+    body = '# A\x1b]0;x\x07"b\\c\x9bm\x7f\n\n# A\x1b]0;x\x07"b\\c\x9bm\x7f\n'
+    return build_lattice([ParsedDoc(path=Path("docs/up.md"), meta=NodeMeta(id="up"), body=body)])
+
+
+def test_no_sink_that_names_a_heading_emits_a_control_character():
+    lattice = _hostile_lattice()
+
+    dot = to_dot(lattice, set(), set())
+    mermaid = to_mermaid(lattice, set(), set())
+    payload = json.dumps(to_json(lattice, set(), set()))
+
+    for rendered in (dot, mermaid, payload):
+        assert "\x1b" not in rendered
+        assert "\x9b" not in rendered
+        assert "\x7f" not in rendered
+        assert "\x07" not in rendered
+
+
+def test_a_persisted_label_is_already_sanitized_so_both_paths_agree():
+    lattice = _hostile_lattice()
+
+    members = next(iter(lattice.collisions.values()))
+
+    assert members[0].label == 'A]0;x"b\\cm'
+    assert members[0].label == members[1].label

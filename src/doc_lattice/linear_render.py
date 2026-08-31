@@ -5,7 +5,9 @@ from collections.abc import Sequence
 from rich.console import Console
 from rich.markup import escape
 
+from .check import EdgeStatus, ambiguous_json
 from .constants import Severity
+from .report_render import render_ambiguous
 from .text_utils import strip_control_chars
 from .tickets import Finding
 
@@ -33,17 +35,20 @@ def render_safe(text: str) -> str:
     return escape(strip_control_chars(text))
 
 
-def findings_json(findings: Sequence[Finding]) -> dict:
+def findings_json(findings: Sequence[Finding], ambiguous: Sequence[EdgeStatus] = ()) -> dict:
     """Build the JSON payload.
 
     Args:
         findings: The ordered findings.
+        ambiguous: Ambiguous edges in the same lattice, from ``check.ambiguous_edges``. The
+            block is always present, empty when there are none, so a consumer never has to
+            distinguish "absent" from "none found".
 
     Returns:
-        An object with a single ``findings`` key whose entries carry ``severity``,
-        ``node_id``, ``node_title``, ``node_path``, ``drifted_refs``, ``ticket_ref``,
-        ``reason``, and ``ticket`` (the ticket's JSON dump, or null when it was not
-        resolved).
+        An object with a ``findings`` key whose entries carry ``severity``, ``node_id``,
+        ``node_title``, ``node_path``, ``drifted_refs``, ``ticket_ref``, ``reason``, and
+        ``ticket`` (the ticket's JSON dump, or null when it was not resolved), plus the shared
+        ``ambiguous`` block.
     """
     return {
         "findings": [
@@ -60,16 +65,24 @@ def findings_json(findings: Sequence[Finding]) -> dict:
                 ),
             }
             for finding in findings
-        ]
+        ],
+        "ambiguous": ambiguous_json(ambiguous),
     }
 
 
-def render_findings(console: Console, findings: Sequence[Finding]) -> None:
+def render_findings(
+    console: Console, findings: Sequence[Finding], ambiguous: Sequence[EdgeStatus] = ()
+) -> None:
     """Print the findings grouped by severity, escaping every external string.
+
+    Ambiguity is rendered first, before the empty-findings early return, so an ambiguous
+    lattice with no drift findings still reports it rather than printing only the all-clear
+    line.
 
     Args:
         console: The output console.
         findings: The ordered findings.
+        ambiguous: Ambiguous edges in the same lattice, from ``check.ambiguous_edges``.
     """
     # highlight=False on both prints, matching the three renderers in report_render.py: Rich's
     # default highlighter bolds bare numbers, and bold survives no_color, so it emits ANSI under
@@ -80,6 +93,7 @@ def render_findings(console: Console, findings: Sequence[Finding]) -> None:
     # any width, so a pipe or a grep gets the whole record rather than the fragment Rich's
     # wrapping would leave on a narrow console. Same contract GTX-2 and GTX-48 applied to impact,
     # check, and lint.
+    render_ambiguous(console, ambiguous)
     if not findings:
         console.print("no stale-shipped findings", highlight=False, soft_wrap=True)
         return

@@ -135,7 +135,9 @@ def render_ambiguous(console: Console, statuses: Sequence[EdgeStatus]) -> None:
         )
 
 
-def render_impact(console: Console, affected: list[tuple[Node, int]]) -> None:
+def render_impact(
+    console: Console, affected: list[tuple[Node, int]], ambiguous: Sequence[EdgeStatus] = ()
+) -> None:
     """Render affected nodes to a Rich console.
 
     Each node is one record terminated by exactly one newline, so a path never breaks across
@@ -145,10 +147,16 @@ def render_impact(console: Console, affected: list[tuple[Node, int]]) -> None:
     bare numbers and parentheses, and bold survives no_color, so a numbered id (adr-001), a
     dated path, or a ticket (GTX-48) would otherwise leak ANSI under --no-color.
 
+    Ambiguity is printed first because it is a finding while the node list below it is merely
+    informational: a reader scanning top to bottom sees what needs attention before what merely
+    changed.
+
     Args:
         console: Destination console.
         affected: Affected nodes paired with their minimum impact depths.
+        ambiguous: Ambiguous edges in the same lattice, from ``check.ambiguous_edges``.
     """
+    render_ambiguous(console, ambiguous)
     for node, _impact_depth_not_shown in affected:
         tickets = ", ".join(node.tickets) if node.tickets else "-"
         displayed_path = escape(format_path_for_display(node.path))

@@ -39,7 +39,7 @@ def test_graph_emits_json(lattice_dir: Path, monkeypatch):
     # gdd's broken 'ghost' ref contributes no edge; the two art-direction sections pc-design
     # derives from collapse to one edge, same as the mermaid/dot renderers.
     assert payload["edges"] == [
-        {"upstream": "art-direction", "downstream": "pc-design", "stale": True}
+        {"upstream": "art-direction", "downstream": "pc-design", "stale": True, "ambiguous": False}
     ]
 
 
@@ -85,7 +85,9 @@ def test_graph_json_includes_a_file_docs_root_node(tmp_path: Path, monkeypatch):
     assert result.exit_code == 0
     payload = json.loads(result.stdout)
     assert {node["id"] for node in payload["nodes"]} == {"spec", "arch"}
-    assert payload["edges"] == [{"upstream": "spec", "downstream": "arch", "stale": False}]
+    assert payload["edges"] == [
+        {"upstream": "spec", "downstream": "arch", "stale": False, "ambiguous": False}
+    ]
 
 
 def test_graph_rejects_unknown_format(lattice_dir: Path, monkeypatch):

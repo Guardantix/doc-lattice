@@ -4,6 +4,7 @@ from pathlib import Path
 
 import pytest
 
+from doc_lattice.check import ambiguous_edges
 from doc_lattice.error_types import ValidationError
 from doc_lattice.impact import expand_targets, impact, impact_json
 from doc_lattice.loader import build_lattice
@@ -36,7 +37,8 @@ def test_impact_json_returns_exact_payload_shape():
                 "tickets": ["GAME-1", "GAME-2"],
                 "depth": 2,
             }
-        ]
+        ],
+        "ambiguous": [],
     }
 
 
@@ -286,3 +288,32 @@ def test_impact_nested_section_reaches_parent_dependents_at_depth_1():
 def test_impact_depth_none_matches_unbounded():
     lat = _chain_lattice()
     assert impact(lat, "a", max_depth=None) == impact(lat, "a")
+
+
+def test_impact_json_carries_the_ambiguous_block():
+    lattice = build_lattice(
+        [
+            ParsedDoc(path=Path("docs/up.md"), meta=NodeMeta(id="up"), body="# Notes\n\n# Notes\n"),
+            ParsedDoc(
+                path=Path("docs/down.md"),
+                meta=NodeMeta.model_validate({"id": "down", "derives_from": [{"ref": "up#notes"}]}),
+                body="# Down\n",
+            ),
+        ]
+    )
+
+    payload = impact_json(impact(lattice, "up"), ambiguous_edges(lattice))
+
+    assert [entry["id"] for entry in payload["affected"]] == ["down"]
+    assert payload["ambiguous"][0]["collision"] == [
+        {"label": "Notes", "line": 1},
+        {"label": "Notes", "line": 3},
+    ]
+
+
+def test_impact_json_reports_an_empty_ambiguous_block_by_default():
+    lattice = build_lattice(
+        [ParsedDoc(path=Path("docs/a.md"), meta=NodeMeta(id="a"), body="# One\n")]
+    )
+
+    assert impact_json(impact(lattice, "a"))["ambiguous"] == []

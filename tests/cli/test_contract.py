@@ -1918,3 +1918,29 @@ def test_rich_still_offers_the_hook_the_policy_is_built_on():
     # assertion that turns its removal in a future rich into a failure here rather than a
     # silent return to exit 1 on `--help`.
     assert callable(getattr(Console, "on_broken_pipe", None))
+
+
+def test_ambiguous_output_is_byte_identical_across_every_cache_tier(tmp_path: Path, monkeypatch):
+    monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path / "cache"))
+    docs = tmp_path / "docs"
+    docs.mkdir()
+    (docs / "up.md").write_text("---\nid: up\n---\n# Notes\n\n# Notes\n", encoding="utf-8")
+    (docs / "down.md").write_text(
+        "---\nid: down\nderives_from:\n  - ref: up#notes\n---\n# Down\n", encoding="utf-8"
+    )
+    # No `lattice_format` key: Config does not have the field until Task 15, whose sweep adds it.
+    config = tmp_path / ".doc-lattice.yml"
+    config.write_text(
+        "docs_roots:\n  - docs\ncache_key: tiers\ncache_trust_stat: true\n", encoding="utf-8"
+    )
+
+    for argv in (
+        ["check", "--config", str(config)],
+        ["check", "--config", str(config), "--format", "json"],
+        ["lint", "--config", str(config), "--format", "json"],
+        ["impact", "up", "--config", str(config), "--format", "json"],
+        ["graph", "--config", str(config), "--format", "json"],
+    ):
+        runs = [runner.invoke(app, argv) for _ in range(3)]
+        assert runs[0].stdout == runs[1].stdout == runs[2].stdout, argv
+        assert "Notes" in runs[2].stdout, argv

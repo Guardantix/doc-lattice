@@ -1,19 +1,25 @@
 """Reverse-walk the lattice to find every doc affected by a change to a target."""
 
 from collections import deque
+from collections.abc import Sequence
 
+from .check import EdgeStatus, ambiguous_json
 from .error_types import ValidationError
 from .model import Lattice, Node, TargetId, parse_ref
 
 
-def impact_json(affected: list[tuple[Node, int]]) -> dict:
+def impact_json(affected: list[tuple[Node, int]], ambiguous: Sequence[EdgeStatus] = ()) -> dict:
     """Build the JSON-ready impact report payload.
 
     Args:
         affected: Affected nodes paired with their minimum impact depths.
+        ambiguous: Ambiguous edges in the same lattice, from ``check.ambiguous_edges``. The
+            block is always present, empty when there are none, so a consumer never has to
+            distinguish "absent" from "none found".
 
     Returns:
-        A plain dictionary containing the ordered affected-node payloads.
+        A plain dictionary containing the ordered affected-node payloads and the shared
+        ambiguous block.
     """
     return {
         "affected": [
@@ -25,7 +31,8 @@ def impact_json(affected: list[tuple[Node, int]]) -> dict:
                 "depth": node_depth,
             }
             for node, node_depth in affected
-        ]
+        ],
+        "ambiguous": ambiguous_json(ambiguous),
     }
 
 
