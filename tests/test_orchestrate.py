@@ -344,19 +344,19 @@ def test_mixed_directory_and_file_docs_roots_load_identically_cached_and_uncache
 
 def test_warm_cached_run_reparses_nothing(lattice_dir: Path, monkeypatch, tmp_path):
     # Proof the warm path serves from the cache instead of re-parsing: after a cold run populates
-    # the cache, a warm run must call parse_meta zero times (every file is a verify-tier hit
+    # the cache, a warm run must call parse_document zero times (every file is a verify-tier hit
     # reconstructed from the cache). A no-op alias would re-parse every discovered node.
     monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path / "xdg"))
     _with_cache(lattice_dir)
 
     calls = {"n": 0}
-    real = orchestrate.parse_meta
+    real = orchestrate.parse_document
 
     def counting(*args, **kwargs):
         calls["n"] += 1
         return real(*args, **kwargs)
 
-    monkeypatch.setattr(orchestrate, "parse_meta", counting)
+    monkeypatch.setattr(orchestrate, "parse_document", counting)
 
     load_lattice(load_config(None, lattice_dir))  # cold: cache empty, every node parsed
     assert calls["n"] > 0
@@ -532,3 +532,20 @@ def test_id_less_frontmatter_declaring_lattice_intent_fails_identically_across_t
     assert str(uncached.value) == expected
     assert str(cold.value) == expected
     assert str(warm.value) == expected
+
+
+def test_a_comment_spelling_document_becomes_a_node(tmp_path: Path):
+    docs = tmp_path / "docs"
+    docs.mkdir()
+    (docs / "up.md").write_text(
+        "<!-- doc-lattice\nid: up\n-->\n# Up\n\n## Section\nbody\n", encoding="utf-8"
+    )
+    (docs / "down.md").write_text(
+        "---\nid: down\nderives_from:\n  - ref: up#section\n---\n# Down\n", encoding="utf-8"
+    )
+    project = load_config(None, tmp_path)
+
+    lattice = load_lattice(project)
+
+    assert set(lattice.nodes_by_id) == {"up", "down"}
+    assert TargetId("up", "section") in lattice.index

@@ -313,6 +313,41 @@ def parse_meta(raw_meta: str | None, source: Path, *, kind: EnvelopeKind = "fenc
     return ParsedMeta(meta=meta, disposition="tracked", reused_anchors=reused_anchors)
 
 
+def parse_document(text: str, source: Path) -> tuple[ParsedMeta, str]:
+    """Split and classify one whole document, in either envelope spelling.
+
+    The one entry point the load paths use. Splitting and classifying are separate functions
+    because the rewriter needs the split alone, but the comment spelling's rules span both: the
+    ``--`` refusal is measured against the file's own line numbers, which only the split knows,
+    and the fail-closed classification needs the envelope kind, which only the split derives.
+
+    Args:
+        text: The full file text, already newline-normalized by ``discovery.decode_doc``.
+        source: The discovered path, named in every diagnostic this raises.
+
+    Returns:
+        The parse outcome and the document body after the envelope.
+
+    Raises:
+        UnreadableDocError: If an opening delimiter has no closing delimiter, or the YAML
+            cannot be parsed.
+        FrontmatterError: If the frontmatter has an unknown or malformed key, declares lattice
+            intent with no ``id``, spells a near-miss comment opener, carries a byte-order mark
+            before a comment opener, holds ``--`` inside a comment envelope, or is a comment
+            envelope that is not a mapping carrying ``id``.
+    """
+    parts = split_frontmatter_parts(text, source)
+    if parts is None:
+        return _UNTRACKED, text
+    if parts.kind == "comment":
+        refuse_double_hyphen(
+            parts.raw_meta,
+            source,
+            first_body_line=text[: parts.meta_start].count("\n") + 1,
+        )
+    return parse_meta(parts.raw_meta, source, kind=parts.kind), parts.body
+
+
 def _load_recording_reused_anchors(raw_meta: str) -> tuple[Any, bool]:
     """Load a frontmatter block, recording whether it defines an anchor name more than once.
 

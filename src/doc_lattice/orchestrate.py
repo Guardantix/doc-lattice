@@ -8,7 +8,7 @@ from .cache import CacheHit, LookupPolicy, RunState, cache_path, lookup, make_en
 from .config import ProjectConfig
 from .constants import FrontmatterDisposition
 from .discovery import decode_doc, discover_doc_paths, read_doc
-from .frontmatter_parser import parse_meta, split_frontmatter
+from .frontmatter_parser import parse_document
 from .loader import build_lattice, derive_file_sections
 from .model import Lattice, ParsedDoc
 from .path_utils import format_path_for_display
@@ -115,8 +115,7 @@ def _load_uncached(project: ProjectConfig) -> Lattice:
         project.resolved_roots, project.config.ignore_globs, project.project_root
     ):
         text = read_doc(path)
-        raw_meta, body = split_frontmatter(text, path)
-        outcome = parse_meta(raw_meta, path)
+        outcome, body = parse_document(text, path)
         _report_skip(outcome.disposition, path)
         _report_reused_anchors(outcome.reused_anchors, path)
         if outcome.meta is None:
@@ -157,8 +156,7 @@ def _load_cached(
                 parsed.append(result.doc)
             continue
         text = decode_doc(doc_path, result.data)
-        raw_meta, body = split_frontmatter(text, doc_path)
-        outcome = parse_meta(raw_meta, doc_path)
+        outcome, body = parse_document(text, doc_path)
         _report_skip(outcome.disposition, doc_path)
         _report_reused_anchors(outcome.reused_anchors, doc_path)
         meta = outcome.meta

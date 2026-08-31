@@ -13,6 +13,7 @@ from doc_lattice.constants import LATTICE_INTENT_KEYS
 from doc_lattice.error_types import FrontmatterError, UnreadableDocError
 from doc_lattice.frontmatter_parser import (
     _OPENER_NEAR_MISS,
+    parse_document,
     parse_meta,
     refuse_double_hyphen,
     split_frontmatter,
@@ -1033,3 +1034,32 @@ def test_a_double_hyphen_in_a_comment_envelope_body_is_refused_by_line():
 
 def test_a_body_without_a_double_hyphen_is_accepted():
     assert refuse_double_hyphen("id: pc\nseen: abc123\n", Path("a.md"), first_body_line=2) is None
+
+
+def test_parse_document_reads_either_spelling_and_returns_the_body():
+    fence_outcome, fence_body = parse_document(DOC, Path("a.md"))
+    comment_outcome, comment_body = parse_document(COMMENT_DOC, Path("b.md"))
+
+    assert fence_outcome.disposition == "tracked"
+    assert comment_outcome.disposition == "tracked"
+    assert fence_outcome.meta is not None
+    assert comment_outcome.meta is not None
+    assert fence_outcome.meta.id == comment_outcome.meta.id == "pc"
+    assert fence_body == "# Body\ntext\n"
+    assert comment_body == "# Body\ntext\n"
+
+
+def test_parse_document_refuses_a_double_hyphen_naming_the_file_line():
+    text = "<!-- doc-lattice\nid: pc\ntitle: a--b\n-->\n# Body\n"
+
+    with pytest.raises(FrontmatterError) as excinfo:
+        parse_document(text, Path("a.md"))
+
+    assert "line 3" in str(excinfo.value)
+
+
+def test_parse_document_leaves_prose_untracked():
+    outcome, body = parse_document("# No frontmatter\n", Path("a.md"))
+
+    assert outcome.disposition == "untracked"
+    assert body == "# No frontmatter\n"
