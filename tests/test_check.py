@@ -384,3 +384,66 @@ def test_rewording_an_ancestor_stales_a_child_targeted_edge():
     )
 
     assert check_lattice(after)[0].state == "STALE"
+
+
+def _setext_products(setup_a_heading: str, second_product: str) -> list[ParsedDoc]:
+    """Two products with setext headings, each holding a byte-identical '### Setup'."""
+    body = (
+        "# Products\n\n"
+        "Product A\n---------\n\n"
+        f"{setup_a_heading}\nrun the installer\n\n"
+        f"{second_product}"
+    )
+    return [ParsedDoc(path=Path("docs/up.md"), meta=NodeMeta(id="up"), body=body)]
+
+
+def test_a_transient_collision_under_setext_parents_reads_stale():
+    # GTX-471. The setext 'Product A' is not addressable, so before the level-based chain the
+    # ancestor context was empty and '#setup' transferred to Product B under a byte-identical
+    # section: no run ever sees a collision and the blessed 'seen' still matches.
+    before = _setext_products("### Setup", "")
+    blessed = cached_target_hash(build_lattice(before), TargetId("up", "setup"), {})
+
+    # One edit: rename A's heading and add an identical Product B / ### Setup.
+    after = _setext_products(
+        "### Install", "Product B\n---------\n\n### Setup\nrun the installer\n"
+    )
+    down = ParsedDoc(
+        path=Path("docs/down.md"),
+        meta=NodeMeta.model_validate(
+            {"id": "down", "derives_from": [{"ref": "up#setup", "seen": blessed}]}
+        ),
+        body="# Down\n",
+    )
+    lattice = build_lattice([*after, down])
+
+    # '#setup' now resolves to Product B's section, whose chain names Product B.
+    assert lattice.ancestor_context[TargetId("up", "setup")] == ("# Products", "## Product B")
+    assert check_lattice(lattice)[0].state == "STALE"
+
+
+def test_the_same_transient_collision_reads_stale_with_atx_parents():
+    # The ATX spelling already worked; it must keep agreeing with the setext one.
+    before = "# Products\n\n## Product A\n\n### Setup\nrun the installer\n"
+    blessed = cached_target_hash(
+        build_lattice([ParsedDoc(path=Path("docs/up.md"), meta=NodeMeta(id="up"), body=before)]),
+        TargetId("up", "setup"),
+        {},
+    )
+    after = (
+        "# Products\n\n## Product A\n\n### Install\nrun the installer\n\n"
+        "## Product B\n\n### Setup\nrun the installer\n"
+    )
+    down = ParsedDoc(
+        path=Path("docs/down.md"),
+        meta=NodeMeta.model_validate(
+            {"id": "down", "derives_from": [{"ref": "up#setup", "seen": blessed}]}
+        ),
+        body="# Down\n",
+    )
+    lattice = build_lattice(
+        [ParsedDoc(path=Path("docs/up.md"), meta=NodeMeta(id="up"), body=after), down]
+    )
+
+    assert lattice.ancestor_context[TargetId("up", "setup")] == ("# Products", "## Product B")
+    assert check_lattice(lattice)[0].state == "STALE"

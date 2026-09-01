@@ -252,5 +252,28 @@ def test_collision_provenance_round_trips_through_the_cache():
     assert doc.sections.sections == sections.sections
 
 
+def test_ancestor_context_round_trips_through_the_cache():
+    # A setext parent: the chain cannot be re-derived from the cached spans alone, so it has to
+    # survive serialization for a cache hit to match the uncached result.
+    body = "Product A\n---------\n\n### Setup\nrun it\n"
+    sections = derive_file_sections(body)
+    entry = make_entry(
+        body.encode(),
+        ParsedMeta(meta=NodeMeta.model_validate({"id": "a"}), disposition="tracked"),
+        body,
+        sections,
+        _fake_stat(),  # ty: ignore[invalid-argument-type]
+        ROOT,
+    )
+
+    revived = Entry.model_validate_json(entry.model_dump_json())
+    doc = reconstruct_doc(revived, Path("docs/a.md"))
+
+    assert doc is not None
+    assert doc.sections is not None
+    assert [record.context for record in doc.sections.sections] == [("## Product A",)]
+    assert doc.sections.sections == sections.sections
+
+
 def test_the_cache_version_is_six():
     assert CACHE_VERSION == 6

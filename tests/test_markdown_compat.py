@@ -159,15 +159,20 @@ def test_the_comment_envelope_never_perturbs_heading_extraction_or_spans():
 
 
 def test_the_full_inventory_sees_every_heading_form_github_assigns_an_id_to():
-    body = "Overview\n--------\n\ntext\n\n# Overview\n\n> ## Quoted\n\n- ### Nested\n"
+    body = (
+        "Overview\n--------\n\ntext\n\n# Overview\n\n   #### Indented\n\n"
+        "> ## Quoted\n\n- ### Nested\n"
+    )
 
     inventory = full_heading_inventory(body)
 
-    assert [(h.text, h.line, h.github_id) for h in inventory] == [
-        ("Overview", 1, "overview"),
-        ("Overview", 6, "overview-1"),
-        ("Quoted", 8, "quoted"),
-        ("Nested", 10, "nested"),
+    # Level comes from the token tag, the only field that spells a setext heading's level.
+    assert [(h.text, h.level, h.line, h.github_id) for h in inventory] == [
+        ("Overview", 2, 1, "overview"),
+        ("Overview", 1, 6, "overview-1"),
+        ("Indented", 4, 8, "indented"),
+        ("Quoted", 2, 10, "quoted"),
+        ("Nested", 3, 12, "nested"),
     ]
 
 

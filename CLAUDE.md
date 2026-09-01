@@ -118,12 +118,16 @@ it before committing.
   block quote -- while the addressable subset stays column-zero ATX only. Keep the separation:
   accepting a valid deep link by widening `extract_headings` instead would change which sections
   the engine sees, which is a cached-derivation change costing a `CACHE_VERSION` bump and an
-  edit to README.md's addressable-subset paragraph and AD-13. Both inventories share one slug
-  and collision implementation, `markdown_compat.github_ids_for_texts`, so a heading both see
-  resolves to the same id. Use it for GitHub heading ids: `github_slug` is a base slug with no
-  deduplication, and `anchor_ids` answers a different question, doc-lattice's explicit
-  `{#anchor}` identity. Rendered inline heading text is out of reach on both sides, since ids
-  are slugged from raw inline source rather than rendered text.
+  edit to README.md's addressable-subset paragraph and AD-13. The engine now reads the full
+  inventory in two places of its own, collision tracing and the hash's ancestor context, so the
+  separation being maintained is between *addressing* and everything else, not between the two
+  parses: a non-addressable heading is a collision member and a hashing ancestor, and still owns
+  no lattice id. Both inventories share one slug and collision implementation,
+  `markdown_compat.github_ids_for_texts`, so a heading both see resolves to the same id. Use it
+  for GitHub heading ids: `github_slug` is a base slug with no deduplication, and `anchor_ids`
+  answers a different question, doc-lattice's explicit `{#anchor}` identity. Rendered inline
+  heading text is out of reach on both sides, since ids are slugged from raw inline source
+  rather than rendered text.
 - Section identity is pinned to `markdown-it-py==4.2.0` and a `github-slugger@2.0.0` target.
   Never hand-edit `_github_slugger_data.py`. Node is a maintenance-only dependency for generator
   verification. Adapter, dependency, Unicode, or generated-data changes require the generator

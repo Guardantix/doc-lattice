@@ -65,9 +65,13 @@ class SluggedHeading:
     kept. Ambiguity is derived from the probes rather than from bases or final ids,
     because dedup examines ids it never emits, and an id a later heading merely probed
     is one a rename can hand it.
+
+    ``level`` is the heading's nesting level whatever form it was written in, so a caller
+    can reconstruct the outline a reader sees across forms the addressable TOC cannot.
     """
 
     text: str
+    level: int
     line: int
     github_id: str
     probes: tuple[str, ...]
@@ -385,6 +389,9 @@ def full_heading_inventory(body: str) -> list[SluggedHeading]:
         inventory.append(
             SluggedHeading(
                 text=content.content,
+                # ``token.markup`` is ``=`` or ``-`` for a setext heading, so only ``tag``
+                # carries the level uniformly across every heading form.
+                level=int(token.tag[1:]),
                 line=token.map[0] + 1,
                 github_id=github_id,
                 probes=probes,
@@ -464,7 +471,13 @@ def addressable_heading_inventory(headings: list[Heading]) -> list[SluggedHeadin
     for heading in headings:
         github_id, probes = slugger.slug_with_probes(heading.text)
         inventory.append(
-            SluggedHeading(text=heading.text, line=heading.line, github_id=github_id, probes=probes)
+            SluggedHeading(
+                text=heading.text,
+                level=heading.level,
+                line=heading.line,
+                github_id=github_id,
+                probes=probes,
+            )
         )
     return inventory
 

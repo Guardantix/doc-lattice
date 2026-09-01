@@ -236,12 +236,17 @@ class SectionRecord:
 
     ``collision`` is None for a section whose id is unambiguous, which includes every id set by
     an explicit ``{#anchor}`` marker: being reword-stable is what the marker is for.
+
+    ``context`` is the section's enclosing heading chain rendered as normalized ATX, outermost
+    first, derived by heading level over every form GitHub assigns an id to. It is the drift
+    hash's context prefix, and is empty for a section with no enclosing heading.
     """
 
     anchor: str
     start: int
     end: int
     collision: tuple[CollisionMember, ...] | None = None
+    context: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -319,6 +324,14 @@ class Lattice:
     every section TargetId whose id sits in a slug-collision component to that component's
     members, so an edge into one can be classified and named without re-deriving anything.
 
+    There are deliberately two ancestor maps, and neither subsumes the other. ``ancestors`` is
+    span containment over the addressable subset, which is what ``impact.expand_targets`` wants:
+    ``## A``'s span really does cover a nested heading's bytes, so an edge into ``#a`` should
+    reach them. ``ancestor_context`` is level nesting over every heading form, which is what the
+    drift hash wants: it is the chain a reader sees, so a section under a setext or otherwise
+    non-addressable parent still carries that parent as context. The two disagree by design for
+    a document that nests an addressable heading under a non-addressable one.
+
     The maps are typed ``Mapping`` to signal that the lattice is read-only once built;
     cross-map consistency is an invariant guaranteed by ``build_lattice``.
     """
@@ -330,3 +343,4 @@ class Lattice:
     file_id_by_path: Mapping[Path, str]
     anchors_by_path: Mapping[Path, frozenset[TargetId]]
     collisions: Mapping[TargetId, tuple[CollisionMember, ...]] = field(default_factory=dict)
+    ancestor_context: Mapping[TargetId, tuple[str, ...]] = field(default_factory=dict)

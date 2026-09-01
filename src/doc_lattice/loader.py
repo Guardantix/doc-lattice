@@ -23,18 +23,24 @@ from .model import (
     parse_ref,
 )
 from .path_utils import format_path_for_display
-from .sections import build_toc, section_spans, split_body_lines
+from .sections import ancestor_chains, build_toc, section_spans, split_body_lines
 from .text_utils import safe_heading_label
 
 
 def derive_file_sections(body: str, *, first_line: int = 1) -> FileSections:
-    """Derive a document's total line count, anchored section spans, and collision provenance.
+    """Derive a document's line count, section spans, ancestor context, and collision provenance.
 
     This is the single derivation the load cache stores and replays: the TOC, its de-duped
-    anchor ids, each heading's inclusive line span, and, for a heading whose id sits in a
-    slug-collision component, the component's members as safe display labels. AD-12 requires a
-    cache hit to match the uncached result exactly, and a diagnostic naming colliding headings
-    cannot be reconstructed from a boolean, so the members are derived here and persisted.
+    anchor ids, each heading's inclusive line span, each heading's enclosing heading chain, and,
+    for a heading whose id sits in a slug-collision component, the component's members as safe
+    display labels. AD-12 requires a cache hit to match the uncached result exactly, and a
+    diagnostic naming colliding headings cannot be reconstructed from a boolean, so the members
+    are derived here and persisted.
+
+    The ancestor chain is derived here rather than at hash time because it needs the full
+    CommonMark parse, which this derivation already runs for collision tracing. That parse is
+    hoisted into this function and handed to both consumers, so carrying the chain costs no
+    additional parse.
 
     Spans stay body-relative because they are slicing coordinates for ``body`` itself. Collision
     member lines are the opposite: they are only ever printed to a reader looking at the file, so
@@ -58,24 +64,34 @@ def derive_file_sections(body: str, *, first_line: int = 1) -> FileSections:
     total_lines = _line_count(body)
     toc = build_toc(body)
     inventory = addressable_heading_inventory(toc)
+    full = full_heading_inventory(body)
     anchors = [
         heading.anchor if heading.anchor is not None else record.github_id
         for heading, record in zip(toc, inventory, strict=True)
     ]
     spans = section_spans(toc, total_lines)
-    members_by_line = _collision_members_by_line(body, inventory, first_line=first_line)
+    chains = ancestor_chains(full, toc)
+    members_by_line = _collision_members_by_line(full, inventory, first_line=first_line)
     records: list[SectionRecord] = []
-    for heading, anchor, (start_line, end_line) in zip(toc, anchors, spans, strict=True):
+    for heading, anchor, (start_line, end_line), context in zip(
+        toc, anchors, spans, chains, strict=True
+    ):
         # A marker-set id is reword-stable by construction, so it is never ambiguous.
         collision = None if heading.anchor is not None else members_by_line.get(heading.line)
         records.append(
-            SectionRecord(anchor=anchor, start=start_line, end=end_line, collision=collision)
+            SectionRecord(
+                anchor=anchor,
+                start=start_line,
+                end=end_line,
+                collision=collision,
+                context=context,
+            )
         )
     return FileSections(total_lines=total_lines, sections=tuple(records))
 
 
 def _collision_members_by_line(
-    body: str, addressable: list[SluggedHeading], *, first_line: int
+    full: list[SluggedHeading], addressable: list[SluggedHeading], *, first_line: int
 ) -> dict[int, tuple[CollisionMember, ...]]:
     """Map each colliding heading's body line to its component's safe display members.
 
@@ -102,7 +118,9 @@ def _collision_members_by_line(
     inventory overlaps its twin from the first and the rebuild fires every time.
 
     Args:
-        body: The verbatim document body.
+        full: The full GitHub heading inventory's allocation trace, from
+            ``full_heading_inventory(body)``. Taken as an argument rather than derived here so
+            the caller's single full parse serves the ancestor chains as well.
         addressable: The addressable ATX subset's own allocation trace, from
             ``addressable_heading_inventory(build_toc(body))``.
         first_line: The 1-based file line that body line 1 occupies. Member lines are reported
@@ -126,7 +144,7 @@ def _collision_members_by_line(
         if left_root != right_root:
             parent[max(left_root, right_root)] = min(left_root, right_root)
 
-    for inventory in (full_heading_inventory(body), addressable):
+    for inventory in (full, addressable):
         for component in collision_components(inventory):
             anchor_line = component[0].line
             for heading in component:
@@ -166,7 +184,7 @@ def build_lattice(docs: list[ParsedDoc]) -> Lattice:
         docs: Tracked files with validated frontmatter and bodies.
 
     Returns:
-        A Lattice with the TargetId index, nodes, reverse adjacency, and ancestor map.
+        A Lattice with the TargetId index, nodes, reverse adjacency, and both ancestor maps.
 
     Raises:
         DuplicateIdError: If two file ids collide, or two headings in one file resolve to the
@@ -176,6 +194,7 @@ def build_lattice(docs: list[ParsedDoc]) -> Lattice:
     sources: dict[TargetId, str] = {}
     ancestors: dict[TargetId, tuple[TargetId, ...]] = {}
     collisions: dict[TargetId, tuple[CollisionMember, ...]] = {}
+    ancestor_context: dict[TargetId, tuple[str, ...]] = {}
 
     for doc in docs:
         file_id = doc.meta.id
@@ -197,6 +216,8 @@ def build_lattice(docs: list[ParsedDoc]) -> Lattice:
             anchored.append(tid)
             if record.collision is not None:
                 collisions[tid] = record.collision
+            if record.context:
+                ancestor_context[tid] = record.context
             _register(
                 tid,
                 Location(path=doc.path, kind="section", span=span),
@@ -239,6 +260,7 @@ def build_lattice(docs: list[ParsedDoc]) -> Lattice:
         file_id_by_path=file_id_by_path,
         anchors_by_path=anchors_by_path,
         collisions=collisions,
+        ancestor_context=ancestor_context,
     )
 
 

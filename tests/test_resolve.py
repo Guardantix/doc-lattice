@@ -151,3 +151,18 @@ def test_a_marker_removed_from_an_ancestor_heading_does_not_change_the_chain():
     lattice = build_lattice([ParsedDoc(path=Path("docs/a.md"), meta=NodeMeta(id="a"), body=body)])
 
     assert ancestor_headings(lattice, TargetId("a", "child")) == ("## Parent",)
+
+
+def test_a_non_addressable_parent_reaches_the_hash_through_ancestor_headings():
+    body = "Product A\n---------\n\n### Setup\nrun it\n"
+    lattice = build_lattice([ParsedDoc(path=Path("docs/a.md"), meta=NodeMeta(id="a"), body=body)])
+    setup = TargetId("a", "setup")
+
+    # The setext parent owns no lattice id, so it can never appear in lattice.ancestors.
+    assert lattice.ancestors[setup] == ()
+    assert ancestor_headings(lattice, setup) == ("## Product A",)
+    assert target_content(lattice, setup) == "## Product A\n### Setup\nrun it"
+
+
+def test_ancestor_headings_of_an_unknown_target_is_empty():
+    assert ancestor_headings(_lattice(), TargetId("doc", "missing")) == ()

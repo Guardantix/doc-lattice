@@ -489,3 +489,43 @@ def test_build_lattice_exposes_collisions_by_target_id():
 
     assert lattice.collisions[TargetId("a", "notes")][0].label == "Notes"
     assert TargetId("a") not in lattice.collisions
+
+
+def test_the_two_ancestor_maps_diverge_under_a_non_addressable_parent():
+    # '## A' is not terminated by the setext 'Product B', so its span still covers '### Child'
+    # and span containment names it Child's ancestor. Level nesting names Product B, which is
+    # the parent a reader sees. Both are right for their own consumer: impact walks spans, the
+    # drift hash walks the reader's outline. Neither map may be quietly changed to match.
+    body = "# Top\n\n## A\n\nProduct B\n---------\n\n### Child\nbody\n"
+    lattice = build_lattice([ParsedDoc(path=Path("docs/d.md"), meta=NodeMeta(id="d"), body=body)])
+    child = TargetId("d", "child")
+
+    assert lattice.ancestors[child] == (TargetId("d", "top"), TargetId("d", "a"))
+    assert lattice.ancestor_context[child] == ("# Top", "## Product B")
+
+
+def test_a_top_level_section_records_no_ancestor_context():
+    lattice = build_lattice(
+        [ParsedDoc(path=Path("docs/d.md"), meta=NodeMeta(id="d"), body="# Only\nbody\n")]
+    )
+
+    assert lattice.ancestor_context == {}
+
+
+def test_derive_file_sections_runs_one_full_parse_for_both_consumers(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    # Collision tracing and the ancestor chains share the hoisted parse, so the benchmarked
+    # derivation gains no second walk of the document.
+    calls = 0
+    original = loader_module.full_heading_inventory
+
+    def counted(body: str):
+        nonlocal calls
+        calls += 1
+        return original(body)
+
+    monkeypatch.setattr(loader_module, "full_heading_inventory", counted)
+    derive_file_sections("# Notes\n\n## Sub\n\n# Notes\n")
+
+    assert calls == 1

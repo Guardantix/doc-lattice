@@ -27,8 +27,10 @@ guard. Three steps:
    at all while any edge in the run is still ambiguous, not just the ambiguous one.
 3. The section content hash now includes the target's ancestor heading chain, so every `seen`
    value on a section that sits under a parent heading mismatches once. Run
-   `doc-lattice reconcile --all` to re-bless the lattice. Whole-file refs and top-level
-   sections are unaffected.
+   `doc-lattice reconcile --all` to re-bless the lattice. The chain covers every heading form
+   GitHub assigns an id to, so a section under a setext, indented, or nested parent is included
+   even though such a parent is not itself addressable. Whole-file refs and sections with no
+   enclosing heading are unaffected.
 
 To make a tracked file's metadata invisible on GitHub, replace its opening `---` with
 `<!-- doc-lattice`, replace its closing `---` with `-->`, and rerun `check`. The YAML between
@@ -59,7 +61,11 @@ the fence spelling or renames the value.
 
 - A `section` ref now hashes its ancestor heading chain followed by the section text, so a
   section that moves under a different parent heading, or whose ancestor is reworded, goes STALE
-  even when its own text is untouched. `file` refs are unaffected.
+  even when its own text is untouched. `file` refs are unaffected. The chain is derived by
+  heading level over every form GitHub assigns an id to, so setext, indented, and nested parents
+  supply context alongside column-zero ATX ones, and each is rendered in one normalized ATX
+  spelling so rewriting a parent between forms at the same level does not restale its
+  descendants.
 - `.doc-lattice.yml` gains a required `lattice_format` key, which `doc-lattice init` now writes as
   the first key of every generated config.
 - The load cache version is 6; caches written by earlier releases are discarded rather than read.

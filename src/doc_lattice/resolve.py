@@ -4,10 +4,9 @@ from pathlib import Path
 
 from .error_types import BrokenRefError
 from .hashing import content_hash
-from .markdown_compat import strip_heading_anchor
 from .model import Lattice, Node, TargetId
 from .path_utils import format_path_for_display
-from .sections import section_text_from_lines, split_body_lines
+from .sections import section_text
 
 
 def target_content(lattice: Lattice, target_id: TargetId) -> str:
@@ -22,6 +21,12 @@ def target_content(lattice: Lattice, target_id: TargetId) -> str:
     parent, or whose ancestor is reworded, therefore goes STALE even when its own bytes did not
     change, which is correct: the context is part of what the downstream document derived from.
     Whole-file targets are unaffected.
+
+    The chain comes from ``lattice.ancestor_context``, derived by heading level over every form
+    GitHub assigns an id to and rendered as normalized ATX. A setext parent, an ATX parent
+    indented one to three spaces, and a parent nested in a list item or a block quote all count,
+    even though none of them is addressable and none can appear in ``lattice.ancestors``. That
+    is deliberately not the span-containment chain ``impact`` walks; see ``model.Lattice``.
 
     One benign residual collision survives this: a parent section immediately followed by its
     first subheading, with no text between the two heading lines, hashes identically to that
@@ -47,55 +52,26 @@ def target_content(lattice: Lattice, target_id: TargetId) -> str:
     node = node_for_path(lattice, location.path)
     if location.kind == "file":
         return node.body
-    lines = split_body_lines(node.body)
-    section = section_text_from_lines(lines, location.span)
-    chain = _ancestor_heading_lines(lattice, target_id, lines)
+    section = section_text(node.body, location.span)
+    chain = lattice.ancestor_context.get(target_id, ())
     return "\n".join([*chain, section]) if chain else section
 
 
 def ancestor_headings(lattice: Lattice, target_id: TargetId) -> tuple[str, ...]:
-    """Return each enclosing section's heading line, outermost first.
+    """Return each enclosing heading rendered as normalized ATX, outermost first.
 
-    The marker is removed with ``strip_heading_anchor``, which is the same treatment
-    ``sections.section_text`` gives a section's own heading line, so adding or removing a
-    ``{#anchor}`` on an ancestor does not restale every descendant edge.
+    An accessor over ``lattice.ancestor_context``, kept as the named contract the tests assert
+    ``target_content``'s context prefix against. It has no production caller of its own.
 
     Args:
         lattice: The built lattice.
         target_id: A resolved section TargetId present in ``lattice.index``.
 
     Returns:
-        The ancestors' heading source lines, outermost first, empty for a top-level section.
+        The ancestors as normalized ATX heading lines, outermost first, empty for a section
+        with no enclosing heading.
     """
-    if not lattice.ancestors.get(target_id, ()):
-        return ()
-    lines = split_body_lines(node_for_path(lattice, lattice.index[target_id].path).body)
-    return _ancestor_heading_lines(lattice, target_id, lines)
-
-
-def _ancestor_heading_lines(
-    lattice: Lattice, target_id: TargetId, lines: list[str]
-) -> tuple[str, ...]:
-    """Return each enclosing section's heading line from already-split body lines.
-
-    Shared by ``ancestor_headings`` and ``target_content`` so a caller that already has
-    the body split into lines, such as ``target_content``, does not pay for a second
-    split of the same body.
-
-    Args:
-        lattice: The built lattice.
-        target_id: A resolved section TargetId present in ``lattice.index``.
-        lines: The owning body's lines, as returned by ``split_body_lines``.
-
-    Returns:
-        The ancestors' heading source lines, outermost first, empty for a top-level section.
-    """
-    ancestors = lattice.ancestors.get(target_id, ())
-    if not ancestors:
-        return ()
-    return tuple(
-        strip_heading_anchor(lines[lattice.index[ancestor].span[0] - 1]) for ancestor in ancestors
-    )
+    return lattice.ancestor_context.get(target_id, ())
 
 
 def cached_target_hash(lattice: Lattice, target_id: TargetId, cache: dict[TargetId, str]) -> str:

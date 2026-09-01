@@ -2284,9 +2284,14 @@ identity: this design pulls an addressable member into a cross-inventory collisi
 without changing what the engine addresses. Running *allocation* over the full inventory, rather
 than only tracing collisions against it, is the deliberately deferred GTX-277 follow-up.
 
+The hash's ancestor context reads that same full inventory, for the same reason and on the same
+terms (GTX-471): a heading form the engine does not address is still a parent a reader sees, so it
+still supplies context, while owning no lattice id. The separation the design maintains is between
+*addressing* and everything else, not between the two parses.
+
 **The context-inclusive target hash.** A section's drift hash input becomes its ancestor heading
-chain (raw inline heading source, the same source the slugger reads) prepended to the section's own
-content, rather than the section's content alone. Two byte-identical sections under different
+chain prepended to the section's own content, rather than the section's content alone. Two
+byte-identical sections under different
 parents used to hash identically, which defeated the `AMBIGUOUS` net in the case where a collision
 is created and dissolved inside one change: add one product's `Setup` and rename another's in the
 same commit, and `#setup` transfers between products with no run ever seeing a collision and the
@@ -2295,6 +2300,28 @@ one whose ancestor is reworded, go STALE even though its own bytes did not chang
 because the context is part of what the downstream document derived from. Whole-file targets hash
 the document body exactly as before and are unaffected, since a whole-file target has no ancestor
 chain to fold in.
+
+The chain is derived by heading *level* over the full GitHub heading inventory, and each ancestor
+is rendered as normalized ATX: `"#" * level`, a space, then the heading text with any explicit
+`{#anchor}` marker stripped. Deriving it by level rather than by span containment is what makes a
+setext parent, an ATX parent indented one to three spaces, and a parent nested in a list item or a
+block quote all count, and hand-written Markdown published on GitHub is exactly where those forms
+are ordinary. One normalized spelling for every form means converting a heading between forms at
+the same level, or adding or removing its marker, does not restale its descendants.
+
+This is deliberately not the span-containment ancestor chain `impact` walks, and the lattice
+carries both maps rather than reconciling them. They are each right for their own consumer. A
+non-addressable heading does not terminate an addressable section's span, so for a `### Child`
+nested under a setext `Product B` that follows an addressable `## A`, span containment names `#a`
+and level nesting names `Product B`. `impact.expand_targets` wants the span answer, because `## A`'s
+span really does cover the child's bytes and an edge into `#a` should reach them. The hash wants the
+level answer, because that is the chain a reader sees and therefore the context the downstream
+document derived from. Only the hash reads the level-based chain; `impact` is untouched.
+
+The chain is computed inside `derive_file_sections`, the cached derivation, and persisted on the
+section record, because it needs the full CommonMark parse that derivation already runs for
+collision tracing. That parse is hoisted and shared by both consumers, so carrying the chain costs
+no additional parse on the benchmarked path.
 
 **The `lattice_format` version-skew guard, and why zero-config is exempt.** Both adopters run
 engine versions pinned in more than one place, so the format and hash changes above must fail loud

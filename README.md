@@ -85,7 +85,9 @@ as a change.
 The hash input never includes frontmatter. A `file` ref hashes the canonicalized document body;
 a `section` ref hashes its ancestor heading chain followed by the section text, so a section that
 moves under a different parent heading, or whose ancestor is reworded, goes STALE even when its
-own text is untouched; a `file` ref has no ancestor chain and is unaffected. Because `reconcile`
+own text is untouched; a `file` ref has no ancestor chain and is unaffected. The chain covers
+every heading form GitHub assigns an id to, so a setext, indented, or nested parent supplies
+context to the sections under it just as a column-zero ATX one does. Because `reconcile`
 writes only `seen`, and `seen` lives inside frontmatter, a reconcile write can never change any
 target's hash. That is what lets `reconcile --all` converge in one pass over a stable snapshot:
 acknowledging one edge cannot invalidate another. Convergence covers the reconcilable edges
@@ -644,7 +646,15 @@ GitHub heading inventory, and an `AMBIGUOUS` finding can name a heading that own
 its own. Such a member is still the thing to change: reword it, or reword the addressable heading
 it collides with. Adding a `{#anchor}` marker to it does nothing, because the marker is only read
 on an addressable heading; adding one to the *addressable* member does fix the edge, by making
-that id reword-stable. Heading and fence recognition is pinned to
+that id reword-stable.
+
+Nor does it put a heading outside a descendant's drift context. The ancestor chain folded into a
+section's hash is derived by heading level over that same full inventory, so a section nested
+under a setext, indented, or otherwise non-addressable parent still carries that parent as
+context and still goes STALE when it is reworded. Every ancestor is rendered in one normalized
+ATX spelling whatever form it was written in, so rewriting a parent from setext to ATX at the
+same level does not restale the sections under it. Such a heading owns no lattice id either way.
+Heading and fence recognition is pinned to
 `markdown-it-py==4.2.0`; generated slugs and document-order duplicate suffixes target
 `github-slugger@2.0.0` under JavaScript Unicode 17.0. Generated lowercase patches and contextual
 casing-property tables bridge the minimum supported Python 3.13 Unicode 15.1 table to that target.

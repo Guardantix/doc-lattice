@@ -35,11 +35,12 @@ class CollisionMemberModel(BaseModel):
 
 
 class SectionRecordModel(BaseModel):
-    """The serialized form of one anchored section span and its collision provenance.
+    """The serialized form of one anchored section span, its ancestor context, and collisions.
 
-    ``collision`` is defaulted rather than required, unlike ``Entry.disposition``, because a
-    section that is in no component genuinely has none to record and a default of None cannot be
-    read as a silent drop. Entries written before the field existed are discarded by the
+    ``collision`` and ``context`` are both defaulted rather than required, unlike
+    ``Entry.disposition``, because a section that is in no component genuinely has no members to
+    record and a top-level section genuinely has no ancestors, and neither empty default can be
+    read as a silent drop. Entries written before either field existed are discarded by the
     ``CACHE_VERSION`` bump that lands with it, never reinterpreted.
     """
 
@@ -49,6 +50,7 @@ class SectionRecordModel(BaseModel):
     start: int
     end: int
     collision: list[CollisionMemberModel] | None = None
+    context: list[str] = []
 
 
 class NodePayload(BaseModel):
@@ -134,6 +136,7 @@ def reconstruct_doc(entry: Entry, path: Path) -> ParsedDoc | None:
                     if r.collision is None
                     else tuple(CollisionMember(label=m.label, line=m.line) for m in r.collision)
                 ),
+                context=tuple(r.context),
             )
             for r in node.sections
         ),
@@ -180,6 +183,7 @@ def make_entry(  # noqa: PLR0913
                         if r.collision is None
                         else [CollisionMemberModel(label=m.label, line=m.line) for m in r.collision]
                     ),
+                    context=list(r.context),
                 )
                 for r in sections.sections
             ],
