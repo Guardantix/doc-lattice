@@ -84,7 +84,7 @@ otherwise. Inspect it and decide deliberately rather than running the create cal
 ### 1. Scaffold the config and the offline workflow
 
 ```bash
-uvx --python 3.13 --from doc-lattice==7.0.0 doc-lattice init --default-branch main
+uvx --python 3.13 --from doc-lattice==6.0.0 doc-lattice init --default-branch main
 ```
 
 Plain `init` writes `.doc-lattice.yml` when it is absent and prints three blocks: the
@@ -154,7 +154,7 @@ jobs:
         run: |
           uv python install 3.13
           uv venv --python 3.13 "$RUNNER_TEMP/doc-lattice-venv"
-          uv pip install --python "$RUNNER_TEMP/doc-lattice-venv/bin/python" doc-lattice==7.0.0
+          uv pip install --python "$RUNNER_TEMP/doc-lattice-venv/bin/python" doc-lattice==6.0.0
       - name: Run trusted Linear gate
         env:
           LINEAR_API_KEY: ${{ secrets.DOC_LATTICE_LINEAR_API_KEY }}
@@ -303,7 +303,7 @@ annotated input state first and run from an otherwise clean working tree, so the
 diff stays reviewable and revertible:
 
 ```bash
-uvx --python 3.13 --from doc-lattice==7.0.0 doc-lattice reconcile --all
+uvx --python 3.13 --from doc-lattice==6.0.0 doc-lattice reconcile --all
 ```
 
 A conversion from an existing installation skips the baseline. When it applies, what the clean-tree
@@ -463,7 +463,7 @@ narrower sense than it first looks:
   something derives from therefore populates the trigger set with no drift anywhere in the lattice:
 
   ```bash
-  uvx --python 3.13 --from doc-lattice==7.0.0 doc-lattice linear --from SOME_UPSTREAM_ID
+  uvx --python 3.13 --from doc-lattice==6.0.0 doc-lattice linear --from SOME_UPSTREAM_ID
   ```
 
   On a fully reconciled lattice with no key, the gate's own command reports `no stale-shipped
@@ -490,7 +490,7 @@ narrower sense than it first looks:
   ```bash
   venv="$(mktemp -d)/venv"
   uv venv --python 3.13 "$venv"
-  uv pip install --python "$venv/bin/python" doc-lattice==7.0.0
+  uv pip install --python "$venv/bin/python" doc-lattice==6.0.0
   ```
 
   Then supply the key and run `"$venv/bin/doc-lattice" linear --from SOME_UPSTREAM_ID`, which is
