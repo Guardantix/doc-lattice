@@ -7,7 +7,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from pydantic import ValidationError as PydanticValidationError
 
 import doc_lattice.config as config_module
-from doc_lattice.config import Config, load_config
+from doc_lattice.config import Config, declares_lattice_format, load_config
 from doc_lattice.error_types import ConfigError
 from doc_lattice.path_utils import format_path_for_display
 from doc_lattice.yaml_boundary import YAML_LOAD_ERRORS
@@ -577,3 +577,39 @@ def test_a_pre_v7_config_model_rejects_the_key():
 
     with pytest.raises(PydanticValidationError):
         PreV7Config.model_validate({"docs_roots": ["docs"], "lattice_format": 2})
+
+
+@pytest.mark.parametrize(
+    ("label", "contents", "expected"),
+    [
+        ("declared", "lattice_format: 2\ndocs_roots:\n  - docs\n", True),
+        ("wrong-value-still-declared", "lattice_format: 1\n", True),
+        ("omitted", "docs_roots:\n  - docs\n", False),
+        ("empty", "", False),
+        ("unparseable", "docs_roots: [unclosed\n", None),
+        ("not-a-mapping", "- docs\n", None),
+        ("scalar", "SENTINEL\n", None),
+    ],
+)
+def test_declares_lattice_format_answers_only_what_it_can(
+    tmp_path: Path, label: str, contents: str, expected: bool | None
+):
+    path = tmp_path / ".doc-lattice.yml"
+    path.write_text(contents, encoding="utf-8")
+
+    assert declares_lattice_format(path) is expected, label
+
+
+def test_declares_lattice_format_reports_a_wrong_value_as_declared(tmp_path: Path):
+    # Presence is the whole test. load_config owns the wrong-value diagnostic, and answering it
+    # here as well would mean two commands disagreeing about which one refuses a config.
+    path = tmp_path / ".doc-lattice.yml"
+    path.write_text("lattice_format: 99\n", encoding="utf-8")
+
+    assert declares_lattice_format(path) is True
+    with pytest.raises(ConfigError, match="not a format this engine reads"):
+        load_config(path, tmp_path)
+
+
+def test_declares_lattice_format_is_none_for_a_missing_file(tmp_path: Path):
+    assert declares_lattice_format(tmp_path / "absent.yml") is None

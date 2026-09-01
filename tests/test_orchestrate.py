@@ -576,3 +576,45 @@ def test_the_misplacement_warning_replays_on_every_cache_tier(tmp_path: Path, mo
 
     assert messages[0] == messages[1] == messages[2]
     assert any("misplaced doc-lattice envelope" in message for message in messages[0])
+
+
+def test_the_shadowed_envelope_warning_replays_on_every_cache_tier(tmp_path: Path, monkeypatch):
+    # The tracked half of the same contract: the file is a node, so the diagnostic rides beside
+    # the disposition rather than replacing it, and the cache has to carry it either way.
+    monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path / "cache"))
+    docs = tmp_path / "docs"
+    docs.mkdir()
+    (docs / "half.md").write_text(
+        "---\nid: half\n---\n# Title\n\n<!-- doc-lattice\nid: other\n-->\n", encoding="utf-8"
+    )
+    (tmp_path / ".doc-lattice.yml").write_text(
+        "lattice_format: 2\ndocs_roots:\n  - docs\ncache_key: shadow\ncache_trust_stat: true\n",
+        encoding="utf-8",
+    )
+    project = load_config(None, tmp_path)
+
+    messages = []
+    for _ in range(3):
+        with warnings.catch_warnings(record=True) as captured:
+            warnings.simplefilter("always")
+            lattice = load_lattice(project)
+        messages.append([str(entry.message) for entry in captured])
+
+    # Tracked under the fence's id on every tier, not the envelope's.
+    assert set(lattice.nodes_by_id) == {"half"}
+    assert messages[0] == messages[1] == messages[2]
+    assert any("shadowed doc-lattice envelope" in message for message in messages[0])
+
+
+def test_the_shadowed_and_misplaced_warnings_are_separately_filterable():
+    # README documents PYTHONWARNINGS=ignore:misplaced as targeting exactly one diagnostic, and
+    # that filter matches on a message prefix. The two envelope warnings therefore have to open
+    # with different words, or silencing one silently silences the other.
+    with warnings.catch_warnings(record=True) as captured:
+        warnings.simplefilter("always")
+        orchestrate._report_misplaced_envelope("misplaced-envelope", Path("a.md"))
+        orchestrate._report_shadowed_envelope(True, Path("b.md"))
+
+    first, second = (str(entry.message) for entry in captured)
+    assert first.startswith("misplaced ")
+    assert second.startswith("shadowed ")

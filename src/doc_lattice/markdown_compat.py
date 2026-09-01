@@ -144,10 +144,12 @@ _PARSER = MarkdownIt("commonmark")
 # this module reads only block structure: heading source lines, an inline token's raw ``content``,
 # and code-block spans. The ``inline`` core rule fills each inline token's ``children`` with a
 # second tokenization of every paragraph in the document, which nothing here reads, and it is the
-# dominant cost of a full parse. Disabling it leaves ``Token.type``, ``Token.map``, and
+# dominant cost of a full parse. ``text_join`` is disabled with it because its only job is to
+# merge adjacent text tokens inside those children, so with ``inline`` off it walks every token in
+# the document to do nothing. Disabling both leaves ``Token.type``, ``Token.map``, and
 # ``Token.content`` untouched, so the derived values are byte-identical.
 _BLOCK_PARSER = MarkdownIt("commonmark")
-_BLOCK_PARSER.core.ruler.disable("inline")
+_BLOCK_PARSER.core.ruler.disable(["inline", "text_join"])
 
 
 def extract_headings(body: str) -> list[Heading]:

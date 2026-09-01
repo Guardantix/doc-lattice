@@ -11,7 +11,8 @@ import typer
 from rich.markup import escape
 
 from ... import __version__
-from ...config import DEFAULT_CONFIG_NAME
+from ...config import DEFAULT_CONFIG_NAME, declares_lattice_format
+from ...constants import LATTICE_FORMAT_VERSION
 from ...error_types import InitPersistenceError, ValidationError, copy_exception_notes
 from ...linear_query import is_valid_team_key
 from ...path_utils import format_path_for_display
@@ -347,6 +348,36 @@ def _nested_scaffold_error(ancestor: Path) -> ValidationError:
     )
 
 
+def _report_pre_v7_config(runtime: CliRuntime, target: Path) -> None:
+    """Say why the config left untouched will not load, when that is why it was left.
+
+    ``init`` reports rather than repairs. Its whole persistence design is create-only, down to
+    publishing through ``os.link``, which cannot replace a destination; adding the key here would
+    give the command a write path over a file the user owns and this one never wrote. The
+    adopter edits the file, as the 7.0.0 migration instructs.
+
+    Reporting is still worth doing, because the alternative is the failure this closes: a run
+    that narrates a full success while every other command in the repository exits 2, and names
+    nothing that connects the two.
+
+    Args:
+        runtime: The invocation's output streams.
+        target: The existing config, which the caller established is there by failing to create
+            it.
+    """
+    if declares_lattice_format(target) is not False:
+        return
+    runtime.stderr.print(
+        f"[yellow]warning[/yellow]: {escape(format_path_for_display(target.name))} does not "
+        f"declare 'lattice_format: {LATTICE_FORMAT_VERSION}', so doc-lattice {__version__} "
+        "refuses to load it. Add the key as the first line, then follow the 7.0.0 migration in "
+        "CHANGELOG.md; init does not edit a config it did not write.",
+        soft_wrap=True,
+        emoji=False,
+        highlight=False,
+    )
+
+
 def _scaffold_config(runtime: CliRuntime, config_text: str) -> None:
     """Create the config in the invocation directory, or report why it was not written.
 
@@ -386,9 +417,11 @@ def _scaffold_config(runtime: CliRuntime, config_text: str) -> None:
     # existing config and exited 0. A collision that orphaned its stage keeps the plain type
     # and falls to the arm below with everything else, since the orphan is a real failure
     # whatever collided. Both abnormal branches carry INIT_PERSISTENCE rather than
-    # CONFIG_ERROR: the defect is in the directory being scaffolded, and init never reads
-    # .doc-lattice.yml, so naming config sent the user to a file that had nothing to do with
-    # the failure.
+    # CONFIG_ERROR: the defect is in the directory being scaffolded, and init's write path never
+    # reads .doc-lattice.yml, so naming config sent the user to a file that had nothing to do
+    # with the failure. `_report_pre_v7_config` does read it, but only on the benign arm and
+    # only to narrate; it swallows every read and parse failure rather than reclassifying one of
+    # these, so neither error's provenance changes.
     # Both arms print with soft_wrap=True for the one-record-per-line contract every other
     # renderer and adapter carries: a status record stays on one physical line at any terminal
     # width rather than hard-wrapping mid-token into a fragment. That is a property of being a
@@ -400,6 +433,7 @@ def _scaffold_config(runtime: CliRuntime, config_text: str) -> None:
             f"{escape(format_path_for_display(target.name))} already exists, leaving it untouched",
             soft_wrap=True,
         )
+        _report_pre_v7_config(runtime, target)
     except OSError as exc:
         raise _init_persistence_error(target.name, exc) from exc
     else:

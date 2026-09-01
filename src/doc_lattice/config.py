@@ -1,6 +1,7 @@
 """Load and validate .doc-lattice.yml, with project-root containment of docs_roots."""
 
 import re
+from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -156,6 +157,37 @@ def load_config(config_path: Path | None, cwd: Path) -> ProjectConfig:
 
     roots = _resolve_roots(config.docs_roots, project_root)
     return ProjectConfig(config=config, project_root=project_root, resolved_roots=roots)
+
+
+def declares_lattice_format(path: Path) -> bool | None:
+    """Report whether an existing config already carries the ``lattice_format`` key.
+
+    A narrow question asked by ``init``, which scaffolds rather than loads: it needs to tell an
+    adopter that the config already in place predates this engine, and it has no other reason to
+    read the file. Answering it through ``load_config`` instead would validate the whole config
+    and raise on every unrelated defect, turning a scaffold run into a config gate.
+
+    The key's presence is the whole test. A wrong value is a different diagnostic, and
+    ``load_config`` is the surface that owns it; reporting it from here as well would mean two
+    commands disagreeing about which one refuses a config.
+
+    Args:
+        path: The existing config file, which the caller has already established is there.
+
+    Returns:
+        True or False for a config this can read, and None when it cannot be read, cannot be
+        parsed, or does not hold a mapping at its top level. The caller stays silent on None
+        rather than reporting: an unreadable config is a real failure, but it is the failure
+        every loading command already reports with the context to act on, and ``init`` writes
+        nothing that depends on the answer.
+    """
+    try:
+        data = _read_yaml(path)
+    except ConfigError:
+        return None
+    if not isinstance(data, Mapping):
+        return None
+    return "lattice_format" in data
 
 
 def _format_validation_error(exc: ValidationError, source: Path | None) -> str:

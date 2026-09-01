@@ -286,11 +286,18 @@ class ParsedMeta:
     caller to report. It is defaulted, unlike the cached form in ``cache.schema.Entry``, so the
     node-free outcomes stay shareable singletons. It is only ever set on a tracked node, because
     a rebound alias in a file the lattice does not hold changes no edge.
+
+    ``shadowed_envelope`` is the third of that kind, and is likewise only ever set on a tracked
+    node. It records that a file tracked under its ``---`` fence also carries a comment envelope
+    below it, which is inert body text. It cannot be a ``disposition`` instead, because the file
+    genuinely is tracked and ``meta`` is not None exactly when the disposition says so; the
+    envelope's fate is an orthogonal fact about the same file.
     """
 
     meta: NodeMeta | None
     disposition: FrontmatterDisposition
     reused_anchors: bool = False
+    shadowed_envelope: bool = False
 
 
 @dataclass(frozen=True, slots=True)

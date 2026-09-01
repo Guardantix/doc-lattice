@@ -17,7 +17,7 @@ from ...constants import VALID_EDGE_STATES, VALID_REPORT_FORMATS
 from ...model import format_collision
 from ...report_render import render_statuses
 from ..errors import EXIT_FINDING, EXIT_TOOL_ERROR, exit_on_project_error
-from ..github import write_annotations
+from ..github import Annotation, write_annotations
 from ..options import ConfigOpt, IndentOpt, ReportFormatOpt
 from ..output import select_output, write_json
 from ..runtime import CliRuntime, get_runtime
@@ -115,7 +115,7 @@ def register_check(app: typer.Typer) -> None:
             write_annotations(
                 runtime,
                 (
-                    (
+                    Annotation(
                         lattice.nodes_by_id[status.source_id].path,
                         f"doc-lattice {status.state}",
                         f"{status.source_id} -> {status.target_ref} is {status.state}"

@@ -24,7 +24,6 @@ __all__ = [
     "github_slug",
     "section_spans",
     "section_text",
-    "section_text_from_lines",
     "split_body_lines",
 ]
 
@@ -155,24 +154,7 @@ def section_text(body: str, span: tuple[int, int]) -> str:
         The joined lines of the span, with the anchor marker stripped from the first
         heading line.
     """
-    return section_text_from_lines(split_body_lines(body), span)
-
-
-def section_text_from_lines(lines: list[str], span: tuple[int, int]) -> str:
-    """Return section text from already-split lines, for callers that split once.
-
-    Equivalent to ``section_text`` but skips re-splitting a body a caller has already
-    split, such as one that also needs the same lines for another lookup (ancestor
-    heading lines, for example).
-
-    Args:
-        lines: The document's lines, as returned by ``split_body_lines``.
-        span: Inclusive 1-indexed ``(start, end)`` line range.
-
-    Returns:
-        The joined lines of the span, with the anchor marker stripped from the first
-        heading line.
-    """
+    lines = split_body_lines(body)
     start, end = span
     chunk = lines[start - 1 : end]
     if chunk:

@@ -15,6 +15,7 @@ def _entry(*roots: str) -> Entry:
         node=None,
         disposition="untracked",
         reused_anchors=False,
+        shadowed_envelope=False,
     )
 
 

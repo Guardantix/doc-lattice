@@ -7,7 +7,7 @@ warm-cache paths can all warn from a single site.
 
 import re
 import warnings
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
 
@@ -370,11 +370,23 @@ def parse_document(text: str, source: Path) -> tuple[ParsedMeta, str]:
     ``--`` refusal is measured against the file's own line numbers, which only the split knows,
     and the fail-closed classification needs the envelope kind, which only the split derives.
 
-    A file whose parse found no node runs the misplaced-envelope scan over its body, whether that
-    is because it opened no envelope at all or because it opened a fence that declared no ``id``
-    (Jekyll frontmatter, say) ahead of a comment envelope the fence's own scan never reaches. A
-    tracked file never runs it: line 1's own scan already covers the comment kind, and a fence
-    that resolved to a node is not missing anything for the scan to find.
+    Every file whose fence did not itself open a comment envelope runs the misplaced-envelope
+    scan over what is left. What differs is the verdict, not whether the scan runs.
+
+    A file whose parse found no node is reclassified ``"misplaced-envelope"``, whether that is
+    because it opened no envelope at all or because it opened a fence that declared no ``id``
+    (Jekyll frontmatter, say) ahead of a comment envelope the fence's own scan never reaches.
+
+    A file whose fence did resolve to a node stays ``"tracked"`` and carries
+    ``shadowed_envelope`` instead. It cannot be reclassified: it is a node, under the fence's
+    metadata, and the envelope below it is body text. That is precisely the half-converted state
+    the 7.0.0 migration warns about, so leaving it undiagnosed meant the one conversion mistake
+    the migration names in prose was also the one the engine said nothing about.
+
+    The scan's own rules are what make it safe to run over a tracked file's prose:
+    ``_OPENER_NEAR_MISS`` is a ``fullmatch``, so only a line that is nothing but the opener
+    counts, and ``code_block_line_spans`` already excludes fenced and indented code, which is
+    where a document quoting the envelope form puts it.
 
     Args:
         text: The full file text, already newline-normalized by ``discovery.decode_doc``.
@@ -384,7 +396,8 @@ def parse_document(text: str, source: Path) -> tuple[ParsedMeta, str]:
         The parse outcome and the document body after the envelope. The outcome is
         ``"misplaced-envelope"`` in place of ``"untracked"`` or ``"id-less"`` when the document,
         or the body left after an untracked or id-less fence, carries the comment opener (or a
-        near-miss spelling of it) outside every code block.
+        near-miss spelling of it) outside every code block; a tracked outcome carries
+        ``shadowed_envelope`` for the same condition in its body.
 
     Raises:
         UnreadableDocError: If an opening delimiter has no closing delimiter, or the YAML
@@ -404,9 +417,13 @@ def parse_document(text: str, source: Path) -> tuple[ParsedMeta, str]:
             first_body_line=text[: parts.meta_start].count("\n") + 1,
         )
     outcome = parse_meta(parts.raw_meta, source, kind=parts.kind)
-    if outcome.meta is None and detect_misplaced_envelope(parts.body):
+    # A comment envelope consumed the top of the file, so anything below it that looks like an
+    # opener is the author quoting the form, not a second envelope competing with the first.
+    if parts.kind == "comment" or not detect_misplaced_envelope(parts.body):
+        return outcome, parts.body
+    if outcome.meta is None:
         return _MISPLACED, parts.body
-    return outcome, parts.body
+    return replace(outcome, shadowed_envelope=True), parts.body
 
 
 def _load_recording_reused_anchors(raw_meta: str) -> tuple[Any, bool]:

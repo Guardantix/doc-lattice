@@ -74,7 +74,7 @@ is out of date."
 | **STALE** | The upstream changed since `seen` was locked. The downstream needs review. |
 | **UNRECONCILED** | The edge has no `seen` yet. The dependency was declared but never acknowledged. |
 | **BROKEN** | The ref points at an id that no longer exists. |
-| **AMBIGUOUS** | The ref resolves, but its target id sits in a slug-collision component, so document order can hand that id to a different heading. `check` exits 1, `reconcile` refuses to write `seen`, and every command names the colliding headings. |
+| **AMBIGUOUS** | The ref resolves, but its target id sits in a slug-collision component, so document order can hand that id to a different heading. `check` exits 1, `reconcile` refuses to write `seen`, and every command names the colliding headings. `lint` reports it without gating on it, so its GitHub annotation for an ambiguous edge is a `::warning` where `check`'s is an `::error`. |
 
 The content hash is `sha256` of a *canonicalized* copy of the text, truncated to 128 bits.
 Canonicalization normalizes line endings, strips trailing whitespace per line, and trims
@@ -130,6 +130,11 @@ An edge whose source or target declares no `authority` cannot be ranked. `lint` 
 unranked rather than as a violation, so it never fails the gate. Every human run ends with a
 coverage line counting violations and unranked edges, and `--format json` carries the same edges
 in a `skipped` array with a `source-unannotated` or `target-unannotated` reason.
+
+Ambiguity is the third thing `lint` reports and the one it does not gate on. An ambiguous edge
+adds a row above the findings, a count to the end of that coverage line, and an `ambiguous`
+array to `--format json`, but never changes the exit code: that stays the ladder's alone, and
+`check` is the command that fails a lattice for ambiguity.
 
 ## A worked example
 
@@ -589,6 +594,7 @@ wrote, because silently dropping a file also silently drops every edge it declar
 | Fenced with an id-less mapping declaring any of `derives_from`, `authority`, or `tickets` | A tool error naming the file and the keys it declared. Exits 2. |
 | Line 1 nearly spells `<!-- doc-lattice` (indented, trailing space, different case) | A tool error naming the file. Exits 2, rather than being read as prose, so a typo cannot silently drop the node. |
 | Carries `<!-- doc-lattice` below line 1, outside any code block | Not a node, with a `misplaced doc-lattice envelope` warning on stderr naming the file. The exit status is unchanged. |
+| Tracked by a `---` fence *and* carries `<!-- doc-lattice` below it, outside any code block | A node under the fence's metadata, with a `shadowed doc-lattice envelope` warning on stderr naming the file. The envelope is body text and its metadata is ignored. The exit status is unchanged. |
 | Opens `<!-- doc-lattice`, but the body is not a mapping carrying `id` | A tool error naming the file. Exits 2; the comment envelope has no untracked or id-less tier. |
 
 The first row is about *both* envelopes: a file with no `---` fence can still be a tracked node
@@ -610,9 +616,10 @@ apply, but neither available form targets it precisely. `PYTHONWARNINGS=ignore` 
 warning the run emits. `PYTHONWARNINGS=ignore:skipping` looks narrower and is not: that field is a
 literal message prefix rather than a regular expression, and the warning for a document symlinked
 outside the project root opens with the same `skipping ` prefix, so filtering on it hides that one
-too. The misplaced-envelope warning is the one case the prefix form does target, because it
-deliberately opens `misplaced ` rather than `skipping `: `PYTHONWARNINGS=ignore:misplaced` silences
-it and nothing else. The report is identical whether the load was accelerated by the
+too. The two envelope warnings are the cases the prefix form does target, because each deliberately
+opens with its own word rather than `skipping `: `PYTHONWARNINGS=ignore:misplaced` silences the
+misplaced-envelope warning and nothing else, and `PYTHONWARNINGS=ignore:shadowed` does the same
+for the shadowed-envelope one. Neither silences the other. The report is identical whether the load was accelerated by the
 [load cache](#load-cache-opt-in) or not.
 
 An escalating filter is supported the same way. Under `PYTHONWARNINGS=error` (or `-W error`)
@@ -699,7 +706,11 @@ CHANGELOG's migration section. A zero-config run (no `.doc-lattice.yml` anywhere
 that error, since there is no file to declare the key in -- not because there is nothing to skew
 against; see [CHANGELOG.md](https://github.com/Guardantix/doc-lattice/blob/main/CHANGELOG.md)'s
 7.0.0 migration for what a zero-config upgrade from 6.x sees instead. `init` writes the key for
-you, as the leading line of the active block, which is why it is not commented out above. The
+you into the config it generates, as the leading line of the active block, which is why it is not
+commented out above. It writes only that config: run against a directory that already holds one,
+`init` leaves the existing file untouched, as it always has, and reports that the config predates
+this engine rather than editing it. Adding the key to a config `init` did not write is yours to
+do, per CHANGELOG's migration. The
 other commented keys are the optional ones:
 `ignore_globs` lists paths to skip within the roots, `cache_key` and `cache_trust_stat` are the
 opt-in load cache described below, and `linear_team` names the team the `linear` query targets.

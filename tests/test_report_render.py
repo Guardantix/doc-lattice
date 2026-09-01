@@ -210,6 +210,45 @@ def test_render_lint_writes_violations_and_exact_skip_summary():
     )
 
 
+def test_render_lint_names_the_ambiguous_count_in_the_summary():
+    # A run that printed ambiguity rows and then summarized only the ladder read as clean on the
+    # one line most likely to be quoted out of it. The count stays outside the ladder total,
+    # which is what lint's exit code answers for.
+    console, output = _recording_console()
+    result = LintResult(
+        violations=(),
+        skipped=(),
+        ambiguous=(
+            EdgeStatus(
+                source_id="down",
+                target_ref="up#notes",
+                target_id=TargetId("up#notes"),
+                state="AMBIGUOUS",
+                expected=None,
+                actual=None,
+                collision=(
+                    CollisionMember(label="Notes", line=4),
+                    CollisionMember(label="Notes", line=6),
+                ),
+            ),
+        ),
+    )
+
+    render_lint(console, result)
+
+    summary = output.getvalue().splitlines()[-1]
+
+    assert summary == "0 ladder violations, 0 edges unranked, 1 ambiguous"
+
+
+def test_render_lint_omits_the_ambiguous_clause_when_there_is_none():
+    console, output = _recording_console()
+
+    render_lint(console, LintResult(violations=(), skipped=(), ambiguous=()))
+
+    assert output.getvalue() == "0 ladder violations, 0 edges unranked\n"
+
+
 def test_render_lint_keeps_every_line_on_one_line_at_any_width():
     # Same contract as render_statuses: a violation's id/ref survives a pipe at any width,
     # and the skip summary (no id/ref of its own) still gets soft_wrap for a consistent

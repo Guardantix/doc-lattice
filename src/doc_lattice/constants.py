@@ -126,7 +126,7 @@ C1_CONTROL_MAX: int = 0x9F
 # releases.
 # MAX_STAT_ROOTS bounds the per-root stat ledger. CACHE_FILE_NAME is the single JSON document under
 # the cache slot.
-CACHE_VERSION: int = 6
+CACHE_VERSION: int = 7
 MAX_STAT_ROOTS: int = 8
 CACHE_FILE_NAME: str = "load-cache.json"
 
@@ -174,10 +174,12 @@ RECONCILE_JOURNAL_LEGACY_VERSION: Literal[1] = 1
 # The lattice format this engine reads, declared as `lattice_format` in `.doc-lattice.yml` and
 # required there from 7.0. Both skew directions fail loud with no cooperation from code that
 # predates the feature: a v7 engine refuses a config that omits the key, and every pre-v7 engine
-# refuses one that carries it, because `Config` is `strict=True, extra="forbid"`. Literal-typed
-# because `Config` pins the field to this exact value. The hash scheme is deliberately not
-# versioned separately: the config boundary is the guard, and a second version channel would be
-# redundant surface (AD-15 spirit).
+# refuses one that carries it, because `Config` is `strict=True, extra="forbid"`. Literal-typed so
+# the one accepted value is a type rather than a magic number; `Config.lattice_format` stays
+# `int | None` and holds the field to it in a validator, which is what lets a config naming
+# another format be reported as that format rather than as a shape error. The hash scheme is
+# deliberately not versioned separately: the config boundary is the guard, and a second version
+# channel would be redundant surface (AD-15 spirit).
 LATTICE_FORMAT_VERSION: Literal[2] = 2
 PERSISTENCE_TEMP_SUFFIX: str = ".tmp"
 RECONCILE_BEFORE_IMAGE_INFIX: str = ".doc-lattice-before."

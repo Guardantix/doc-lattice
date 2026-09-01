@@ -48,6 +48,7 @@ def _sample_cache_file() -> CacheFile:
                 ),
                 disposition="tracked",
                 reused_anchors=False,
+                shadowed_envelope=False,
             ),
             "docs/plain.md": Entry(
                 file_sha256="b" * 64,
@@ -55,6 +56,7 @@ def _sample_cache_file() -> CacheFile:
                 node=None,
                 disposition="untracked",
                 reused_anchors=False,
+                shadowed_envelope=False,
             ),
             "docs/id-less.md": Entry(
                 file_sha256="c" * 64,
@@ -62,6 +64,7 @@ def _sample_cache_file() -> CacheFile:
                 node=None,
                 disposition="id-less",
                 reused_anchors=False,
+                shadowed_envelope=False,
             ),
         },
     )
@@ -140,7 +143,22 @@ def test_entry_requires_every_replayed_diagnostic_rather_than_defaulting_one() -
         )
 
     missing = {error["loc"] for error in exc.value.errors() if error["type"] == "missing"}
-    assert missing == {("disposition",), ("reused_anchors",)}
+    assert missing == {("disposition",), ("reused_anchors",), ("shadowed_envelope",)}
+
+
+def test_entry_round_trips_a_shadowed_envelope_flag() -> None:
+    # The cached half of the shadowed-envelope diagnostic. Without it a warm run would go quiet
+    # about a file whose fence is silently outranking the envelope below it.
+    entry = Entry(
+        file_sha256="e" * 64,
+        stats={ROOT: StatRecord(size=9, mtime_ns=2)},
+        node=None,
+        disposition="untracked",
+        reused_anchors=False,
+        shadowed_envelope=True,
+    )
+
+    assert Entry.model_validate_json(entry.model_dump_json()).shadowed_envelope is True
 
 
 def test_entry_round_trips_a_reused_anchor_flag() -> None:
@@ -152,6 +170,7 @@ def test_entry_round_trips_a_reused_anchor_flag() -> None:
         node=None,
         disposition="untracked",
         reused_anchors=True,
+        shadowed_envelope=False,
     )
 
     assert Entry.model_validate_json(entry.model_dump_json()).reused_anchors is True
@@ -171,6 +190,7 @@ def test_reconstruct_doc_rebuilds_parsed_doc_at_supplied_path() -> None:
         ),
         disposition="tracked",
         reused_anchors=False,
+        shadowed_envelope=False,
     )
 
     assert reconstruct_doc(entry, path) == ParsedDoc(
@@ -191,6 +211,7 @@ def test_reconstruct_doc_non_node_returns_none() -> None:
         node=None,
         disposition="untracked",
         reused_anchors=False,
+        shadowed_envelope=False,
     )
     assert reconstruct_doc(entry, Path("docs/plain.md")) is None
 
@@ -275,5 +296,5 @@ def test_ancestor_context_round_trips_through_the_cache():
     assert doc.sections.sections == sections.sections
 
 
-def test_the_cache_version_is_six():
-    assert CACHE_VERSION == 6
+def test_the_cache_version_is_seven():
+    assert CACHE_VERSION == 7

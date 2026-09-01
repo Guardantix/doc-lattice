@@ -31,16 +31,18 @@ class LookupPolicy:
 class CacheHit:
     """A tier hit and any stat fact learned while verifying content.
 
-    ``doc`` is the reconstructed ParsedDoc, or None for a cached non-node. ``disposition`` and
-    ``reused_anchors`` replay what the parse that filled this entry concluded, so a hit can be
-    reported exactly as the miss that produced it was. Both tiers carry both, since a hit is no
-    quieter for having been cheap to reach. A verify-tier hit carries ``refreshed_stat`` from
-    the same file handle as the verified bytes; a stat-tier hit leaves it as None.
+    ``doc`` is the reconstructed ParsedDoc, or None for a cached non-node. ``disposition``,
+    ``reused_anchors``, and ``shadowed_envelope`` replay what the parse that filled this entry
+    concluded, so a hit can be reported exactly as the miss that produced it was. Both tiers
+    carry all three, since a hit is no quieter for having been cheap to reach. A verify-tier hit
+    carries ``refreshed_stat`` from the same file handle as the verified bytes; a stat-tier hit
+    leaves it as None.
     """
 
     doc: ParsedDoc | None
     disposition: FrontmatterDisposition
     reused_anchors: bool
+    shadowed_envelope: bool
     refreshed_stat: StatRecord | None = None
 
 
@@ -77,6 +79,7 @@ def resolve(entry: Entry | None, path: Path, policy: LookupPolicy) -> CacheHit |
             doc=reconstruct_doc(entry, path),
             disposition=entry.disposition,
             reused_anchors=entry.reused_anchors,
+            shadowed_envelope=entry.shadowed_envelope,
             refreshed_stat=stat_record(st),
         )
     return CacheMiss(data=data, stat=st)
@@ -97,4 +100,5 @@ def _stat_tier(entry: Entry, path: Path, current_root: str) -> CacheHit | None:
         doc=reconstruct_doc(entry, path),
         disposition=entry.disposition,
         reused_anchors=entry.reused_anchors,
+        shadowed_envelope=entry.shadowed_envelope,
     )

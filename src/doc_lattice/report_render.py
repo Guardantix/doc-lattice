@@ -30,7 +30,15 @@ _STATE_COLORS: dict[EdgeState, str] = {
 
 
 def _skip_summary(result: LintResult) -> str:
-    """Render the one-line coverage summary printed after any human lint run."""
+    """Render the one-line coverage summary printed after any human lint run.
+
+    The ambiguous count is appended only when it is non-zero, the way the unranked breakdown
+    already is. Naming it matters because this is the line a reader tails: a run that printed
+    ambiguity rows above and then summarized only the ladder read as clean on the one line most
+    likely to be quoted out of the run. It stays outside the ``ladder`` count rather than folded
+    into it, because this command does not gate on ambiguity and that number is what its exit
+    code answers for.
+    """
     violations = len(result.violations)
     unranked = len(result.skipped)
     targets = sum(1 for skipped in result.skipped if skipped.reason == "target-unannotated")
@@ -39,6 +47,8 @@ def _skip_summary(result: LintResult) -> str:
     line = f"{violations} ladder {label}, {unranked} edges unranked"
     if unranked:
         line += f" ({targets} target unannotated, {sources} source unannotated)"
+    if result.ambiguous:
+        line += f", {len(result.ambiguous)} ambiguous"
     return line
 
 

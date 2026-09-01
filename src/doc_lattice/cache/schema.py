@@ -77,6 +77,11 @@ class Entry(BaseModel):
     ``reused_anchors`` is required for the same reason and records the same kind of fact: the
     parse noticed a frontmatter block defining one anchor name twice, and a warm run has to say
     so too or the diagnostic would exist only on the run that first read the file.
+
+    ``shadowed_envelope`` is the third such field, required on the same grounds: the parse
+    noticed that a file tracked under its ``---`` fence also carries a comment envelope in its
+    body. It cannot be folded into ``disposition``, which is ``"tracked"`` for exactly these
+    files, so it travels beside it.
     """
 
     model_config = ConfigDict(extra="forbid")
@@ -86,6 +91,7 @@ class Entry(BaseModel):
     node: NodePayload | None
     disposition: FrontmatterDisposition
     reused_anchors: bool
+    shadowed_envelope: bool
 
 
 class CacheFile(BaseModel):
@@ -194,4 +200,5 @@ def make_entry(  # noqa: PLR0913
         node=node,
         disposition=parsed.disposition,
         reused_anchors=parsed.reused_anchors,
+        shadowed_envelope=parsed.shadowed_envelope,
     )

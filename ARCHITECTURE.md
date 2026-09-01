@@ -2226,6 +2226,19 @@ opener is therefore itself a near-miss error rather than a silently accepted var
 accepted and rejected byte form is pinned by a renderer-parity test rather than inherited from the
 fence grammar by analogy.
 
+**Both halves of a half-finished conversion are reported.** The opener is read only as line 1, so
+a file that gains the envelope without losing the fence it has to displace is a conversion that
+silently did nothing. Which diagnostic that earns depends on whether the fence resolved. A file
+whose fence produced no node is reclassified `misplaced-envelope` and is not a node at all. A file
+whose fence *did* resolve stays tracked, under the fence's metadata, with the envelope below it
+read as body text; that cannot be a disposition, since the file genuinely is a node, so it travels
+as a `shadowed_envelope` flag beside the disposition, the way a reused anchor already does, and is
+persisted in the load cache for the same reason: a warm run has to say what the cold run it
+replays said. Running the scan over a tracked file's body is safe because the scan already refuses
+everything a document quoting the form would write: the opener match is a whole-line one, and code
+blocks are excluded. The two warnings open with different words so `PYTHONWARNINGS` can target
+either alone, which AD-29 records as the property the `skipping ` diagnostics lack.
+
 **The `--` refusal, on input and on rewritten output.** A comment envelope body must not contain
 the substring `--`, because that substring is where the HTML specification and CommonMark versions
 disagree on comment termination, and the failure mode is silent and user-facing: a legal id such
@@ -2269,7 +2282,11 @@ ambiguous, and an id set by an explicit marker is never a member, since being re
 the marker is for. `AMBIGUOUS` is a first-class edge state rather than an advisory, ranked and
 reported everywhere `BROKEN` is: `check` exits 1 on it, `lint` reports it, and every
 graph-consuming command names the colliding headings in both human and JSON output, because a
-warning-only design would leave CI green on a lattice `reconcile` itself refuses. `reconcile`
+warning-only design would leave CI green on a lattice `reconcile` itself refuses. That split is
+load-bearing in the GitHub format, where a command's annotation severity has to match its own
+gate: `check` annotates an ambiguous edge as an `::error` and exits 1, and `lint` annotates the
+same edge as a `::warning` and exits 0, because a run that shows a reviewer a red annotation and
+then passes is the pairing this design otherwise gets right everywhere. `reconcile`
 refuses to write `seen` for an `AMBIGUOUS` edge, with a message naming the fix (reword one
 colliding heading, or mark the target), in the AD-35 refuse-don't-guess spirit: the tool declines
 to bless a dependency its own declaration cannot unambiguously name.

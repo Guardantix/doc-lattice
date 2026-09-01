@@ -79,6 +79,7 @@ def test_version_1_non_node_cache_cannot_hide_unclosed_frontmatter(tmp_path, mon
                 node=None,
                 disposition="untracked",
                 reused_anchors=False,
+                shadowed_envelope=False,
             )
         },
     )

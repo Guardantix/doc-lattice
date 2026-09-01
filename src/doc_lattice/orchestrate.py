@@ -139,6 +139,42 @@ def _report_misplaced_envelope(disposition: FrontmatterDisposition, path: Path) 
     )
 
 
+def _report_shadowed_envelope(shadowed: bool, path: Path) -> None:
+    """Report a file tracked under its fence that also carries a comment envelope below it.
+
+    A separate function from ``_report_misplaced_envelope`` for the reason that shapes both:
+    Python renders a warning with its raising location and filters repeats by that location, so
+    two diagnostics sharing one site would suppress each other. ``stacklevel`` stays at its
+    default 1 for the same reason, and every load path funnels here so a warm run reproduces what
+    the cold run it replays said.
+
+    The message is its own rather than a reuse of the misplaced one, whose "so this file is not a
+    lattice node" is false here: the file is a node, under the fence, and the envelope is what
+    was ignored. This is the half-converted state the 7.0.0 migration warns about, reached by
+    adding the envelope and not removing the fence it has to displace.
+
+    The ``shadowed `` opening is deliberate and is the third distinct prefix in this module.
+    README documents ``PYTHONWARNINGS=ignore:misplaced`` as targeting exactly one diagnostic, and
+    opening this one the same way would silently widen that filter to cover both.
+
+    Args:
+        shadowed: Whether the parse found a comment envelope in the body of a file its fence
+            already tracked. Only ever true for a tracked file: a file that is not a node has no
+            fence metadata for an envelope to be shadowed by, and reaches
+            ``_report_misplaced_envelope`` instead.
+        path: The discovered path as this checkout sees it, named in the message.
+    """
+    if not shadowed:
+        return
+    warnings.warn(
+        f"shadowed doc-lattice envelope in {format_path_for_display(path)}: this file is tracked "
+        f"under its '---' frontmatter fence, so the '{COMMENT_ENVELOPE_OPEN}' envelope below it "
+        "is read as body text and its metadata is ignored; replace both delimiters of the fence "
+        "in the same edit, or remove the envelope",
+        stacklevel=1,
+    )
+
+
 def _body_first_line(text: str, body: str) -> int:
     """Return the 1-based file line that the body's first line occupies.
 
@@ -168,6 +204,7 @@ def _load_uncached(project: ProjectConfig) -> Lattice:
         _report_skip(outcome.disposition, path)
         _report_reused_anchors(outcome.reused_anchors, path)
         _report_misplaced_envelope(outcome.disposition, path)
+        _report_shadowed_envelope(outcome.shadowed_envelope, path)
         if outcome.meta is None:
             continue
         sections = derive_file_sections(body, first_line=_body_first_line(text, body))
@@ -204,6 +241,7 @@ def _load_cached(
             _report_skip(result.disposition, doc_path)
             _report_reused_anchors(result.reused_anchors, doc_path)
             _report_misplaced_envelope(result.disposition, doc_path)
+            _report_shadowed_envelope(result.shadowed_envelope, doc_path)
             if result.doc is not None:
                 parsed.append(result.doc)
             continue
@@ -212,6 +250,7 @@ def _load_cached(
         _report_skip(outcome.disposition, doc_path)
         _report_reused_anchors(outcome.reused_anchors, doc_path)
         _report_misplaced_envelope(outcome.disposition, doc_path)
+        _report_shadowed_envelope(outcome.shadowed_envelope, doc_path)
         meta = outcome.meta
         sections = (
             derive_file_sections(body, first_line=_body_first_line(text, body))

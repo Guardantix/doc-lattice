@@ -1084,12 +1084,48 @@ def test_a_quoted_envelope_example_is_not_a_misplacement():
     assert outcome.disposition == "untracked"
 
 
-def test_a_tracked_file_quoting_the_other_spelling_stays_tracked():
+def test_a_tracked_file_carrying_a_second_envelope_stays_tracked_and_reports_it():
+    # The half-converted state the 7.0.0 migration warns about: the envelope was added and the
+    # fence it has to displace was not removed. The file is still a node, under the fence's
+    # `pc`, and the envelope's `other` is body text, so this cannot be a disposition. It is
+    # reported all the same, because a silent one is the whole failure the migration names.
     text = "---\nid: pc\n---\n# Body\n\n<!-- doc-lattice\nid: other\n-->\n"
 
     outcome, _body = parse_document(text, Path("a.md"))
 
     assert outcome.disposition == "tracked"
+    assert outcome.meta is not None
+    assert outcome.meta.id == "pc"
+    assert outcome.shadowed_envelope is True
+
+
+def test_a_tracked_file_quoting_the_other_spelling_in_a_code_block_stays_quiet():
+    # The false-positive surface the scan has to leave alone: a document that documents the
+    # envelope form. `code_block_line_spans` excludes it, which is what makes running the scan
+    # over a tracked file's prose safe at all.
+    text = "---\nid: pc\n---\n# Body\n\n```markdown\n<!-- doc-lattice\nid: other\n-->\n```\n"
+
+    outcome, _body = parse_document(text, Path("a.md"))
+
+    assert outcome.disposition == "tracked"
+    assert outcome.shadowed_envelope is False
+
+
+def test_a_comment_tracked_file_quoting_its_own_opener_stays_quiet():
+    # The envelope consumed the top of the file, so an opener below it is the author quoting the
+    # form rather than a second envelope competing with the first. Nothing is shadowed.
+    text = "<!-- doc-lattice\nid: pc\n-->\n# Body\n\n<!-- doc-lattice\n"
+
+    outcome, _body = parse_document(text, Path("a.md"))
+
+    assert outcome.disposition == "tracked"
+    assert outcome.shadowed_envelope is False
+
+
+def test_an_ordinary_tracked_file_reports_no_shadowed_envelope():
+    outcome, _body = parse_document("---\nid: pc\n---\n# Body\n", Path("a.md"))
+
+    assert outcome.shadowed_envelope is False
 
 
 def test_the_substring_precheck_short_circuits_a_file_without_the_sentinel():

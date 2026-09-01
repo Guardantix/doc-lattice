@@ -8,7 +8,7 @@ from ...lint import lint_json, lint_lattice
 from ...model import format_collision
 from ...report_render import render_lint
 from ..errors import EXIT_FINDING, exit_on_project_error
-from ..github import write_annotations
+from ..github import Annotation, write_annotations
 from ..options import ConfigOpt, IndentOpt, ReportFormatOpt
 from ..output import select_output, write_json
 from ..runtime import get_runtime
@@ -46,11 +46,17 @@ def register_lint(app: typer.Typer) -> None:
             # Ambiguity is annotated as well as the ladder violations. The human and JSON forms
             # both report it, and this is the surface a CI reviewer actually sees, so dropping it
             # here would make the one format an adopter gates on the only silent one.
+            #
+            # It is annotated at warning severity, and the ladder violations at error, because
+            # this command's exit code answers only for the ladder: AD-44 gives ambiguity to
+            # `check`, which gates on it and annotates it as an error. Emitting both at error
+            # here would show a reviewer a red annotation on a run that exits 0, so the severity
+            # tracks what this command's own gate acts on rather than how severe the finding is.
             write_annotations(
                 runtime,
                 (
                     *(
-                        (
+                        Annotation(
                             lattice.nodes_by_id[violation.source_id].path,
                             "doc-lattice ladder violation",
                             f"{violation.source_id} ({violation.source_authority}) -> "
@@ -59,12 +65,13 @@ def register_lint(app: typer.Typer) -> None:
                         for violation in result.violations
                     ),
                     *(
-                        (
+                        Annotation(
                             lattice.nodes_by_id[status.source_id].path,
                             "doc-lattice AMBIGUOUS",
                             f"{status.source_id} -> {status.target_ref} is AMBIGUOUS in "
                             f"{collision_file(lattice, status)} "
                             f"({format_collision(status.collision)})",
+                            "warning",
                         )
                         for status in result.ambiguous
                     ),

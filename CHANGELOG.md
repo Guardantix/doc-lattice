@@ -36,7 +36,9 @@ To make a tracked file's metadata invisible on GitHub, replace its opening `---`
 `<!-- doc-lattice`, replace its closing `---` with `-->`, and rerun `check`. The YAML between
 them is unchanged. Replace both delimiters in the same edit: a file that keeps its `---` fence
 and gains a comment envelope below it stays tracked under the *fence's* metadata, and the
-envelope you added is read as body text. A file whose id or any other value contains `--` keeps
+envelope you added is read as body text. That file is reported, with a
+`shadowed doc-lattice envelope` warning naming it, so a half-finished conversion is visible
+rather than silent; the exit status is unchanged. A file whose id or any other value contains `--` keeps
 the fence spelling or renames the value.
 
 ### Added
@@ -51,11 +53,19 @@ the fence spelling or renames the value.
 - `AMBIGUOUS`, a fifth `check` drift state, for an edge whose resolved target id sits in a
   slug-collision component. `check` exits 1 on it and names the colliding headings and their
   lines; `lint`, `impact`, `graph`, and `linear` report the same finding in both human and JSON
-  output; `reconcile` refuses to write `seen` for such an edge.
+  output; `reconcile` refuses to write `seen` for such an edge. Only `check` gates on it, so
+  `lint --format github` annotates an ambiguous edge as a `::warning` and still exits 0, while
+  `check --format github` annotates it as an `::error` and exits 1.
 - `graph --format json` gains an `ambiguous_targets` list and an `ambiguous` flag on each edge;
   `check`, `lint`, `impact`, and `linear` JSON gain an `ambiguous` block.
 - A warning for a file that carries the `<!-- doc-lattice` opener somewhere other than line 1 and
-  outside a code block, which would otherwise leave the file silently out of the lattice.
+  outside a code block, which would otherwise leave the file silently out of the lattice. A file
+  already tracked by a `---` fence gets its own `shadowed doc-lattice envelope` warning instead,
+  since it stays a node and it is the envelope that was ignored. Each opens with its own word, so
+  `PYTHONWARNINGS=ignore:misplaced` and `PYTHONWARNINGS=ignore:shadowed` target one apiece.
+- A warning from `init` when the config it left untouched does not declare `lattice_format`, so a
+  rerun against a pre-7.0 config says why every other command is exiting 2. `init` reports it and
+  does not edit a config it did not write.
 
 ### Changed
 
@@ -68,7 +78,7 @@ the fence spelling or renames the value.
   descendants.
 - `.doc-lattice.yml` gains a required `lattice_format` key, which `doc-lattice init` now writes as
   the first key of every generated config.
-- The load cache version is 6; caches written by earlier releases are discarded rather than read.
+- The load cache version is 7; caches written by earlier releases are discarded rather than read.
 
 ## [6.0.0] - 2026-08-25
 
