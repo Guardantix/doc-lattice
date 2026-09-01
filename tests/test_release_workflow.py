@@ -7,6 +7,7 @@ only force a lockstep edit on every routine pin refresh.
 """
 
 import itertools
+import json
 import re
 import shlex
 import tomllib
@@ -14,8 +15,10 @@ from collections.abc import Iterator
 from pathlib import Path
 
 from ruamel.yaml import YAML
+from typer.testing import CliRunner
 from workflow_helpers import _commands, _invocations, _invokes, _named_step, _uncommented
 
+from doc_lattice.cli import app
 from doc_lattice.config import DEFAULT_CONFIG_NAME
 
 _ROOT = Path(__file__).resolve().parents[1]
@@ -29,6 +32,9 @@ _ARTIFACT_NAME = "release-distributions"
 _PROCEED = "steps.gate.outputs.proceed == 'true'"
 _TAG_STEP = "Create and push the tag"
 _SMOKE_FIXTURE = "tests/fixtures/release-smoke/.doc-lattice.yml"
+# The fixture is addressed the way the release step addresses it, relative to the repository
+# root, so the test below runs the same resolution the smoke step does.
+_RUNNER = CliRunner()
 _PACKAGE_URL = "git+https://github.com/Guardantix/doc-lattice"
 # A final release: numeric segments and nothing else. Everything PEP 440 admits beyond this --
 # `*`, `a`/`b`/`rc`, `.post`, `.dev`, an `N!` epoch, a `+local` -- compares by its own rules and
@@ -893,6 +899,26 @@ def test_smoke_step_runs_the_packaged_cli_against_the_release_fixture():
     (absent, _), (present, _) = probes
     assert printing < absent < scaffolding < present
     assert _step_index(release, "Smoke-test the commit") < _step_index(release, _TAG_STEP)
+
+
+def test_release_smoke_fixture_passes_the_commands_the_smoke_step_gates_on(monkeypatch):
+    # The test above asserts only that the fixture file exists, and no other suite points a
+    # command at it, so before this one the fixture was executed for the first time in the
+    # release job itself. That is the worst place for it to fail: the job runs on the push that
+    # already merged the version bump, and the tag-health gate reads the pre-push version, so a
+    # fixture the release refuses leaves every required check green, fails the release, and
+    # cannot be recovered by a follow-up push -- every later push to `main` reads the bump as
+    # already landed and declines to create the tag. Running the two gating commands here moves
+    # a config-schema change that strands the fixture into the pull request that makes it.
+    monkeypatch.chdir(_ROOT)
+    graph = _RUNNER.invoke(app, ["graph", "--config", _SMOKE_FIXTURE, "--format", "json"])
+    assert graph.exit_code == 0, graph.output
+    # Not a test of `graph`. A fixture whose `docs_roots` resolved to nothing at all would exit 0
+    # from both commands below, so the node count is what keeps them from passing vacuously.
+    assert json.loads(graph.stdout)["nodes"], f"{_SMOKE_FIXTURE} resolves to an empty lattice"
+    for subcommand in ("check", "lint"):
+        result = _RUNNER.invoke(app, [subcommand, "--config", _SMOKE_FIXTURE])
+        assert result.exit_code == 0, result.output
 
 
 def test_pinned_ref_confirmation_resolves_the_tag_that_was_pushed():

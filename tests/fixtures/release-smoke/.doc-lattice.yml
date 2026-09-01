@@ -2,5 +2,6 @@
 # no derives_from edges, so check and lint always exit 0 here regardless of the
 # repository's own docs. Pointing the release smoke at this fixture keeps a future
 # real docs/ lattice from reddening every release.
+lattice_format: 2
 docs_roots:
   - docs

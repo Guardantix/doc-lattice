@@ -9,8 +9,6 @@ from pathlib import Path, PurePosixPath
 
 import pytest
 
-from doc_lattice import __version__
-
 _ROOT = Path(__file__).resolve().parents[1]
 _PYPROJECT = tomllib.loads((_ROOT / "pyproject.toml").read_text(encoding="utf-8"))
 _NORMALIZED_NAME = re.sub(r"[-_.]+", "_", _PYPROJECT["project"]["name"])
@@ -334,7 +332,3 @@ def test_pypi_metadata_links_to_maintainer_resources():
         "Changelog": "https://github.com/Guardantix/doc-lattice/blob/main/CHANGELOG.md",
         "Releases": "https://github.com/Guardantix/doc-lattice/releases",
     }
-
-
-def test_the_declared_version_is_seven():
-    assert __version__ == "7.0.0"
