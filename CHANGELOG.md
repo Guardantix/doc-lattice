@@ -6,6 +6,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [7.0.0] - 2026-09-01
+
 ### Migration
 
 `.doc-lattice.yml` must now declare `lattice_format: 2`. A config file that omits the key is
