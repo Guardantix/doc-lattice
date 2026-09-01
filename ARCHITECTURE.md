@@ -957,6 +957,13 @@ other, in either direction; a file rewritten under this layer keeps whichever en
 with. The comment envelope's own grammar, the byte-exact opener, the closing line, and the `--`
 refusal, is AD-44's to record rather than restated here.
 
+One supported YAML spelling is nonetheless out of reach in the comment envelope, as a consequence
+of that `--` refusal rather than as a separate rule: a declared `%YAML` version needs the `---`
+document-start marker that must follow it, and `---` contains `--`, so a block that declares a
+version is refused. AD-33 keeps the spelling supported; it is reachable only through the fence
+envelope. Nothing else in the accepted set is affected, since no other supported spelling
+requires the substring.
+
 The fence spelling's own rules are lexical rather than structural, and a declared version has a
 constraint the matrix cannot show. The block opens and closes on a line whose stripped text is
 exactly `---`, so space on either side of either fence is accepted, leading indentation included.

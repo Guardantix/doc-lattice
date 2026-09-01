@@ -6,7 +6,7 @@ from pathlib import Path
 
 from .cache import CacheHit, LookupPolicy, RunState, cache_path, lookup, make_entry, store
 from .config import ProjectConfig
-from .constants import FrontmatterDisposition
+from .constants import COMMENT_ENVELOPE_OPEN, FrontmatterDisposition
 from .discovery import decode_doc, discover_doc_paths, read_doc
 from .frontmatter_parser import parse_document
 from .loader import build_lattice, derive_file_sections
@@ -40,9 +40,11 @@ def load_lattice(
 
     Raises:
         FrontmatterError: If a discovered file's frontmatter has an unknown or malformed key,
-            or declares lattice intent with no ``id``.
+            declares lattice intent with no ``id``, spells a near-miss comment opener on line 1,
+            carries a byte-order mark before a comment opener, holds ``--`` inside a comment
+            envelope, or is a comment envelope whose body is not a mapping carrying ``id``.
         UnreadableDocError: If a discovered file cannot be read or decoded, or its frontmatter
-            opens a fence it never closes or cannot be parsed as YAML.
+            opens a fence or a comment envelope it never closes, or cannot be parsed as YAML.
         DuplicateIdError: If two discovered files, or two headings in one file, register the
             same id.
     """
@@ -130,8 +132,9 @@ def _report_misplaced_envelope(disposition: FrontmatterDisposition, path: Path) 
         return
     warnings.warn(
         f"misplaced doc-lattice envelope in {format_path_for_display(path)}: the "
-        "'<!-- doc-lattice' opener is only read as the file's first line, so this file is not a "
-        "lattice node; move the envelope to the top of the file",
+        f"'{COMMENT_ENVELOPE_OPEN}' opener is only read as the file's first line, so this file "
+        "is not a lattice node; move the envelope to the top of the file, removing any '---' "
+        "frontmatter fence it would have to displace",
         stacklevel=1,
     )
 

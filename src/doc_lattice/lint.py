@@ -46,10 +46,11 @@ def lint_json(result: LintResult) -> dict:
     """Build the JSON-ready authority-lint report payload.
 
     Args:
-        result: Authority-lint violations and skipped edges to serialize.
+        result: Authority-lint violations, skipped edges, and ambiguous edges to serialize.
 
     Returns:
-        A plain dictionary containing ordered violation and skipped-edge payloads.
+        A plain dictionary containing ordered violation and skipped-edge payloads, plus the
+        shared ``ambiguous`` block.
     """
     return {
         "violations": [

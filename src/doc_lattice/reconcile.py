@@ -1569,7 +1569,8 @@ def reconcile(
                     f"cannot reconcile {node_id!r} -> {edge.target_ref!r}: the target id is "
                     f"{format_collision(collision)}; disambiguate by rewording one of the "
                     "colliding headings, or give the target an explicit '{#anchor}' marker; "
-                    "no seen values were written, fix every ambiguous edge before re-running"
+                    "no seen values were written, and this refusal names one edge at a time, so "
+                    "run 'doc-lattice check' to list every ambiguous edge before re-running"
                 )
             new_seen = cached_target_hash(lattice, edge.target_id, cache)
             if edge.seen is not None and new_seen == edge.seen:

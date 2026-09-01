@@ -581,10 +581,17 @@ wrote, because silently dropping a file also silently drops every edge it declar
 
 | The file | Treatment |
 |----------|-----------|
-| No opening `---` fence | Untracked prose. Silent; nothing is reported. |
+| Opens neither envelope | Untracked prose. Silent; nothing is reported. |
 | Fenced, but the block holds no YAML mapping (empty, a scalar, a list) | The same as untracked prose. Silent. |
 | Fenced with an id-less mapping declaring none of `derives_from`, `authority`, or `tickets` | Skipped, with a warning on stderr naming the file. The exit status is unchanged. |
 | Fenced with an id-less mapping declaring any of `derives_from`, `authority`, or `tickets` | A tool error naming the file and the keys it declared. Exits 2. |
+| Line 1 nearly spells `<!-- doc-lattice` (indented, trailing space, different case) | A tool error naming the file. Exits 2, rather than being read as prose, so a typo cannot silently drop the node. |
+| Carries `<!-- doc-lattice` below line 1, outside any code block | Not a node, with a `misplaced doc-lattice envelope` warning on stderr naming the file. The exit status is unchanged. |
+| Opens `<!-- doc-lattice`, but the body is not a mapping carrying `id` | A tool error naming the file. Exits 2; the comment envelope has no untracked or id-less tier. |
+
+The first row is about *both* envelopes: a file with no `---` fence can still be a tracked node
+when its first line is exactly `<!-- doc-lattice`. The last three rows are the comment envelope's,
+and the [frontmatter reference](#frontmatter-reference) states its grammar in full.
 
 Those three keys are the exact set that wires a file into the graph, so an id-less block carrying
 one is a node that lost its `id` (to a typo like `idd:`, or to an edit) rather than metadata
@@ -601,7 +608,9 @@ apply, but neither available form targets it precisely. `PYTHONWARNINGS=ignore` 
 warning the run emits. `PYTHONWARNINGS=ignore:skipping` looks narrower and is not: that field is a
 literal message prefix rather than a regular expression, and the warning for a document symlinked
 outside the project root opens with the same `skipping ` prefix, so filtering on it hides that one
-too. The report is identical whether the load was accelerated by the
+too. The misplaced-envelope warning is the one case the prefix form does target, because it
+deliberately opens `misplaced ` rather than `skipping `: `PYTHONWARNINGS=ignore:misplaced` silences
+it and nothing else. The report is identical whether the load was accelerated by the
 [load cache](#load-cache-opt-in) or not.
 
 An escalating filter is supported the same way. Under `PYTHONWARNINGS=error` (or `-W error`)
@@ -625,7 +634,17 @@ Addressable sections intentionally use a narrow Markdown subset: column-zero ATX
 levels 1 through 6, including empty headings and optional ATX closing sequences. CommonMark
 backtick and tilde fences suppress headings inside them. Setext headings, headings in block quotes
 or list items, and indented headings are not addressable. Inline Markdown remains part of the raw
-heading text used for slugging. Heading and fence recognition is pinned to
+heading text used for slugging.
+
+Not being addressable does not put a heading outside `AMBIGUOUS`. GitHub assigns ids to every
+heading form, including the ones above, and allocates them in document order across all of them,
+so a setext or nested heading can take an id an addressable heading would otherwise have had, or
+shift the duplicate suffix of one that follows it. Collision detection therefore reads the full
+GitHub heading inventory, and an `AMBIGUOUS` finding can name a heading that owns no lattice id of
+its own. Such a member is still the thing to change: reword it, or reword the addressable heading
+it collides with. Adding a `{#anchor}` marker to it does nothing, because the marker is only read
+on an addressable heading; adding one to the *addressable* member does fix the edge, by making
+that id reword-stable. Heading and fence recognition is pinned to
 `markdown-it-py==4.2.0`; generated slugs and document-order duplicate suffixes target
 `github-slugger@2.0.0` under JavaScript Unicode 17.0. Generated lowercase patches and contextual
 casing-property tables bridge the minimum supported Python 3.13 Unicode 15.1 table to that target.
@@ -760,7 +779,15 @@ from a known baseline instead of reporting the whole backlog on their first run.
 on a first adoption: `init` is rerunnable against an existing config, and on an established
 lattice `reconcile --all` would acknowledge legitimate drift you have not reviewed. It also
 does not by itself make CI green, because `reconcile` skips BROKEN edges and those remain
-findings. See [RECONCILE.md](https://github.com/Guardantix/doc-lattice/blob/main/RECONCILE.md)
+findings.
+
+Run `doc-lattice check` *before* this baseline, not only after it. An `AMBIGUOUS` edge is not
+skipped the way a BROKEN one is: `reconcile` refuses the whole run on the first one it meets, so
+a single pair of identically-named headings anywhere in the tree makes `reconcile --all` exit 2
+and write nothing, including for every unrelated edge, and `--dry-run` fails the same way. `check`
+lists them all at once with the colliding headings and their lines. First adoptions are the most
+likely to have such a pair, since nothing has forced them to be disambiguated yet. See
+[RECONCILE.md](https://github.com/Guardantix/doc-lattice/blob/main/RECONCILE.md)
 for the selector semantics.
 
 ### Ordinary offline setup
@@ -869,13 +896,17 @@ baseline depends on. The order is:
 
 1. Paste the three blocks and commit them with the annotated input. The gates are inert, so this
    commit is not gated.
-2. Run `doc-lattice reconcile --all`.
-3. Run `check` and `lint`, and resolve whatever they still report. The baseline clears STALE and
+2. Run `doc-lattice check` and fix every `AMBIGUOUS` edge it reports, by rewording one of the
+   colliding headings or giving the target an explicit `{#anchor}` marker. `reconcile` refuses
+   its entire run while any edge is ambiguous, so skipping this step makes step 3 exit 2 without
+   writing anything.
+3. Run `doc-lattice reconcile --all`.
+4. Run `check` and `lint`, and resolve whatever they still report. The baseline clears STALE and
    UNRECONCILED edges and nothing else: `reconcile` skips BROKEN edges by design, `check` exits 1
    on them all the same, and neither command touches a lint finding. Anything left standing here
-   is what the gate refuses in step 5.
-4. Enable the gates with the two commands above.
-5. Stage and commit the reconcile-only diff. Both hooks run on it and pass, which is also how you
+   is what the gate refuses in step 6.
+5. Enable the gates with the two commands above.
+6. Stage and commit the reconcile-only diff. Both hooks run on it and pass, which is also how you
    confirm activation worked.
 
 **An established installation enables them immediately.** A conversion, or any repository that

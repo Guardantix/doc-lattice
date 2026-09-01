@@ -32,8 +32,37 @@ guard. Three steps:
 
 To make a tracked file's metadata invisible on GitHub, replace its opening `---` with
 `<!-- doc-lattice`, replace its closing `---` with `-->`, and rerun `check`. The YAML between
-them is unchanged. A file whose id or any other value contains `--` keeps the fence spelling or
-renames the value.
+them is unchanged. Replace both delimiters in the same edit: a file that keeps its `---` fence
+and gains a comment envelope below it stays tracked under the *fence's* metadata, and the
+envelope you added is read as body text. A file whose id or any other value contains `--` keeps
+the fence spelling or renames the value.
+
+### Added
+
+- A second spelling of the frontmatter block: the identical YAML wrapped in
+  `<!-- doc-lattice` / `-->` instead of `---` fences, which GitHub renders as nothing, so a
+  tracked README keeps a clean landing page. Both spellings are accepted unconditionally and
+  forever, with no config to select or forbid either one, and `reconcile` preserves whichever
+  spelling a file already uses. The comment spelling fails closed: a body that is not a mapping
+  carrying `id` is an error rather than untracked prose, a near-miss opener on line 1 is an
+  error, a byte-order mark before the opener is an error, and the body may not contain `--`.
+- `AMBIGUOUS`, a fifth `check` drift state, for an edge whose resolved target id sits in a
+  slug-collision component. `check` exits 1 on it and names the colliding headings and their
+  lines; `lint`, `impact`, `graph`, and `linear` report the same finding in both human and JSON
+  output; `reconcile` refuses to write `seen` for such an edge.
+- `graph --format json` gains an `ambiguous_targets` list and an `ambiguous` flag on each edge;
+  `check`, `lint`, `impact`, and `linear` JSON gain an `ambiguous` block.
+- A warning for a file that carries the `<!-- doc-lattice` opener somewhere other than line 1 and
+  outside a code block, which would otherwise leave the file silently out of the lattice.
+
+### Changed
+
+- A `section` ref now hashes its ancestor heading chain followed by the section text, so a
+  section that moves under a different parent heading, or whose ancestor is reworded, goes STALE
+  even when its own text is untouched. `file` refs are unaffected.
+- `.doc-lattice.yml` gains a required `lattice_format` key, which `doc-lattice init` now writes as
+  the first key of every generated config.
+- The load cache version is 6; caches written by earlier releases are discarded rather than read.
 
 ## [6.0.0] - 2026-08-25
 

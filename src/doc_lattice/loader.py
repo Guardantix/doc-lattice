@@ -95,6 +95,12 @@ def _collision_members_by_line(
     the inventory the existing cases and this function's return contract were already written
     against; it is traversed first, and an already-recorded line is never overwritten.
 
+    The merge is a disjoint-set union over line numbers, the same primitive
+    ``markdown_compat.collision_components`` runs over inventory indices, rather than a scan of
+    every group already merged. A pairwise scan is quadratic in the number of components, and
+    the two inventories almost always see the same headings, so every component from the second
+    inventory overlaps its twin from the first and the rebuild fires every time.
+
     Args:
         body: The verbatim document body.
         addressable: The addressable ATX subset's own allocation trace, from
@@ -106,25 +112,43 @@ def _collision_members_by_line(
         One entry per heading in a collision component, in either inventory's terms, every
         member of one merged component sharing one tuple.
     """
-    merged: list[dict[int, SluggedHeading]] = []
+    parent: dict[int, int] = {}
+    headings: dict[int, SluggedHeading] = {}
+
+    def find(line: int) -> int:
+        while parent[line] != line:
+            parent[line] = parent[parent[line]]
+            line = parent[line]
+        return line
+
+    def union(left: int, right: int) -> None:
+        left_root, right_root = find(left), find(right)
+        if left_root != right_root:
+            parent[max(left_root, right_root)] = min(left_root, right_root)
+
     for inventory in (full_heading_inventory(body), addressable):
         for component in collision_components(inventory):
-            combined = {heading.line: heading for heading in component}
-            disjoint: list[dict[int, SluggedHeading]] = []
-            for group in merged:
-                if group.keys() & combined.keys():
-                    combined = {**combined, **group}
-                else:
-                    disjoint.append(group)
-            merged = [*disjoint, combined]
+            anchor_line = component[0].line
+            for heading in component:
+                # setdefault, with the full inventory traversed first, is what makes its record
+                # win for a line both inventories see.
+                headings.setdefault(heading.line, heading)
+                parent.setdefault(heading.line, heading.line)
+                union(anchor_line, heading.line)
+
+    grouped: dict[int, list[int]] = {}
+    for line in parent:
+        grouped.setdefault(find(line), []).append(line)
 
     found: dict[int, tuple[CollisionMember, ...]] = {}
-    for group in merged:
+    for lines in grouped.values():
         members = tuple(
-            CollisionMember(label=safe_heading_label(heading.text), line=line + first_line - 1)
-            for line, heading in sorted(group.items())
+            CollisionMember(
+                label=safe_heading_label(headings[line].text), line=line + first_line - 1
+            )
+            for line in sorted(lines)
         )
-        for line in group:
+        for line in lines:
             found[line] = members
     return found
 

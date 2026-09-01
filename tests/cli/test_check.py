@@ -13,6 +13,7 @@ import doc_lattice.config as config_module
 from doc_lattice.cli import app
 from doc_lattice.cli.github import escape_github_property
 from doc_lattice.constants import EdgeState
+from doc_lattice.path_utils import format_path_for_display
 
 from .helpers import _clean_docs, runner
 
@@ -862,3 +863,29 @@ def test_check_exits_one_on_an_ambiguous_edge_and_names_it_in_both_formats(tmp_p
         {"label": "Notes", "line": 6},
     ]
     assert json.loads(payload.stdout)["summary"]["AMBIGUOUS"] == 1
+
+
+def test_check_github_annotation_names_the_colliding_headings(tmp_path: Path, monkeypatch):
+    # The collision members are the only actionable part of an AMBIGUOUS finding, and the
+    # annotation is the surface a reviewer reads in the pull request.
+    docs = tmp_path / "docs"
+    docs.mkdir()
+    (docs / "up.md").write_text("---\nid: up\n---\n# Notes\n\n# Notes\n", encoding="utf-8")
+    (docs / "down.md").write_text(
+        "---\nid: down\nderives_from:\n  - ref: up#notes\n---\n# Down\n", encoding="utf-8"
+    )
+    config = tmp_path / ".doc-lattice.yml"
+    config.write_text("lattice_format: 2\ndocs_roots:\n  - docs\n", encoding="utf-8")
+
+    monkeypatch.chdir(tmp_path)
+
+    result = runner.invoke(app, ["check", "--format", "github"])
+
+    # The annotation attaches to the downstream file, so the message has to name the upstream
+    # one: the cited lines are in up.md, and down.md is only six lines long.
+    upstream = format_path_for_display((docs / "up.md").resolve())
+    assert result.stdout == (
+        "::error file=docs/down.md,title=doc-lattice AMBIGUOUS::"
+        f"down -> up#notes is AMBIGUOUS in {upstream} "
+        '(ambiguous with "Notes" (line 4), "Notes" (line 6))\n'
+    )

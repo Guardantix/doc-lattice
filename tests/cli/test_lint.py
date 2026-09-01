@@ -5,6 +5,7 @@ from pathlib import Path
 
 from doc_lattice.cli import app
 from doc_lattice.cli.github import escape_github_property
+from doc_lattice.path_utils import format_path_for_display
 
 from .helpers import runner
 
@@ -233,3 +234,29 @@ def test_lint_names_an_ambiguous_target_in_human_and_json(tmp_path: Path):
     # File lines, envelope included: the two headings sit on lines 4 and 6 of up.md.
     assert 'ambiguous with "Notes" (line 4), "Notes" (line 6)' in human.stdout
     assert json.loads(payload.stdout)["ambiguous"][0]["target_ref"] == "up#notes"
+
+
+def test_lint_github_annotates_an_ambiguous_target(tmp_path: Path, monkeypatch):
+    # The annotate branch bypasses render_lint, so the ambiguous block has to be emitted here
+    # too. This is the surface a CI reviewer reads, and it was the only one of lint's three
+    # output formats that said nothing at all about ambiguity.
+    docs = tmp_path / "docs"
+    docs.mkdir()
+    (docs / "up.md").write_text("---\nid: up\n---\n# Notes\n\n# Notes\n", encoding="utf-8")
+    (docs / "down.md").write_text(
+        "---\nid: down\nderives_from:\n  - ref: up#notes\n---\n# Down\n", encoding="utf-8"
+    )
+    config = tmp_path / ".doc-lattice.yml"
+    config.write_text("lattice_format: 2\ndocs_roots:\n  - docs\n", encoding="utf-8")
+
+    monkeypatch.chdir(tmp_path)
+
+    result = runner.invoke(app, ["lint", "--format", "github"])
+
+    # Same upstream/downstream split check_lattice's annotation carries: the lines are in up.md.
+    upstream = format_path_for_display((docs / "up.md").resolve())
+    assert result.stdout == (
+        "::error file=docs/down.md,title=doc-lattice AMBIGUOUS::"
+        f"down -> up#notes is AMBIGUOUS in {upstream} "
+        '(ambiguous with "Notes" (line 4), "Notes" (line 6))\n'
+    )

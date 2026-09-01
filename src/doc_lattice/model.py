@@ -292,9 +292,13 @@ class ParsedMeta:
 class ParsedDoc:
     """A discovered file with validated frontmatter and its raw body.
 
-    ``sections`` holds pre-derived section spans when a caller (the load cache) already
-    computed them, so ``build_lattice`` reuses them instead of re-deriving. It is None on
-    the uncached path, where ``build_lattice`` derives sections itself.
+    ``sections`` holds pre-derived section spans, which every production load path now fills:
+    both the cached and the cache-free path derive them ahead of ``build_lattice`` because only
+    they know where the body starts in the file, and that offset is what puts
+    ``CollisionMember.line`` in file rather than body coordinates. It stays optional for a
+    synthetic caller that builds a ``ParsedDoc`` by hand; ``build_lattice`` then derives sections
+    itself with no such offset, so a hand-built doc whose body followed an envelope reports
+    collision member lines short by the envelope's length.
     """
 
     path: Path

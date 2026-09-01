@@ -5,6 +5,7 @@ from dataclasses import dataclass
 
 from .constants import EDGE_STATES, EdgeState
 from .model import CollisionMember, Edge, Lattice, TargetId, collision_members_json
+from .path_utils import format_path_for_display
 from .resolve import cached_target_hash
 
 
@@ -79,6 +80,28 @@ def ambiguous_json(statuses: Sequence[EdgeStatus]) -> list[dict]:
         for status in statuses
         if status.state == "AMBIGUOUS"
     ]
+
+
+def collision_file(lattice: Lattice, status: EdgeStatus) -> str:
+    """Return the display path of the file an AMBIGUOUS status's collision lines belong to.
+
+    ``CollisionMember.line`` is a line in the *upstream* file, the one that owns the colliding
+    headings, while an edge record is otherwise about the downstream node. A sink that prints the
+    lines somewhere the upstream file is not already on screen has to name it, or it cites line
+    numbers in a file the reader has no way to identify. The GitHub annotation is the acute case,
+    since it is physically attached to the downstream file.
+
+    Args:
+        lattice: The built lattice.
+        status: An ``AMBIGUOUS`` classification whose ``target_id`` resolved.
+
+    Returns:
+        The display spelling of the upstream file's path, or the empty string when the status
+        carries no resolved target.
+    """
+    if status.target_id is None:
+        return ""
+    return format_path_for_display(lattice.index[status.target_id].path)
 
 
 def summarize_statuses(statuses: list[EdgeStatus]) -> dict[EdgeState, int]:
@@ -180,6 +203,6 @@ def has_drift(statuses: list[EdgeStatus]) -> bool:
         statuses: Output of ``check_lattice``.
 
     Returns:
-        True when any edge is STALE, UNRECONCILED, or BROKEN.
+        True when any edge is STALE, UNRECONCILED, BROKEN, or AMBIGUOUS.
     """
     return any(s.state != "OK" for s in statuses)

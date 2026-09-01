@@ -136,6 +136,14 @@ class _SourceMapState(StateBlock):
 
 
 _PARSER = MarkdownIt("commonmark")
+# The same pinned parser with inline tokenization switched off. Every whole-document consumer in
+# this module reads only block structure: heading source lines, an inline token's raw ``content``,
+# and code-block spans. The ``inline`` core rule fills each inline token's ``children`` with a
+# second tokenization of every paragraph in the document, which nothing here reads, and it is the
+# dominant cost of a full parse. Disabling it leaves ``Token.type``, ``Token.map``, and
+# ``Token.content`` untouched, so the derived values are byte-identical.
+_BLOCK_PARSER = MarkdownIt("commonmark")
+_BLOCK_PARSER.core.ruler.disable("inline")
 
 
 def extract_headings(body: str) -> list[Heading]:
@@ -212,7 +220,7 @@ def code_block_line_spans(body: str) -> list[tuple[int, int]]:
     """
     normalized = normalize_newlines(body).replace("\0", "�")
     spans: list[tuple[int, int]] = []
-    for token in _PARSER.parse(normalized):
+    for token in _BLOCK_PARSER.parse(normalized):
         if token.type in ("fence", "code_block") and token.map is not None:
             spans.append((token.map[0] + 1, token.map[1]))
     return spans
@@ -363,7 +371,7 @@ def full_heading_inventory(body: str) -> list[SluggedHeading]:
         RuntimeError: If the pinned parser returns a malformed heading token pair.
     """
     normalized = normalize_newlines(body).replace("\0", "�")
-    tokens = _PARSER.parse(normalized)
+    tokens = _BLOCK_PARSER.parse(normalized)
     slugger = _Slugger()
     inventory: list[SluggedHeading] = []
     for index, token in enumerate(tokens):

@@ -5,8 +5,16 @@ from typing import Annotated
 import typer
 from rich.markup import escape
 
-from ...check import EdgeStatus, check_lattice, has_drift, statuses_json, summarize_statuses
+from ...check import (
+    EdgeStatus,
+    check_lattice,
+    collision_file,
+    has_drift,
+    statuses_json,
+    summarize_statuses,
+)
 from ...constants import VALID_EDGE_STATES, VALID_REPORT_FORMATS
+from ...model import format_collision
 from ...report_render import render_statuses
 from ..errors import EXIT_FINDING, EXIT_TOOL_ERROR, exit_on_project_error
 from ..github import write_annotations
@@ -110,7 +118,17 @@ def register_check(app: typer.Typer) -> None:
                     (
                         lattice.nodes_by_id[status.source_id].path,
                         f"doc-lattice {status.state}",
-                        f"{status.source_id} -> {status.target_ref} is {status.state}",
+                        f"{status.source_id} -> {status.target_ref} is {status.state}"
+                        # The collision members are the only actionable part of an AMBIGUOUS
+                        # finding, and this is the surface a reviewer reads in the pull request.
+                        # The annotation attaches to the downstream file while the member lines
+                        # are in the upstream one, so that file has to be named here.
+                        + (
+                            f" in {collision_file(lattice, status)} "
+                            f"({format_collision(status.collision)})"
+                            if status.collision
+                            else ""
+                        ),
                     )
                     for status in displayed
                     if status.state != "OK"

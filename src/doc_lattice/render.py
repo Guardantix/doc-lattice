@@ -162,6 +162,8 @@ def to_mermaid(
     for upstream, source_id, is_stale, is_ambiguous in _graph_edges(
         lattice, stale_edges, ambiguous_edges
     ):
+        # Ambiguity beats staleness, for the reason spelled out in to_dot: _graph_edges collapses
+        # several section edges onto one graph edge, so both flags are routinely true at once.
         arrow = "-. ambiguous .->" if is_ambiguous else "-.->" if is_stale else "-->"
         lines.append(f"    {mermaid_ids[upstream]} {arrow} {mermaid_ids[source_id]}")
     return "\n".join(lines) + "\n"
@@ -184,17 +186,19 @@ def to_dot(
         DOT source. Edges run upstream (target) to downstream (source).
     """
     lines = ["digraph lattice {"]
-    lines.extend(_ambiguous_lines(lattice, "   //"))
+    lines.extend(_ambiguous_lines(lattice, "    //"))
     for node_id in sorted(lattice.nodes_by_id):
         label = _dot_escape(_label(lattice, node_id))
         lines.append(f'    "{_dot_escape(node_id)}" [label="{label}"];')
     for upstream, source_id, is_stale, is_ambiguous in _graph_edges(
         lattice, stale_edges, ambiguous_edges
     ):
-        # An edge that is both stale and ambiguous takes the ambiguous style. check_lattice
-        # classifies every edge into exactly one state, so the CLI never hands this function
-        # a pair that is both; the precedence exists for a direct API caller building its own
-        # stale_edges and ambiguous_edges sets, which can overlap.
+        # An edge that is both stale and ambiguous takes the ambiguous style. This is ordinary
+        # CLI output, not a defensive branch: check_lattice gives each *edge* exactly one state,
+        # but _graph_edges collapses every section edge between two files onto one graph edge and
+        # ORs the flags, so a node deriving from one STALE and one AMBIGUOUS section of the same
+        # upstream file draws a single edge that is both. Ambiguity wins because it is the
+        # condition reconcile refuses; do not delete this branch as unreachable.
         style = (
             ' [style=dotted color="red"]' if is_ambiguous else " [style=dashed]" if is_stale else ""
         )

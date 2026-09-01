@@ -2651,4 +2651,6 @@ def test_reconcile_refuses_to_bless_an_ambiguous_edge():
     assert 'ambiguous with "Notes" (line 1), "Notes" (line 3)' in message
     assert "reword" in message
     assert "{#anchor}" in message
-    assert "no seen values were written, fix every ambiguous edge before re-running" in message
+    assert "no seen values were written" in message
+    # The refusal names one edge, so it has to point at the command that lists them all.
+    assert "run 'doc-lattice check' to list every ambiguous edge before re-running" in message

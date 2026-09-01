@@ -59,9 +59,13 @@ _MISPLACED = ParsedMeta(meta=None, disposition="misplaced-envelope")
 # reaches validation, so this is defensive: it exists so a future whole-block rule cannot
 # render a field name the author never wrote.
 _ROOT_LOCATION = "<frontmatter>"
-# Cheap module-level pre-check for `detect_misplaced_envelope`: matches the same near-miss
-# spellings the scan itself looks for, so a file using the exact opener or a near-miss both pay
-# the parse, and everything else is answered by one `search` with no parse at all.
+# Cheap module-level pre-check for `detect_misplaced_envelope`: `_OPENER_NEAR_MISS` with its
+# anchors removed, so it admits every spelling the scan itself accepts and a file that mentions
+# the sentinel nowhere is answered by one `search`. It is deliberately a strict superset rather
+# than an equivalent: it matches anywhere in a line, so prose naming `<!-- doc-lattice`
+# mid-sentence trips it and is then rejected by the per-line `fullmatch`, which costs a line scan
+# and no parse. Widen `_OPENER_NEAR_MISS` and this has to be widened with it, or the scan stops
+# firing for exactly the spelling that was just added.
 _MISPLACED_PRECHECK = re.compile(r"<!--\s*doc-lattice", re.IGNORECASE)
 
 
@@ -245,7 +249,9 @@ def refuse_double_hyphen(raw_meta: str, source: Path, *, first_body_line: int) -
                 f"the doc-lattice comment envelope in {format_path_for_display(source)} contains "
                 f"'--' on line {first_body_line + offset}; HTML comments give '--' no agreed "
                 "meaning, so a renderer may end the comment there and print the envelope as "
-                f"text. Rename the value, or keep the '{_FENCE}' fence spelling for this file"
+                f"text. Rename the value, drop the directive if the '--' is a '{_FENCE}' "
+                f"document-start marker or a '%YAML' version, or keep the '{_FENCE}' fence "
+                "spelling for this file"
             )
             raise FrontmatterError(msg, source=source)
 
@@ -253,13 +259,17 @@ def refuse_double_hyphen(raw_meta: str, source: Path, *, first_body_line: int) -
 def detect_misplaced_envelope(text: str) -> bool:
     """Report whether a document carries the comment opener where it will not be read as one.
 
-    Two stage on purpose. The regex pre-check is what every ordinary document pays, and the
-    markdown-it parse runs only on the rare file that actually holds the sentinel, so a
-    README quoting the syntax in a fenced example is answered correctly without charging every
-    other file for the parse. A line qualifies the same way line 1 of the file does: the exact
-    opener or one of the near-miss spellings `_OPENER_NEAR_MISS` accepts, since an author who
-    misplaced `<!--doc-lattice` or `<!-- DOC-LATTICE` meant the envelope just as plainly as one
-    who misplaced the exact spelling.
+    Three stage, cheapest first, because only the last stage costs a parse. The substring
+    pre-check is what every ordinary document pays. The line scan then narrows to the lines that
+    are actually a whole opener, which the pre-check cannot decide: it matches anywhere in a
+    line, so prose that merely mentions ``<!-- doc-lattice`` mid-sentence trips it, and this
+    file and ARCHITECTURE.md both do. Only when a candidate line survives does the markdown-it
+    parse run to ask whether it sits inside a code block, so a README quoting the syntax in a
+    fenced example is answered correctly and a document that merely names the sentinel pays no
+    parse at all. A line qualifies the same way line 1 of the file does: the exact opener or one
+    of the near-miss spellings `_OPENER_NEAR_MISS` accepts, since an author who misplaced
+    `<!--doc-lattice` or `<!-- DOC-LATTICE` meant the envelope just as plainly as one who
+    misplaced the exact spelling.
 
     Args:
         text: The full file text of a document whose parse found no node, tracked or not: an
@@ -271,13 +281,15 @@ def detect_misplaced_envelope(text: str) -> bool:
     """
     if not _MISPLACED_PRECHECK.search(text):
         return False
+    candidates = [
+        number
+        for number, line in enumerate(normalize_newlines(text).split("\n"), start=1)
+        if _OPENER_NEAR_MISS.fullmatch(line)
+    ]
+    if not candidates:
+        return False
     coded = code_block_line_spans(text)
-    for number, line in enumerate(normalize_newlines(text).split("\n"), start=1):
-        if not _OPENER_NEAR_MISS.fullmatch(line):
-            continue
-        if not any(start <= number <= end for start, end in coded):
-            return True
-    return False
+    return any(not any(start <= number <= end for start, end in coded) for number in candidates)
 
 
 def parse_meta(raw_meta: str | None, source: Path, *, kind: EnvelopeKind = "fence") -> ParsedMeta:

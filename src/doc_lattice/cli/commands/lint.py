@@ -2,8 +2,10 @@
 
 import typer
 
+from ...check import collision_file
 from ...constants import VALID_REPORT_FORMATS
 from ...lint import lint_json, lint_lattice
+from ...model import format_collision
 from ...report_render import render_lint
 from ..errors import EXIT_FINDING, exit_on_project_error
 from ..github import write_annotations
@@ -41,16 +43,31 @@ def register_lint(app: typer.Typer) -> None:
         if selection.format == "json":
             write_json(runtime, lint_json(result), indent=selection.indent)
         elif selection.annotates:
+            # Ambiguity is annotated as well as the ladder violations. The human and JSON forms
+            # both report it, and this is the surface a CI reviewer actually sees, so dropping it
+            # here would make the one format an adopter gates on the only silent one.
             write_annotations(
                 runtime,
                 (
-                    (
-                        lattice.nodes_by_id[violation.source_id].path,
-                        "doc-lattice ladder violation",
-                        f"{violation.source_id} ({violation.source_authority}) -> "
-                        f"{violation.target_ref} ({violation.target_authority})",
-                    )
-                    for violation in result.violations
+                    *(
+                        (
+                            lattice.nodes_by_id[violation.source_id].path,
+                            "doc-lattice ladder violation",
+                            f"{violation.source_id} ({violation.source_authority}) -> "
+                            f"{violation.target_ref} ({violation.target_authority})",
+                        )
+                        for violation in result.violations
+                    ),
+                    *(
+                        (
+                            lattice.nodes_by_id[status.source_id].path,
+                            "doc-lattice AMBIGUOUS",
+                            f"{status.source_id} -> {status.target_ref} is AMBIGUOUS in "
+                            f"{collision_file(lattice, status)} "
+                            f"({format_collision(status.collision)})",
+                        )
+                        for status in result.ambiguous
+                    ),
                 ),
             )
         else:

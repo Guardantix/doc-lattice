@@ -142,11 +142,15 @@ def load_config(config_path: Path | None, cwd: Path) -> ProjectConfig:
     # 7.0, not this ConfigError. Follow the v7 migration (fix AMBIGUOUS headings, then
     # `reconcile --all`), or add a config with the key to get this loud guard instead.
     if source is not None and config.lattice_format is None:
+        # The remedy names all three migration steps in order. Naming only the re-bless would
+        # send an adopter with any duplicate heading straight into reconcile's ambiguity refusal,
+        # which writes nothing and fails the whole run.
         msg = (
             f"config {format_path_for_display(source)} does not declare "
             f"'lattice_format: {LATTICE_FORMAT_VERSION}', which doc-lattice 7 requires. Add the "
-            "key, then run 'doc-lattice reconcile --all' to re-bless the lattice under the 7.0 "
-            "content hash; see the 7.0.0 migration in CHANGELOG.md"
+            "key, then run 'doc-lattice check' and fix every AMBIGUOUS edge, then run "
+            "'doc-lattice reconcile --all' to re-bless the lattice under the 7.0 content hash; "
+            "see the 7.0.0 migration in CHANGELOG.md"
         )
         raise ConfigError(msg)
 

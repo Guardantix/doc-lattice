@@ -119,7 +119,9 @@ def render_ambiguous(console: Console, statuses: Sequence[EdgeStatus]) -> None:
 
     The one human spelling ``lint``, ``impact``, and ``linear`` share, so the same condition
     reads the same way wherever it is reported. ``check`` renders its own row instead, because
-    the state is part of that command's per-edge listing rather than an appended block.
+    the state is part of that command's per-edge listing rather than an appended block. The
+    colour and the state column width are read from the same two declarations ``render_statuses``
+    reads, so the state cannot end up rendered two ways depending on which command emitted it.
 
     Args:
         console: Destination console.
@@ -128,11 +130,12 @@ def render_ambiguous(console: Console, statuses: Sequence[EdgeStatus]) -> None:
     # highlight=False and soft_wrap for the reason every renderer in this module carries them:
     # Rich's highlighter bolds bare numbers and bold survives no_color, and each record must
     # stay one line at any width so a pipe or a grep gets the whole record.
+    color = _STATE_COLORS["AMBIGUOUS"]
     for status in statuses:
         if status.state != "AMBIGUOUS":
             continue
         console.print(
-            f"[red]AMBIGUOUS[/red]  {escape(status.source_id)} -> "
+            f"[{color}]{'AMBIGUOUS':<{_STATE_COL_WIDTH}}[/{color}] {escape(status.source_id)} -> "
             f"{escape(status.target_ref)} ({escape(format_collision(status.collision))})",
             highlight=False,
             soft_wrap=True,
