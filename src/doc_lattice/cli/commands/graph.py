@@ -36,14 +36,20 @@ def register_graph(app: typer.Typer) -> None:
         with exit_on_project_error(runtime):
             project = runtime.project(config)
             lattice = runtime.lattice(project)
+            statuses = check_lattice(lattice)
             stale = {
                 (status.source_id, status.target_id)
-                for status in check_lattice(lattice)
+                for status in statuses
                 if status.state == "STALE" and status.target_id is not None
             }
+            ambiguous = {
+                (status.source_id, status.target_id)
+                for status in statuses
+                if status.state == "AMBIGUOUS" and status.target_id is not None
+            }
         if selection.format == "json":
-            write_json(runtime, to_json(lattice, stale))
+            write_json(runtime, to_json(lattice, stale, ambiguous))
         elif selection.format == "dot":
-            write_text(runtime, to_dot(lattice, stale), newline=False)
+            write_text(runtime, to_dot(lattice, stale, ambiguous), newline=False)
         else:
-            write_text(runtime, to_mermaid(lattice, stale), newline=False)
+            write_text(runtime, to_mermaid(lattice, stale, ambiguous), newline=False)

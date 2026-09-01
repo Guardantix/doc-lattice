@@ -1,10 +1,18 @@
 """Tests for section extraction."""
 
+from pathlib import Path
+
 import pytest
+from hypothesis import given
+from hypothesis import strategies as st
 
 import doc_lattice.sections as sections_module
+from doc_lattice.frontmatter_parser import parse_document
+from doc_lattice.hashing import content_hash
+from doc_lattice.markdown_compat import full_heading_inventory
 from doc_lattice.sections import (
     Heading,
+    ancestor_chains,
     anchor_ids,
     build_toc,
     github_slug,
@@ -285,3 +293,115 @@ def test_anchor_ids_marker_heading_reserves_its_github_slug():
 
 def test_anchor_ids_empty_toc_is_empty():
     assert anchor_ids([]) == []
+
+
+def test_the_drift_hash_of_a_section_is_the_same_under_both_spellings():
+    body = "# H1\n\n## Two {#two}\ntext\n"
+    _fm, fence_body = parse_document(f"---\nid: a\n---\n{body}", Path("a.md"))
+    _cm, comment_body = parse_document(f"<!-- doc-lattice\nid: a\n-->\n{body}", Path("b.md"))
+
+    assert content_hash(section_text(fence_body, (3, 4))) == content_hash(
+        section_text(comment_body, (3, 4))
+    )
+
+
+def _chains(body: str) -> list[tuple[str, ...]]:
+    return ancestor_chains(full_heading_inventory(body), build_toc(body))
+
+
+@pytest.mark.parametrize(
+    ("form", "body"),
+    [
+        pytest.param("setext", "Parent\n------\n\n### Child\nbody\n", id="setext"),
+        pytest.param("indented", " ## Parent\n\n### Child\nbody\n", id="indented-one-space"),
+        pytest.param("indented", "   ## Parent\n\n### Child\nbody\n", id="indented-three"),
+        pytest.param("list-item", "- ## Parent\n\n### Child\nbody\n", id="list-item"),
+        pytest.param("quote", "> ## Parent\n\n### Child\nbody\n", id="block-quote"),
+    ],
+)
+def test_a_non_addressable_parent_still_supplies_the_ancestor_chain(form: str, body: str):
+    toc = build_toc(body)
+
+    # Addressability is unchanged: only the child is addressed.
+    assert [heading.text for heading in toc] == ["Child"], form
+    assert _chains(body) == [("## Parent",)], form
+
+
+def test_every_ancestor_form_renders_as_the_same_normalized_atx():
+    atx = "## Product A\n\n### Setup\nrun it\n"
+    setext = "Product A\n---------\n\n### Setup\nrun it\n"
+    quoted = "> ## Product A\n\n### Setup\nrun it\n"
+    marked = "## Product A {#pa}\n\n### Setup\nrun it\n"
+
+    # Only the ATX spellings put the parent in the TOC as well, so compare the child's chain,
+    # which is the last entry in every spelling.
+    chains = [_chains(body)[-1] for body in (atx, setext, quoted, marked)]
+
+    assert chains == [("## Product A",)] * 4
+
+
+def test_the_chain_of_a_top_level_heading_is_empty():
+    assert _chains("# Only\nbody\n") == [()]
+
+
+def test_a_deeper_ancestor_is_popped_by_a_shallower_sibling():
+    body = "# Top\n\n## A\n\n### Deep\n\n## B\n\n### Other\n"
+
+    assert _chains(body) == [(), ("# Top",), ("# Top", "## A"), ("# Top",), ("# Top", "## B")]
+
+
+def test_a_heading_only_the_addressable_scanner_sees_still_anchors_the_chain():
+    # A column-zero '#' inside an HTML comment is inert to the full CommonMark parse but is
+    # still addressed by extract_headings, so the merged outline must keep it.
+    body = "<!--\n# Hidden\n-->\n\n## Child\nbody\n"
+
+    assert [heading.text for heading in build_toc(body)] == ["Hidden", "Child"]
+    assert _chains(body) == [(), ("# Hidden",)]
+
+
+def _chains_reference(
+    outline: list[tuple[int, int, str]], toc_lines: set[int]
+) -> list[tuple[str, ...]]:
+    """Quadratic reference: an ancestor is the nearest preceding heading of each lower level."""
+    result: list[tuple[str, ...]] = []
+    for index, (line, level, _text) in enumerate(outline):
+        if line not in toc_lines:
+            continue
+        chain: list[str] = []
+        deepest = level
+        for _previous_line, previous_level, previous_text in reversed(outline[:index]):
+            if previous_level < deepest:
+                chain.append(f"{'#' * previous_level} {previous_text}")
+                deepest = previous_level
+        result.append(tuple(reversed(chain)))
+    return result
+
+
+@given(st.lists(st.integers(min_value=1, max_value=6), min_size=1, max_size=40))
+def test_ancestor_chains_matches_the_nearest_shallower_heading_reference(levels: list[int]):
+    forms = ["atx", "setext", "quote", "indent"]
+    parts: list[str] = []
+    outline: list[tuple[int, int, str]] = []
+    toc_lines: set[int] = set()
+    line = 1
+    for index, level in enumerate(levels):
+        text = f"H{index}"
+        form = forms[index % len(forms)]
+        # Setext only reaches levels 1 and 2, so a deeper level falls back to plain ATX.
+        if form == "setext" and level <= 2:
+            parts.append(f"{text}\n{('=' if level == 1 else '-') * 5}\n\n")
+            outline.append((line, level, text))
+            line += 3
+            continue
+        if form == "quote":
+            parts.append(f"> {'#' * level} {text}\n\n")
+        elif form == "indent":
+            parts.append(f"  {'#' * level} {text}\n\n")
+        else:
+            parts.append(f"{'#' * level} {text}\n\n")
+            toc_lines.add(line)
+        outline.append((line, level, text))
+        line += 2
+    body = "".join(parts)
+
+    assert _chains(body) == _chains_reference(outline, toc_lines)

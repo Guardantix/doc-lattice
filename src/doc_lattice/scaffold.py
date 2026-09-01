@@ -13,6 +13,7 @@ from ruamel.yaml.scalarstring import DoubleQuotedScalarString
 
 from .constants import (
     CHECKOUT_USES,
+    LATTICE_FORMAT_VERSION,
     PERSISTENCE_TEMP_SUFFIX,
     RECONCILE_AFTER_IMAGE_INFIX,
     RECONCILE_BEFORE_IMAGE_INFIX,
@@ -73,7 +74,9 @@ def render_config(docs_roots: tuple[str, ...], linear_team: str | None) -> str:
 
     The active block is dumped through ruamel.yaml so hostile scalars are quoted
     by the library's own emission logic, never by hand or string-interpolated. The
-    header comment and the commented-out example keys are static text.
+    header comment and the commented-out example keys are static text. The required
+    lattice_format key leads the active block, because it is the version-skew guard and an
+    adopter reading the file should meet it first.
 
     Args:
         docs_roots: The docs roots to write as the active docs_roots list.
@@ -82,7 +85,10 @@ def render_config(docs_roots: tuple[str, ...], linear_team: str | None) -> str:
     Returns:
         The full text of the config file.
     """
-    data: dict[str, list[str] | str] = {"docs_roots": list(docs_roots)}
+    data: dict[str, int | list[str] | str] = {
+        "lattice_format": LATTICE_FORMAT_VERSION,
+        "docs_roots": list(docs_roots),
+    }
     if linear_team is not None:
         data["linear_team"] = linear_team
     yaml = YAML()

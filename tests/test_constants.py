@@ -8,6 +8,8 @@ from doc_lattice.constants import (
     CHECKOUT_REF,
     CHECKOUT_USES,
     CHECKOUT_VERSION,
+    COMMENT_ENVELOPE_CLOSE,
+    COMMENT_ENVELOPE_OPEN,
     EDGE_STATES,
     SETUP_UV_REF,
     SETUP_UV_USES,
@@ -15,6 +17,7 @@ from doc_lattice.constants import (
     VALID_AUTHORITIES,
     VALID_BLOCKED_REASONS,
     VALID_EDGE_STATES,
+    VALID_ENVELOPE_KINDS,
     VALID_FRONTMATTER_DISPOSITIONS,
     VALID_LAYERS,
     VALID_LINEAR_STATE_TYPES,
@@ -26,6 +29,7 @@ from doc_lattice.constants import (
     Authority,
     BlockedReason,
     EdgeState,
+    EnvelopeKind,
     FrontmatterDisposition,
     Layer,
     LinearStateType,
@@ -49,14 +53,14 @@ def test_authorities_match_literal():
 
 def test_edge_states_match_literal():
     assert frozenset(get_args(EdgeState)) == VALID_EDGE_STATES
-    assert {"OK", "STALE", "UNRECONCILED", "BROKEN"} == set(VALID_EDGE_STATES)
+    assert {"OK", "STALE", "UNRECONCILED", "BROKEN", "AMBIGUOUS"} == set(VALID_EDGE_STATES)
 
 
 def test_edge_states_keep_literal_declaration_order():
     # Report output iterates EDGE_STATES, so its order is a user-visible contract and must
     # come from the Literal rather than from the unordered VALID_EDGE_STATES frozenset.
     assert get_args(EdgeState) == EDGE_STATES
-    assert EDGE_STATES == ("OK", "STALE", "UNRECONCILED", "BROKEN")
+    assert EDGE_STATES == ("OK", "STALE", "UNRECONCILED", "BROKEN", "AMBIGUOUS")
 
 
 def test_location_kinds_match_literal():
@@ -66,7 +70,9 @@ def test_location_kinds_match_literal():
 
 def test_frontmatter_dispositions_match_literal():
     assert frozenset(get_args(FrontmatterDisposition)) == VALID_FRONTMATTER_DISPOSITIONS
-    assert {"tracked", "untracked", "id-less"} == set(VALID_FRONTMATTER_DISPOSITIONS)
+    assert {"tracked", "untracked", "id-less", "misplaced-envelope"} == set(
+        VALID_FRONTMATTER_DISPOSITIONS
+    )
 
 
 def test_yaml_parsers_match_literal():
@@ -130,3 +136,10 @@ def test_action_refs_are_approved_full_commit_shas():
 def test_composed_uses_fragments_join_both_halves():
     assert f"actions/checkout@{CHECKOUT_REF} # {CHECKOUT_VERSION}" == CHECKOUT_USES
     assert f"astral-sh/setup-uv@{SETUP_UV_REF} # {SETUP_UV_VERSION}" == SETUP_UV_USES
+
+
+def test_envelope_kind_domain_is_derived_from_the_literal():
+    assert frozenset(get_args(EnvelopeKind)) == VALID_ENVELOPE_KINDS
+    assert {"fence", "comment"} == VALID_ENVELOPE_KINDS
+    assert COMMENT_ENVELOPE_OPEN == "<!-- doc-lattice"
+    assert COMMENT_ENVELOPE_CLOSE == "-->"

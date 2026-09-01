@@ -318,3 +318,19 @@ def test_findings_are_sorted_and_lossless(refs, states):
         r for r in set(refs) if states.get(r, "not-found") in _GRADED_STATES or r not in states
     }
     assert emitted == expected
+
+
+def test_an_ambiguous_edge_still_triggers_the_audit():
+    # check_lattice gives an edge exactly one state, so an edge whose target sits in a
+    # slug-collision component reports AMBIGUOUS *instead of* STALE. Gating the trigger on
+    # STALE alone would therefore drop a genuinely drifted edge out of `linear` the moment a
+    # duplicate heading appeared upstream, turning the gate green on drift it reported before.
+    up = _node("up", "# Notes\nalpha\n\n# Notes\nbeta\n")
+    down = _node("down", "# D\nb\n", derives=[("up#notes", _STALE_SEEN)], tickets=("PC-1",))
+    lattice = build_lattice([up, down])
+
+    assert [status.state for status in check_lattice(lattice)] == ["AMBIGUOUS"]
+    assert build_audit_trigger(lattice, None) == {"down": ("up#notes",)}
+
+    findings = stale_shipped(lattice, build_audit_trigger(lattice, None), {}, {})
+    assert [finding.node_id for finding in findings] == ["down"]

@@ -269,7 +269,7 @@ def test_no_lever_pty_output_still_carries_ansi_styling():
     assert b"\x1b[" in stderr, stderr
     plain = _pty_plain_text(stderr)
     assert "unknown --only state(s): 123" in plain
-    assert "valid: BROKEN, OK, STALE, UNRECONCILED" in plain
+    assert "valid: AMBIGUOUS, BROKEN, OK, STALE, UNRECONCILED" in plain
 
 
 def test_create_runtime_disabled_console_strips_bold_and_link_markup(monkeypatch, tmp_path: Path):
@@ -507,7 +507,9 @@ def test_lattice_loading_commands_exit_2_on_unclosed_frontmatter(
     broken = docs / "broken.md"
     broken.write_text("---\nid: vanished\n# Missing close\n", encoding="utf-8")
     if cache_enabled:
-        (tmp_path / ".doc-lattice.yml").write_text("cache_key: cli-unclosed\n", encoding="utf-8")
+        (tmp_path / ".doc-lattice.yml").write_text(
+            "lattice_format: 2\ncache_key: cli-unclosed\n", encoding="utf-8"
+        )
     env = {"XDG_CACHE_HOME": str(tmp_path / "xdg"), "NO_COLOR": "1", "COLUMNS": "240"}
 
     result = _run(args, tmp_path, env)
@@ -866,7 +868,9 @@ def test_check_exits_2_on_non_markdown_docs_roots_entry(tmp_path: Path, monkeypa
     # AC3: an existing docs_roots entry that is neither a directory nor a .md file must be
     # rejected at config load, before check does any lattice work, with exit code 2.
     (tmp_path / "notes.txt").write_text("x", encoding="utf-8")
-    (tmp_path / ".doc-lattice.yml").write_text("docs_roots: [notes.txt]\n", encoding="utf-8")
+    (tmp_path / ".doc-lattice.yml").write_text(
+        "lattice_format: 2\ndocs_roots: [notes.txt]\n", encoding="utf-8"
+    )
     monkeypatch.chdir(tmp_path)
     result = runner.invoke(app, ["check"])
     assert result.exit_code == 2
@@ -884,7 +888,9 @@ def test_cached_cli_output_matches_uncached(lattice_dir: Path, tmp_path: Path, a
     # uncached run's stdout and exit code byte-for-byte at the CLI layer.
     env = {"XDG_CACHE_HOME": str(tmp_path / "xdg"), "NO_COLOR": "1"}
     uncached = _run(args, lattice_dir, env)
-    (lattice_dir / ".doc-lattice.yml").write_text("cache_key: cli\n", encoding="utf-8")
+    (lattice_dir / ".doc-lattice.yml").write_text(
+        "lattice_format: 2\ncache_key: cli\n", encoding="utf-8"
+    )
     cold = _run(args, lattice_dir, env)  # writes cache
     warm = _run(args, lattice_dir, env)  # reads cache
     assert cold.stdout == uncached.stdout
@@ -920,7 +926,7 @@ def test_multi_line_config_diagnostic_survives_the_stderr_renderer(tmp_path: Pat
     # parenthetical rather than as a property of the error.
     assert lines[2] == (
         "  bogus: Extra inputs are not permitted (accepted keys: cache_key, cache_trust_stat, "
-        "docs_roots, ignore_globs, linear_team)"
+        "docs_roots, ignore_globs, lattice_format, linear_team)"
     )
 
 
@@ -930,7 +936,9 @@ def test_multi_line_frontmatter_diagnostic_carries_its_code_on_the_header(
     # The second independently formatted multi-line error type. Config and frontmatter reach
     # format_validation_error through different callers and different models, so pinning both
     # proves the placement is the shared renderer's policy rather than one caller's shape.
-    (tmp_path / ".doc-lattice.yml").write_text("docs_roots: [docs]\n", encoding="utf-8")
+    (tmp_path / ".doc-lattice.yml").write_text(
+        "lattice_format: 2\ndocs_roots: [docs]\n", encoding="utf-8"
+    )
     doc = tmp_path / "docs" / "a.md"
     doc.parent.mkdir()
     doc.write_text("---\nid: doc-a\nbogus: 1\n---\n# A\n", encoding="utf-8")
@@ -969,7 +977,9 @@ def _broken_frontmatter_project(root: Path) -> Path:
     Returns:
         The document that fails, for the diagnostic the caller asserts on.
     """
-    (root / ".doc-lattice.yml").write_text("docs_roots: [docs]\n", encoding="utf-8")
+    (root / ".doc-lattice.yml").write_text(
+        "lattice_format: 2\ndocs_roots: [docs]\n", encoding="utf-8"
+    )
     doc = root / "docs" / "a.md"
     doc.parent.mkdir()
     doc.write_text("---\nid: doc-a\nbogus: 1\n---\n# A\n", encoding="utf-8")
@@ -1038,7 +1048,9 @@ def test_github_annotation_resolves_against_a_nested_annotation_root(
 def test_github_format_annotates_an_unreadable_document(command: str, tmp_path: Path, monkeypatch):
     # The rule is the document-scoped base, not the frontmatter type: an unreadable document is
     # equally a per-document defect and is annotated by the same branch.
-    (tmp_path / ".doc-lattice.yml").write_text("docs_roots: [docs]\n", encoding="utf-8")
+    (tmp_path / ".doc-lattice.yml").write_text(
+        "lattice_format: 2\ndocs_roots: [docs]\n", encoding="utf-8"
+    )
     doc = tmp_path / "docs" / "a.md"
     doc.parent.mkdir()
     doc.write_text("---\nid: doc-a\n# A\n", encoding="utf-8")
@@ -1098,7 +1110,9 @@ def test_an_unattachable_failure_annotation_is_reported_on_stderr(
     # This run's only annotation is the failure's, so an absolute path GitHub drops leaves the
     # gate failing with nothing on the diff. The findings renderers already warn about that; the
     # failure path owes the same report or the case is undiagnosable from the workflow log.
-    (tmp_path / ".doc-lattice.yml").write_text("docs_roots: [docs]\n", encoding="utf-8")
+    (tmp_path / ".doc-lattice.yml").write_text(
+        "lattice_format: 2\ndocs_roots: [docs]\n", encoding="utf-8"
+    )
     doc = tmp_path / "docs" / "a.md"
     doc.parent.mkdir()
     doc.write_text("---\nid: doc-a\nbogus: 1\n---\n# A\n", encoding="utf-8")
@@ -1119,7 +1133,9 @@ def test_single_line_diagnostic_carries_its_code_beside_the_severity(tmp_path: P
     # A single-line diagnostic keeps one grammar with the multi-line ones rather than retaining
     # the old trailing suffix, so a stderr scraper matches one prefix for every project error.
     (tmp_path / "notes.txt").write_text("x", encoding="utf-8")
-    (tmp_path / ".doc-lattice.yml").write_text("docs_roots: [notes.txt]\n", encoding="utf-8")
+    (tmp_path / ".doc-lattice.yml").write_text(
+        "lattice_format: 2\ndocs_roots: [notes.txt]\n", encoding="utf-8"
+    )
     monkeypatch.chdir(tmp_path)
     monkeypatch.setenv("COLUMNS", "1000")
 
@@ -1285,7 +1301,9 @@ def test_cache_write_warning_under_no_color_emits_no_escape_byte(tmp_path: Path)
     docs = tmp_path / "docs"
     docs.mkdir()
     (docs / "a.md").write_text("---\nid: a\n---\n# A\n", encoding="utf-8")
-    (tmp_path / ".doc-lattice.yml").write_text("cache_key: slot\n", encoding="utf-8")
+    (tmp_path / ".doc-lattice.yml").write_text(
+        "lattice_format: 2\ncache_key: slot\n", encoding="utf-8"
+    )
     blocked = tmp_path / _HOSTILE_CACHE_DIR
     blocked.write_text("a file, not a directory\n", encoding="utf-8")
 
@@ -1780,7 +1798,9 @@ def _duplicate_id_lattice(tmp_path: Path) -> None:
     """Write the shortest lattice whose load raises an adapter-caught ``ProjectError``."""
     docs = tmp_path / "docs"
     docs.mkdir()
-    (tmp_path / ".doc-lattice.yml").write_text("cache_key: pipe-policy\n", encoding="utf-8")
+    (tmp_path / ".doc-lattice.yml").write_text(
+        "lattice_format: 2\ncache_key: pipe-policy\n", encoding="utf-8"
+    )
     for name in ("first.md", "second.md"):
         (docs / name).write_text("---\nid: duplicated\n---\n# t\n", encoding="utf-8")
 
@@ -1789,7 +1809,9 @@ def _advisory_then_stdout_lattice(tmp_path: Path) -> None:
     """Write a lattice that warns on stderr and then does real stdout work that drifts."""
     docs = tmp_path / "docs"
     docs.mkdir()
-    (tmp_path / ".doc-lattice.yml").write_text("cache_key: pipe-policy\n", encoding="utf-8")
+    (tmp_path / ".doc-lattice.yml").write_text(
+        "lattice_format: 2\ncache_key: pipe-policy\n", encoding="utf-8"
+    )
     (docs / "no-id.md").write_text("---\ntitle: prose\n---\n# t\n", encoding="utf-8")
     (docs / "tracked.md").write_text(
         "---\nid: tracked\nderives_from:\n  - ref: ghost\n---\n# r\n", encoding="utf-8"
@@ -1918,3 +1940,29 @@ def test_rich_still_offers_the_hook_the_policy_is_built_on():
     # assertion that turns its removal in a future rich into a failure here rather than a
     # silent return to exit 1 on `--help`.
     assert callable(getattr(Console, "on_broken_pipe", None))
+
+
+def test_ambiguous_output_is_byte_identical_across_every_cache_tier(tmp_path: Path, monkeypatch):
+    monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path / "cache"))
+    docs = tmp_path / "docs"
+    docs.mkdir()
+    (docs / "up.md").write_text("---\nid: up\n---\n# Notes\n\n# Notes\n", encoding="utf-8")
+    (docs / "down.md").write_text(
+        "---\nid: down\nderives_from:\n  - ref: up#notes\n---\n# Down\n", encoding="utf-8"
+    )
+    config = tmp_path / ".doc-lattice.yml"
+    config.write_text(
+        "lattice_format: 2\ndocs_roots:\n  - docs\ncache_key: tiers\ncache_trust_stat: true\n",
+        encoding="utf-8",
+    )
+
+    for argv in (
+        ["check", "--config", str(config)],
+        ["check", "--config", str(config), "--format", "json"],
+        ["lint", "--config", str(config), "--format", "json"],
+        ["impact", "up", "--config", str(config), "--format", "json"],
+        ["graph", "--config", str(config), "--format", "json"],
+    ):
+        runs = [runner.invoke(app, argv) for _ in range(3)]
+        assert runs[0].stdout == runs[1].stdout == runs[2].stdout, argv
+        assert "Notes" in runs[2].stdout, argv

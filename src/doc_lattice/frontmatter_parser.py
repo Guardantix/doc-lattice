@@ -5,16 +5,24 @@ disposition it returns is what the caller reports from, so the cache-free, cold-
 warm-cache paths can all warn from a single site.
 """
 
+import re
 import warnings
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any
 
 from pydantic import ValidationError
 from ruamel.yaml.error import ReusedAnchorWarning
 
-from .constants import LATTICE_INTENT_KEYS
+from .constants import (
+    COMMENT_ENVELOPE_CLOSE,
+    COMMENT_ENVELOPE_OPEN,
+    LATTICE_INTENT_KEYS,
+    EnvelopeKind,
+)
 from .error_types import FrontmatterError, UnreadableDocError
+from .hashing import normalize_newlines
+from .markdown_compat import code_block_line_spans
 from .model import NodeMeta, ParsedMeta
 from .path_utils import format_path_for_display
 from .validation_render import format_validation_error
@@ -22,6 +30,12 @@ from .yaml_boundary import YAML_LOAD_ERRORS, SafeYamlLoader
 from .yaml_error_render import format_yaml_error_for_display
 
 _FENCE = "---"
+# A first line that means the comment envelope but is not spelled exactly. The opener is
+# byte-exact on purpose, and a byte-exact rule with no near-miss tier would let a trailing space
+# make the intended node vanish from the lattice under a green gate, so the near miss is an
+# error rather than ordinary prose. Deliberately wider than the whitespace forms: an author who
+# writes `<!--doc-lattice` or `<!-- DOC-LATTICE` meant the envelope just as plainly.
+_OPENER_NEAR_MISS = re.compile(r"^\s*<!--\s*doc-lattice\s*$", re.IGNORECASE)
 _BOM = chr(0xFEFF)  # UTF-8 byte-order mark; strip a leading one so the opening fence is detected
 # Pinned to the pure Python parser. The two ruamel parsers do not accept the same documents, so
 # leaving the choice to ruamel made a document's tracked status depend on whether the optional
@@ -39,24 +53,41 @@ _LOADER = SafeYamlLoader(parser="pure")
 # The two node-free outcomes are immutable and carry no per-file state, so they are shared.
 _UNTRACKED = ParsedMeta(meta=None, disposition="untracked")
 _ID_LESS = ParsedMeta(meta=None, disposition="id-less")
+_MISPLACED = ParsedMeta(meta=None, disposition="misplaced-envelope")
 # Rendered in place of a field path when pydantic reports no location. NodeMeta declares no
 # model-level validator today, and a non-mapping block is returned as untracked before it ever
 # reaches validation, so this is defensive: it exists so a future whole-block rule cannot
 # render a field name the author never wrote.
 _ROOT_LOCATION = "<frontmatter>"
+# Cheap module-level pre-check for `detect_misplaced_envelope`: `_OPENER_NEAR_MISS` with its
+# anchors removed, so it admits every spelling the scan itself accepts and a file that mentions
+# the sentinel nowhere is answered by one `search`. It is deliberately a strict superset rather
+# than an equivalent: it matches anywhere in a line, so prose naming `<!-- doc-lattice`
+# mid-sentence trips it and is then rejected by the per-line `fullmatch`, which costs a line scan
+# and no parse. Widen `_OPENER_NEAR_MISS` and this has to be widened with it, or the scan stops
+# firing for exactly the spelling that was just added.
+_MISPLACED_PRECHECK = re.compile(r"<!--\s*doc-lattice", re.IGNORECASE)
 
 
 @dataclass(frozen=True, slots=True)
 class FrontmatterParts:
     """Every source piece a document's frontmatter block is spelled with.
 
+    ``open_fence`` and ``close_fence`` hold the envelope's opening and closing delimiter line
+    whichever spelling the file uses, so the byte-exact rewriter reattaches what the author
+    wrote without branching on ``kind``.
+
     Attributes:
-        prefix: A leading byte-order mark, which precedes the opening fence.
-        open_fence: The opening fence line as written, any surrounding space included.
-        raw_meta: The YAML between the fences, empty when the block holds none.
-        close_fence: The closing fence line as written.
-        close_fence_newline: The newline ending the closing fence, empty at end of file.
+        prefix: A leading byte-order mark, which precedes the opening delimiter.
+        open_fence: The opening delimiter line as written, any surrounding space included.
+        raw_meta: The YAML between the delimiters, empty when the block holds none.
+        close_fence: The closing delimiter line as written.
+        close_fence_newline: The newline ending the closing delimiter, empty at end of file.
         body: Everything after that newline.
+        kind: Which envelope the file declared.
+        meta_start: Offset into the original text where ``raw_meta`` begins.
+        meta_end: Offset into the original text where ``raw_meta`` ends, so
+            ``text[meta_start:meta_end] == raw_meta`` for either spelling.
     """
 
     prefix: str
@@ -65,13 +96,16 @@ class FrontmatterParts:
     close_fence: str
     close_fence_newline: str
     body: str
+    kind: EnvelopeKind
+    meta_start: int
+    meta_end: int
 
 
 def split_frontmatter_parts(text: str, source: Path) -> FrontmatterParts | None:
     """Split a document into every piece its frontmatter block is written with.
 
     ``split_frontmatter`` returns the two pieces a reader needs. This returns the rest of
-    them as well, since a byte-exact rewrite has to put back the fences the author wrote,
+    them as well, since a byte-exact rewrite has to put back the delimiters the author wrote,
     and any byte-order mark before them, rather than the spelling this engine would choose.
 
     Args:
@@ -79,34 +113,99 @@ def split_frontmatter_parts(text: str, source: Path) -> FrontmatterParts | None:
         source: The file the frontmatter came from, for error messages.
 
     Returns:
-        The document's frontmatter pieces, or None if it does not open with a fence.
+        The document's frontmatter pieces, or None if it opens neither envelope.
 
     Raises:
-        UnreadableDocError: If an opening fence has no closing fence.
+        UnreadableDocError: If an opening delimiter has no closing delimiter.
+        FrontmatterError: If a comment envelope is preceded by a byte-order mark.
     """
     # Strip a leading UTF-8 BOM (U+FEFF) so a file saved with one still has its opening
     # "---" fence recognized on line 0 instead of being read as having no frontmatter.
     stripped = text.lstrip(_BOM)
+    prefix = text[: len(text) - len(stripped)]
+    # `str.split` always yields at least one element, so `lines[0]` needs no emptiness guard.
     lines = stripped.split("\n")
-    if not lines or lines[0].strip() != _FENCE:
-        return None
-    for closing_fence_index, line in enumerate(lines[1:], start=1):
-        if line.strip() == _FENCE:
-            raw_meta = "\n".join(lines[1:closing_fence_index])
-            # Splitting on newlines leaves the closing fence as the final element only when
-            # the file ends on it, so a last line here is what shows the newline was there.
-            trailing = "\n" if closing_fence_index < len(lines) - 1 else ""
-            return FrontmatterParts(
-                text[: len(text) - len(stripped)],
-                lines[0],
-                raw_meta + "\n" if raw_meta else "",
-                line,
-                trailing,
-                "\n".join(lines[closing_fence_index + 1 :]),
+    if lines[0].strip() == _FENCE:
+        return _split_envelope(prefix, lines, "fence", source)
+    if lines[0] == COMMENT_ENVELOPE_OPEN:
+        if prefix:
+            msg = (
+                f"doc-lattice comment envelope in {format_path_for_display(source)} is preceded "
+                "by a byte-order mark, which stops Markdown renderers reading it as a comment, "
+                f"so it would print as text; remove the mark or use the '{_FENCE}' fence spelling"
             )
-    msg = (
-        f"unclosed YAML frontmatter in {format_path_for_display(source)}: add a closing '---' fence"
-    )
+            raise FrontmatterError(msg, source=source)
+        return _split_envelope(prefix, lines, "comment", source)
+    if _OPENER_NEAR_MISS.fullmatch(lines[0]):
+        msg = (
+            f"line 1 of {format_path_for_display(source)} means the doc-lattice comment "
+            "envelope but is not spelled exactly; the opener must be the first line and "
+            f"exactly '{COMMENT_ENVELOPE_OPEN}' at column zero, with no indentation, no "
+            "trailing whitespace, and no case variance"
+        )
+        raise FrontmatterError(msg, source=source)
+    return None
+
+
+def _split_envelope(
+    prefix: str, lines: list[str], kind: EnvelopeKind, source: Path
+) -> FrontmatterParts:
+    """Split an already-recognized envelope into its pieces.
+
+    Args:
+        prefix: The leading byte-order mark, empty when the file carries none.
+        lines: The BOM-stripped document split on newlines.
+        kind: The envelope the opening line declared.
+        source: The file the frontmatter came from, for error messages.
+
+    Returns:
+        The document's frontmatter pieces.
+
+    Raises:
+        UnreadableDocError: If the opening delimiter has no closing delimiter.
+    """
+    closer = _FENCE if kind == "fence" else COMMENT_ENVELOPE_CLOSE
+    for closing_index, line in enumerate(lines[1:], start=1):
+        # The fence rule has always tolerated surrounding space on its closing line. The comment
+        # closer does not, and the reason is this engine's rather than CommonMark's: CommonMark
+        # ends an HTML comment block at the first line *containing* "-->", so indentation and
+        # trailing space are both terminators to a renderer. Byte-exactness here is what keeps
+        # the span doc-lattice reads as the envelope identical to the span it rewrites, the same
+        # property the opener's byte-exact rule buys. The cost is that a stray space after an
+        # otherwise correct "-->" fails loud as an unclosed envelope, which is why the
+        # diagnostic below names whitespace as the thing to look for.
+        matched = line.strip() == closer if kind == "fence" else line == closer
+        if not matched:
+            continue
+        raw_meta = "\n".join(lines[1:closing_index])
+        # Splitting on newlines leaves the closing delimiter as the final element only when
+        # the file ends on it, so a last line here is what shows the newline was there.
+        trailing = "\n" if closing_index < len(lines) - 1 else ""
+        meta_start = len(prefix) + len(lines[0]) + 1
+        meta_end = meta_start + (len(raw_meta) + 1 if raw_meta else 0)
+        return FrontmatterParts(
+            prefix,
+            lines[0],
+            raw_meta + "\n" if raw_meta else "",
+            line,
+            trailing,
+            "\n".join(lines[closing_index + 1 :]),
+            kind,
+            meta_start,
+            meta_end,
+        )
+    if kind == "fence":
+        msg = (
+            f"unclosed YAML frontmatter in {format_path_for_display(source)}: "
+            "add a closing '---' fence"
+        )
+    else:
+        msg = (
+            f"unclosed doc-lattice comment envelope in {format_path_for_display(source)}: "
+            "add a closing '-->' line at column zero, spelled exactly, with no indentation and "
+            "no trailing whitespace. A renderer ends the comment at any line containing '-->', "
+            "so a closer that only looks right to the eye reaches this message"
+        )
     raise UnreadableDocError(msg, source=source)
 
 
@@ -130,7 +229,76 @@ def split_frontmatter(text: str, source: Path) -> tuple[str | None, str]:
     return (None, text) if parts is None else (parts.raw_meta, parts.body)
 
 
-def parse_meta(raw_meta: str | None, source: Path) -> ParsedMeta:
+def refuse_double_hyphen(raw_meta: str, source: Path, *, first_body_line: int) -> None:
+    """Refuse a comment envelope body carrying the substring ``--``.
+
+    ``--`` inside an HTML comment is where the HTML specification and CommonMark versions
+    disagree, and the failure mode is silent and user-facing: a legal but unlucky id such as
+    ``foo--bar`` could terminate or invalidate the comment in some renderer and turn the
+    invisible envelope into rendered text. Refusing the substring outright is stricter than
+    GitHub requires today and keeps the invisibility guarantee independent of renderer behavior.
+    The refusal is scoped to the comment spelling; the fence spelling accepts ``--`` as it always
+    has, so converting a file that uses such an id means renaming the id or keeping the fence.
+
+    Args:
+        raw_meta: The envelope's inner YAML text.
+        source: The file the envelope came from, for error messages.
+        first_body_line: The 1-based file line ``raw_meta``'s first line occupies, so the
+            diagnostic names a line the author can jump to.
+
+    Raises:
+        FrontmatterError: If any line of ``raw_meta`` contains ``--``.
+    """
+    for offset, line in enumerate(raw_meta.split("\n")):
+        if "--" in line:
+            msg = (
+                f"the doc-lattice comment envelope in {format_path_for_display(source)} contains "
+                f"'--' on line {first_body_line + offset}; HTML comments give '--' no agreed "
+                "meaning, so a renderer may end the comment there and print the envelope as "
+                f"text. Rename the value, drop the directive if the '--' is a '{_FENCE}' "
+                f"document-start marker or a '%YAML' version, or keep the '{_FENCE}' fence "
+                "spelling for this file"
+            )
+            raise FrontmatterError(msg, source=source)
+
+
+def detect_misplaced_envelope(text: str) -> bool:
+    """Report whether a document carries the comment opener where it will not be read as one.
+
+    Three stage, cheapest first, because only the last stage costs a parse. The substring
+    pre-check is what every ordinary document pays. The line scan then narrows to the lines that
+    are actually a whole opener, which the pre-check cannot decide: it matches anywhere in a
+    line, so prose that merely mentions ``<!-- doc-lattice`` mid-sentence trips it, and this
+    file and ARCHITECTURE.md both do. Only when a candidate line survives does the markdown-it
+    parse run to ask whether it sits inside a code block, so a README quoting the syntax in a
+    fenced example is answered correctly and a document that merely names the sentinel pays no
+    parse at all. A line qualifies the same way line 1 of the file does: the exact opener or one
+    of the near-miss spellings `_OPENER_NEAR_MISS` accepts, since an author who misplaced
+    `<!--doc-lattice` or `<!-- DOC-LATTICE` meant the envelope just as plainly as one who
+    misplaced the exact spelling.
+
+    Args:
+        text: The full file text of a document whose parse found no node, tracked or not: an
+            untracked file, or an id-less one whose declared metadata did not open an envelope.
+
+    Returns:
+        True when a line matching the opener, exactly or by near miss, sits outside every code
+        block.
+    """
+    if not _MISPLACED_PRECHECK.search(text):
+        return False
+    candidates = [
+        number
+        for number, line in enumerate(normalize_newlines(text).split("\n"), start=1)
+        if _OPENER_NEAR_MISS.fullmatch(line)
+    ]
+    if not candidates:
+        return False
+    coded = code_block_line_spans(text)
+    return any(not any(start <= number <= end for start, end in coded) for number in candidates)
+
+
+def parse_meta(raw_meta: str | None, source: Path, *, kind: EnvelopeKind = "fence") -> ParsedMeta:
     """Classify a raw frontmatter block, validating it into NodeMeta when it names a node.
 
     A block with no ``id`` is graded by what else it declares. Carrying any of
@@ -139,9 +307,15 @@ def parse_meta(raw_meta: str | None, source: Path) -> ParsedMeta:
     Anything else is metadata this engine does not own, and is skipped as ``"id-less"`` for the
     caller to warn about. A file that never opened a fence is ``"untracked"`` and says nothing.
 
+    The fence spelling degrades softly, because it has innocent readings (Jekyll frontmatter, a
+    thematic break). ``<!-- doc-lattice`` has exactly one reading: it declares lattice intent by
+    name, so the comment spelling fails closed instead. Any body that is not a mapping carrying
+    ``id`` is an error, and there is no untracked or id-less tier for it.
+
     Args:
         raw_meta: The YAML frontmatter text, or None when the file opened no fence.
         source: The file the frontmatter came from, for error messages.
+        kind: The envelope spelling, either "fence" or "comment"; defaults to "fence".
 
     Returns:
         The validated node and its disposition, or a null node and the reason it was skipped.
@@ -149,7 +323,8 @@ def parse_meta(raw_meta: str | None, source: Path) -> ParsedMeta:
     Raises:
         UnreadableDocError: If the YAML cannot be parsed.
         FrontmatterError: If the frontmatter has an unknown or malformed key, or declares
-            lattice intent with no ``id``.
+            lattice intent with no ``id`` (or if ``kind`` is "comment" and the body cannot be
+            parsed into a mapping with an ``id``).
     """
     if raw_meta is None:
         return _UNTRACKED
@@ -163,8 +338,22 @@ def parse_meta(raw_meta: str | None, source: Path) -> ParsedMeta:
     # is the same untracked prose as a file with no fence. Warning on it would fire on any
     # document that merely opens with a thematic break.
     if not isinstance(data, dict):
+        if kind == "comment":
+            msg = (
+                f"the doc-lattice comment envelope in {format_path_for_display(source)} does not "
+                "hold a YAML mapping, so it declares no 'id'; the envelope names this engine, so "
+                "an unusable body is an error rather than untracked prose"
+            )
+            raise FrontmatterError(msg, source=source)
         return _UNTRACKED
     if "id" not in data:
+        if kind == "comment":
+            msg = (
+                f"the doc-lattice comment envelope in {format_path_for_display(source)} has no "
+                "'id' key, so the file and every edge it declares would be dropped from the "
+                "lattice; add an 'id' (check it for a typo)"
+            )
+            raise FrontmatterError(msg, source=source)
         return _id_less(data, source)
     try:
         meta = NodeMeta.model_validate(data)
@@ -177,6 +366,70 @@ def parse_meta(raw_meta: str | None, source: Path) -> ParsedMeta:
         )
         raise FrontmatterError(msg, source=source) from exc
     return ParsedMeta(meta=meta, disposition="tracked", reused_anchors=reused_anchors)
+
+
+def parse_document(text: str, source: Path) -> tuple[ParsedMeta, str]:
+    """Split and classify one whole document, in either envelope spelling.
+
+    The one entry point the load paths use. Splitting and classifying are separate functions
+    because the rewriter needs the split alone, but the comment spelling's rules span both: the
+    ``--`` refusal is measured against the file's own line numbers, which only the split knows,
+    and the fail-closed classification needs the envelope kind, which only the split derives.
+
+    Every file whose fence did not itself open a comment envelope runs the misplaced-envelope
+    scan over what is left. What differs is the verdict, not whether the scan runs.
+
+    A file whose parse found no node is reclassified ``"misplaced-envelope"``, whether that is
+    because it opened no envelope at all or because it opened a fence that declared no ``id``
+    (Jekyll frontmatter, say) ahead of a comment envelope the fence's own scan never reaches.
+
+    A file whose fence did resolve to a node stays ``"tracked"`` and carries
+    ``shadowed_envelope`` instead. It cannot be reclassified: it is a node, under the fence's
+    metadata, and the envelope below it is body text. That is precisely the half-converted state
+    the 7.0.0 migration warns about, so leaving it undiagnosed meant the one conversion mistake
+    the migration names in prose was also the one the engine said nothing about.
+
+    The scan's own rules are what make it safe to run over a tracked file's prose:
+    ``_OPENER_NEAR_MISS`` is a ``fullmatch``, so only a line that is nothing but the opener
+    counts, and ``code_block_line_spans`` already excludes fenced and indented code, which is
+    where a document quoting the envelope form puts it.
+
+    Args:
+        text: The full file text, already newline-normalized by ``discovery.decode_doc``.
+        source: The discovered path, named in every diagnostic this raises.
+
+    Returns:
+        The parse outcome and the document body after the envelope. The outcome is
+        ``"misplaced-envelope"`` in place of ``"untracked"`` or ``"id-less"`` when the document,
+        or the body left after an untracked or id-less fence, carries the comment opener (or a
+        near-miss spelling of it) outside every code block; a tracked outcome carries
+        ``shadowed_envelope`` for the same condition in its body.
+
+    Raises:
+        UnreadableDocError: If an opening delimiter has no closing delimiter, or the YAML
+            cannot be parsed.
+        FrontmatterError: If the frontmatter has an unknown or malformed key, declares lattice
+            intent with no ``id``, spells a near-miss comment opener, carries a byte-order mark
+            before a comment opener, holds ``--`` inside a comment envelope, or is a comment
+            envelope that is not a mapping carrying ``id``.
+    """
+    parts = split_frontmatter_parts(text, source)
+    if parts is None:
+        return (_MISPLACED if detect_misplaced_envelope(text) else _UNTRACKED), text
+    if parts.kind == "comment":
+        refuse_double_hyphen(
+            parts.raw_meta,
+            source,
+            first_body_line=text[: parts.meta_start].count("\n") + 1,
+        )
+    outcome = parse_meta(parts.raw_meta, source, kind=parts.kind)
+    # A comment envelope consumed the top of the file, so anything below it that looks like an
+    # opener is the author quoting the form, not a second envelope competing with the first.
+    if parts.kind == "comment" or not detect_misplaced_envelope(parts.body):
+        return outcome, parts.body
+    if outcome.meta is None:
+        return _MISPLACED, parts.body
+    return replace(outcome, shadowed_envelope=True), parts.body
 
 
 def _load_recording_reused_anchors(raw_meta: str) -> tuple[Any, bool]:

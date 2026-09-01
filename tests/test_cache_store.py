@@ -30,6 +30,7 @@ def _sample_cache_file() -> CacheFile:
                 ),
                 disposition="tracked",
                 reused_anchors=False,
+                shadowed_envelope=False,
             )
         },
     )

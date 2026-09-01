@@ -47,6 +47,7 @@ def _entry_for(
         node=node,
         disposition=disposition or ("tracked" if node is not None else "untracked"),
         reused_anchors=reused_anchors,
+        shadowed_envelope=False,
     )
 
 
@@ -127,6 +128,7 @@ def test_trusting_stat_hit_skips_read_and_hash(tmp_path: Path) -> None:
         node=None,
         disposition="id-less",
         reused_anchors=False,
+        shadowed_envelope=False,
     )
 
     result = resolve(entry, path, TRUSTING)
@@ -134,7 +136,11 @@ def test_trusting_stat_hit_skips_read_and_hash(tmp_path: Path) -> None:
     # A stat-tier hit never reads the file, so the disposition it reports can only come from
     # the entry. That is what lets a warm run replay the skip its cold run reported.
     assert result == CacheHit(
-        doc=None, disposition="id-less", reused_anchors=False, refreshed_stat=None
+        doc=None,
+        disposition="id-less",
+        reused_anchors=False,
+        shadowed_envelope=False,
+        refreshed_stat=None,
     )
 
 
@@ -147,6 +153,7 @@ def test_verify_policy_disables_stat_tier(tmp_path: Path) -> None:
         node=None,
         disposition="untracked",
         reused_anchors=False,
+        shadowed_envelope=False,
     )
 
     result = resolve(entry, path, VERIFY)

@@ -4,6 +4,7 @@ from typing import Annotated
 
 import typer
 
+from ...check import ambiguous_edges
 from ...constants import VALID_BASIC_OUTPUT_FORMATS
 from ...linear_fetch import fetch_tickets
 from ...linear_render import findings_json, render_findings
@@ -66,10 +67,11 @@ def register_linear(app: typer.Typer) -> None:
             refs = {ref for node_id in trigger for ref in lattice.nodes_by_id[node_id].tickets}
             tickets, rejected = fetch_tickets(refs, project.config.linear_team)
             findings = stale_shipped(lattice, trigger, tickets, rejected)
+            ambiguous = ambiguous_edges(lattice)
         if selection.format == "json":
-            write_json(runtime, findings_json(findings), indent=selection.indent)
+            write_json(runtime, findings_json(findings, ambiguous), indent=selection.indent)
         else:
-            render_findings(runtime.stdout, findings)
+            render_findings(runtime.stdout, findings, ambiguous)
         if exit_code:
             gate = {"DANGER", "BLOCKED"} | ({"WARNING"} if warn_exit else set())
             if any(finding.severity in gate for finding in findings):

@@ -1,7 +1,7 @@
 """Domain types for the lattice graph."""
 
 from collections.abc import Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Annotated
 
@@ -172,12 +172,81 @@ class Location:
 
 
 @dataclass(frozen=True, slots=True)
+class CollisionMember:
+    """One heading in a slug-collision component, ready to name in any sink.
+
+    ``label`` is already sanitized by ``text_utils.safe_heading_label`` at derivation time, so
+    the cached and uncached paths cannot disagree about it. ``line`` is the heading's 1-based
+    line in the file, envelope included, because every sink prints it to a reader opening that
+    file. It is not a body offset and is not comparable with a ``SectionRecord`` span, which
+    stays body-relative for slicing.
+    """
+
+    label: str
+    line: int
+
+
+def format_collision_members(members: tuple[CollisionMember, ...]) -> str:
+    """Render a collision component's members as the one comma-joined phrase every sink prints.
+
+    This is the single owner of the human-readable phrase fragment naming collision members;
+    every sink that lists them calls this instead of re-deriving the join.
+
+    Args:
+        members: The component's headings in document order.
+
+    Returns:
+        A comma-joined listing of each member's quoted label and line, with no leading verb.
+    """
+    return ", ".join(f'"{member.label}" (line {member.line})' for member in members)
+
+
+def format_collision(members: tuple[CollisionMember, ...]) -> str:
+    """Render a collision component as the one phrase every sink prints.
+
+    Args:
+        members: The component's headings in document order.
+
+    Returns:
+        A single-line phrase naming each member and its line. The caller applies its own
+        quoting; the labels carry no control character, so the phrase is safe to embed.
+    """
+    return f"ambiguous with {format_collision_members(members)}"
+
+
+def collision_members_json(members: tuple[CollisionMember, ...]) -> list[dict[str, str | int]]:
+    """Render a collision component's members as the one JSON wire shape every sink emits.
+
+    This is the single owner of the JSON representation of collision members; every sink that
+    serializes them calls this instead of re-deriving the shape.
+
+    Args:
+        members: The component's headings in document order.
+
+    Returns:
+        A list of ``{"label": ..., "line": ...}`` dicts, one per member, in document order.
+    """
+    return [{"label": member.label, "line": member.line} for member in members]
+
+
+@dataclass(frozen=True, slots=True)
 class SectionRecord:
-    """One anchored section: its resolved anchor id and inclusive 1-indexed line span."""
+    """One anchored section: its resolved anchor id, inclusive 1-indexed line span, and any
+    slug-collision component it belongs to.
+
+    ``collision`` is None for a section whose id is unambiguous, which includes every id set by
+    an explicit ``{#anchor}`` marker: being reword-stable is what the marker is for.
+
+    ``context`` is the section's enclosing heading chain rendered as normalized ATX, outermost
+    first, derived by heading level over every form GitHub assigns an id to. It is the drift
+    hash's context prefix, and is empty for a section with no enclosing heading.
+    """
 
     anchor: str
     start: int
     end: int
+    collision: tuple[CollisionMember, ...] | None = None
+    context: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True, slots=True)
@@ -217,20 +286,31 @@ class ParsedMeta:
     caller to report. It is defaulted, unlike the cached form in ``cache.schema.Entry``, so the
     node-free outcomes stay shareable singletons. It is only ever set on a tracked node, because
     a rebound alias in a file the lattice does not hold changes no edge.
+
+    ``shadowed_envelope`` is the third of that kind, and is likewise only ever set on a tracked
+    node. It records that a file tracked under its ``---`` fence also carries a comment envelope
+    below it, which is inert body text. It cannot be a ``disposition`` instead, because the file
+    genuinely is tracked and ``meta`` is not None exactly when the disposition says so; the
+    envelope's fate is an orthogonal fact about the same file.
     """
 
     meta: NodeMeta | None
     disposition: FrontmatterDisposition
     reused_anchors: bool = False
+    shadowed_envelope: bool = False
 
 
 @dataclass(frozen=True, slots=True)
 class ParsedDoc:
     """A discovered file with validated frontmatter and its raw body.
 
-    ``sections`` holds pre-derived section spans when a caller (the load cache) already
-    computed them, so ``build_lattice`` reuses them instead of re-deriving. It is None on
-    the uncached path, where ``build_lattice`` derives sections itself.
+    ``sections`` holds pre-derived section spans, which every production load path now fills:
+    both the cached and the cache-free path derive them ahead of ``build_lattice`` because only
+    they know where the body starts in the file, and that offset is what puts
+    ``CollisionMember.line`` in file rather than body coordinates. It stays optional for a
+    synthetic caller that builds a ``ParsedDoc`` by hand; ``build_lattice`` then derives sections
+    itself with no such offset, so a hand-built doc whose body followed an envelope reports
+    collision member lines short by the envelope's length.
     """
 
     path: Path
@@ -247,7 +327,17 @@ class Lattice:
     to the set of source node ids that derive from it. ``ancestors`` maps a section
     anchor id to the anchored sections (outermost to innermost) whose spans contain it.
     ``file_id_by_path`` and ``anchors_by_path`` are path lookups precomputed by the loader
-    so resolution, impact, and rendering avoid scanning the index per edge.
+    so resolution, impact, and rendering avoid scanning the index per edge. ``collisions`` maps
+    every section TargetId whose id sits in a slug-collision component to that component's
+    members, so an edge into one can be classified and named without re-deriving anything.
+
+    There are deliberately two ancestor maps, and neither subsumes the other. ``ancestors`` is
+    span containment over the addressable subset, which is what ``impact.expand_targets`` wants:
+    ``## A``'s span really does cover a nested heading's bytes, so an edge into ``#a`` should
+    reach them. ``ancestor_context`` is level nesting over every heading form, which is what the
+    drift hash wants: it is the chain a reader sees, so a section under a setext or otherwise
+    non-addressable parent still carries that parent as context. The two disagree by design for
+    a document that nests an addressable heading under a non-addressable one.
 
     The maps are typed ``Mapping`` to signal that the lattice is read-only once built;
     cross-map consistency is an invariant guaranteed by ``build_lattice``.
@@ -259,3 +349,5 @@ class Lattice:
     ancestors: Mapping[TargetId, tuple[TargetId, ...]]
     file_id_by_path: Mapping[Path, str]
     anchors_by_path: Mapping[Path, frozenset[TargetId]]
+    collisions: Mapping[TargetId, tuple[CollisionMember, ...]] = field(default_factory=dict)
+    ancestor_context: Mapping[TargetId, tuple[str, ...]] = field(default_factory=dict)

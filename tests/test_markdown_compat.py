@@ -5,11 +5,16 @@ from dataclasses import asdict
 from pathlib import Path
 
 import pytest
+from markdown_it import MarkdownIt
 
+from doc_lattice.frontmatter_parser import parse_document
 from doc_lattice.markdown_compat import (
     SLUG_UNICODE_VERSION,
     anchor_ids,
+    code_block_line_spans,
+    collision_components,
     extract_headings,
+    full_heading_inventory,
     github_heading_ids,
     github_ids_for_texts,
     github_slug,
@@ -106,3 +111,112 @@ def test_slug_lowercase_uses_pinned_javascript_unicode_data() -> None:
     assert github_slug("\ua7cb\u03a3") == "\u0264\u03c2"
     assert github_slug("\u1c89\u03a3") == "\u03c2"
     assert github_slug("A\u03a3\u1ad0A") == "a\u03c3a"
+
+
+def test_code_block_line_spans_covers_fenced_and_indented_blocks():
+    body = "# H\n\n```\n<!-- doc-lattice\n```\n\ntext\n\n    indented\n"
+
+    spans = code_block_line_spans(body)
+
+    assert (3, 5) in spans
+    assert any(start <= 9 <= end for start, end in spans)
+    assert not any(start <= 7 <= end for start, end in spans)
+
+
+_RENDER_PARSER = MarkdownIt("commonmark")
+
+
+@pytest.mark.parametrize(
+    ("name", "source", "expected_first_token"),
+    [
+        ("accepted", "<!-- doc-lattice\nid: a\n-->\n# H\n", "html_block"),
+        ("accepted_empty_body", "<!-- doc-lattice\n-->\n# H\n", "html_block"),
+        ("refused_bom", "﻿<!-- doc-lattice\nid: a\n-->\n# H\n", "paragraph_open"),
+        ("refused_indent_four", "    <!-- doc-lattice\nid: a\n-->\n# H\n", "code_block"),
+    ],
+)
+def test_every_envelope_byte_form_renders_as_its_pinned_block(
+    name: str, source: str, expected_first_token: str
+):
+    tokens = _RENDER_PARSER.parse(source)
+
+    assert tokens[0].type == expected_first_token, name
+
+
+def test_the_comment_envelope_never_perturbs_heading_extraction_or_spans():
+    body = "# H1\n\n## Two\ntext\n"
+    fenced = f"---\nid: a\n---\n{body}"
+    commented = f"<!-- doc-lattice\nid: a\n-->\n{body}"
+
+    _fence_meta, fence_body = parse_document(fenced, Path("a.md"))
+    _comment_meta, comment_body = parse_document(commented, Path("b.md"))
+
+    assert fence_body == comment_body == body
+    assert extract_headings(fence_body) == extract_headings(comment_body)
+    assert section_spans(extract_headings(fence_body), len(split_body_lines(fence_body))) == (
+        section_spans(extract_headings(comment_body), len(split_body_lines(comment_body)))
+    )
+
+
+def test_the_full_inventory_sees_every_heading_form_github_assigns_an_id_to():
+    body = (
+        "Overview\n--------\n\ntext\n\n# Overview\n\n   #### Indented\n\n"
+        "> ## Quoted\n\n- ### Nested\n"
+    )
+
+    inventory = full_heading_inventory(body)
+
+    # Level comes from the token tag, the only field that spells a setext heading's level.
+    assert [(h.text, h.level, h.line, h.github_id) for h in inventory] == [
+        ("Overview", 2, 1, "overview"),
+        ("Overview", 1, 6, "overview-1"),
+        ("Indented", 4, 8, "indented"),
+        ("Quoted", 2, 10, "quoted"),
+        ("Nested", 3, 12, "nested"),
+    ]
+
+
+def test_the_inventory_ids_agree_with_the_shared_slugger():
+    body = "# Notes\n\n# Notes\n\n# Notes-1\n"
+
+    inventory = full_heading_inventory(body)
+
+    assert [h.github_id for h in inventory] == github_ids_for_texts(h.text for h in inventory)
+
+
+def _components(body: str) -> list[list[str]]:
+    return [
+        [f"{h.text}@{h.line}" for h in component]
+        for component in collision_components(full_heading_inventory(body))
+    ]
+
+
+def test_chained_dedup_suffixes_pull_every_shifted_heading_into_one_component():
+    body = "# Notes\n\n# Notes\n\n# Notes-1\n\n# Notes-1-1\n"
+
+    assert _components(body) == [["Notes@1", "Notes@3", "Notes-1@5", "Notes-1-1@7"]]
+
+
+def test_a_heading_a_probe_never_reached_stays_out_of_the_component():
+    body = "# Notes\n\n# Other\n\n# Notes\n"
+
+    assert _components(body) == [["Notes@1", "Notes@5"]]
+
+
+def test_probe_completeness_pulls_in_a_heading_only_a_probe_touches():
+    # "Other" renamed to "Notes-1": the third heading's base request is still only `notes`, and
+    # its final id shifts from `notes-1` to `notes-2`, so a rule reading requests alone would
+    # call this clean while a rename of the middle heading silently rebinds the third.
+    body = "# Notes\n\n# Notes-1\n\n# Notes\n"
+
+    assert _components(body) == [["Notes@1", "Notes-1@3", "Notes@5"]]
+
+
+def test_a_cross_inventory_collision_is_one_component():
+    body = "Overview\n--------\n\ntext\n\n# Overview\n"
+
+    assert _components(body) == [["Overview@1", "Overview@6"]]
+
+
+def test_a_document_with_no_repeated_slug_has_no_components():
+    assert _components("# One\n\n# Two\n\n# Three\n") == []

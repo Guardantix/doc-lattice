@@ -8,6 +8,7 @@ from hypothesis import given
 from hypothesis import strategies as st
 from rich.console import Console
 
+from doc_lattice.check import EdgeStatus
 from doc_lattice.constants import VALID_SEVERITIES
 from doc_lattice.linear_render import (
     _SEVERITY_COLORS,
@@ -15,6 +16,7 @@ from doc_lattice.linear_render import (
     render_findings,
     render_safe,
 )
+from doc_lattice.model import CollisionMember, TargetId
 from doc_lattice.tickets import Finding, Ticket, TicketState
 
 
@@ -57,7 +59,7 @@ def _blocked():
 
 def test_json_shape_for_graded_and_blocked():
     payload = findings_json([_danger(), _blocked()])
-    assert list(payload) == ["findings"]
+    assert list(payload) == ["findings", "ambiguous"]
     danger, blocked = payload["findings"]
     assert danger["ticket"]["state"]["type"] == "completed"
     assert danger["ticket_ref"] == "PC-1"
@@ -253,6 +255,43 @@ def test_render_findings_keeps_the_empty_placeholder_on_one_line_at_any_width():
     render_findings(console, [])
 
     assert output.getvalue() == "no stale-shipped findings\n"
+
+
+def test_findings_json_carries_the_ambiguous_block():
+    status = EdgeStatus(
+        "down",
+        "up#notes",
+        TargetId("up", "notes"),
+        "AMBIGUOUS",
+        None,
+        None,
+        (CollisionMember(label="Notes", line=1), CollisionMember(label="Notes", line=3)),
+    )
+
+    payload = findings_json([], [status])
+
+    assert payload["findings"] == []
+    assert payload["ambiguous"][0]["target_ref"] == "up#notes"
+
+
+def test_render_findings_prints_ambiguity_before_the_all_clear_line():
+    output = io.StringIO()
+    console = Console(file=output, no_color=True, width=200)
+    status = EdgeStatus(
+        "down",
+        "up#n",
+        TargetId("up", "n"),
+        "AMBIGUOUS",
+        None,
+        None,
+        (CollisionMember(label="N", line=2),),
+    )
+
+    render_findings(console, [], [status])
+
+    rendered = output.getvalue()
+    assert "AMBIGUOUS" in rendered
+    assert rendered.index("AMBIGUOUS") < rendered.index("no stale-shipped findings")
 
 
 def test_render_findings_joins_multiple_drifted_refs():

@@ -16,10 +16,13 @@ def test_graph_emits_mermaid(lattice_dir: Path, monkeypatch):
 
 
 def test_graph_exits_2_on_bad_config(tmp_path: Path, monkeypatch):
-    (tmp_path / ".doc-lattice.yml").write_text("docs_roots: ['../x']\n", encoding="utf-8")
+    (tmp_path / ".doc-lattice.yml").write_text(
+        "lattice_format: 2\ndocs_roots: ['../x']\n", encoding="utf-8"
+    )
     monkeypatch.chdir(tmp_path)
     result = runner.invoke(app, ["graph"])
     assert result.exit_code == 2
+    assert "resolves outside the project root" in result.stderr
 
 
 def test_graph_dot_retains_bracketed_attributes(lattice_dir: Path, monkeypatch):
@@ -39,7 +42,7 @@ def test_graph_emits_json(lattice_dir: Path, monkeypatch):
     # gdd's broken 'ghost' ref contributes no edge; the two art-direction sections pc-design
     # derives from collapse to one edge, same as the mermaid/dot renderers.
     assert payload["edges"] == [
-        {"upstream": "art-direction", "downstream": "pc-design", "stale": True}
+        {"upstream": "art-direction", "downstream": "pc-design", "stale": True, "ambiguous": False}
     ]
 
 
@@ -76,7 +79,7 @@ def test_graph_json_includes_a_file_docs_root_node(tmp_path: Path, monkeypatch):
         encoding="utf-8",
     )
     (tmp_path / ".doc-lattice.yml").write_text(
-        "docs_roots: [docs, ARCHITECTURE.md]\n", encoding="utf-8"
+        "lattice_format: 2\ndocs_roots: [docs, ARCHITECTURE.md]\n", encoding="utf-8"
     )
     monkeypatch.chdir(tmp_path)
 
@@ -85,7 +88,9 @@ def test_graph_json_includes_a_file_docs_root_node(tmp_path: Path, monkeypatch):
     assert result.exit_code == 0
     payload = json.loads(result.stdout)
     assert {node["id"] for node in payload["nodes"]} == {"spec", "arch"}
-    assert payload["edges"] == [{"upstream": "spec", "downstream": "arch", "stale": False}]
+    assert payload["edges"] == [
+        {"upstream": "spec", "downstream": "arch", "stale": False, "ambiguous": False}
+    ]
 
 
 def test_graph_rejects_unknown_format(lattice_dir: Path, monkeypatch):

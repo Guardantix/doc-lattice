@@ -5,6 +5,7 @@ from pathlib import Path
 
 from doc_lattice.cli import app
 from doc_lattice.cli.github import escape_github_property
+from doc_lattice.path_utils import format_path_for_display
 
 from .helpers import runner
 
@@ -141,16 +142,21 @@ def test_lint_json_reports_skips(tmp_path: Path, monkeypatch):
 
 
 def test_lint_exits_2_on_bad_config(tmp_path: Path, monkeypatch):
-    (tmp_path / ".doc-lattice.yml").write_text("docs_roots: ['../x']\n", encoding="utf-8")
+    (tmp_path / ".doc-lattice.yml").write_text(
+        "lattice_format: 2\ndocs_roots: ['../x']\n", encoding="utf-8"
+    )
     monkeypatch.chdir(tmp_path)
     result = runner.invoke(app, ["lint"])
     assert result.exit_code == 2
+    assert "resolves outside the project root" in result.stderr
 
 
 def _nested_lint_project(tmp_path: Path) -> Path:
     """Write a ladder violation at the checkout root and return a nested cwd inside it."""
     _write_lint_docs(tmp_path)
-    (tmp_path / ".doc-lattice.yml").write_text("docs_roots:\n  - docs\n", encoding="utf-8")
+    (tmp_path / ".doc-lattice.yml").write_text(
+        "lattice_format: 2\ndocs_roots:\n  - docs\n", encoding="utf-8"
+    )
     nested = tmp_path / "tools" / "scripts"
     nested.mkdir(parents=True)
     return nested
@@ -207,3 +213,86 @@ def test_lint_github_annotation_ignores_a_workspace_that_excludes_the_document(
         "::error file=docs/down.md,title=doc-lattice ladder violation::"
         "down (binding) -> up (derived)\n"
     )
+
+
+def test_lint_names_an_ambiguous_target_in_human_and_json(tmp_path: Path):
+    docs = tmp_path / "docs"
+    docs.mkdir()
+    (docs / "up.md").write_text("---\nid: up\n---\n# Notes\n\n# Notes\n", encoding="utf-8")
+    (docs / "down.md").write_text(
+        "---\nid: down\nderives_from:\n  - ref: up#notes\n---\n# Down\n", encoding="utf-8"
+    )
+    (tmp_path / ".doc-lattice.yml").write_text(
+        "lattice_format: 2\ndocs_roots:\n  - docs\n", encoding="utf-8"
+    )
+
+    human = runner.invoke(app, ["lint", "--config", str(tmp_path / ".doc-lattice.yml")])
+    payload = runner.invoke(
+        app, ["lint", "--config", str(tmp_path / ".doc-lattice.yml"), "--format", "json"]
+    )
+
+    # File lines, envelope included: the two headings sit on lines 4 and 6 of up.md.
+    assert 'ambiguous with "Notes" (line 4), "Notes" (line 6)' in human.stdout
+    assert json.loads(payload.stdout)["ambiguous"][0]["target_ref"] == "up#notes"
+    # The summary is the line a reader tails, so it has to name what the rows above it reported.
+    assert human.stdout.rstrip().endswith(
+        "0 ladder violations, 1 edges unranked "
+        "(0 target unannotated, 1 source unannotated), 1 ambiguous"
+    )
+    assert human.exit_code == 0
+
+
+def test_lint_github_annotates_an_ambiguous_target(tmp_path: Path, monkeypatch):
+    # The annotate branch bypasses render_lint, so the ambiguous block has to be emitted here
+    # too. This is the surface a CI reviewer reads, and it was the only one of lint's three
+    # output formats that said nothing at all about ambiguity.
+    docs = tmp_path / "docs"
+    docs.mkdir()
+    (docs / "up.md").write_text("---\nid: up\n---\n# Notes\n\n# Notes\n", encoding="utf-8")
+    (docs / "down.md").write_text(
+        "---\nid: down\nderives_from:\n  - ref: up#notes\n---\n# Down\n", encoding="utf-8"
+    )
+    config = tmp_path / ".doc-lattice.yml"
+    config.write_text("lattice_format: 2\ndocs_roots:\n  - docs\n", encoding="utf-8")
+
+    monkeypatch.chdir(tmp_path)
+
+    result = runner.invoke(app, ["lint", "--format", "github"])
+
+    # Same upstream/downstream split check_lattice's annotation carries: the lines are in up.md.
+    upstream = format_path_for_display((docs / "up.md").resolve())
+    assert result.stdout == (
+        "::warning file=docs/down.md,title=doc-lattice AMBIGUOUS::"
+        f"down -> up#notes is AMBIGUOUS in {upstream} "
+        '(ambiguous with "Notes" (line 4), "Notes" (line 6))\n'
+    )
+    # The severity and the exit code are one contract. lint does not gate on ambiguity, so a
+    # reviewer must not be shown an error annotation on a run that passes; asserting only one of
+    # the two is what let them drift apart.
+    assert result.exit_code == 0
+
+
+def test_lint_github_annotates_a_violation_and_an_ambiguity_at_their_own_severities(
+    tmp_path: Path, monkeypatch
+):
+    docs = tmp_path / "docs"
+    docs.mkdir()
+    (docs / "up.md").write_text(
+        "---\nid: up\nauthority: exploratory\n---\n# Notes\n\n# Notes\n", encoding="utf-8"
+    )
+    (docs / "down.md").write_text(
+        "---\nid: down\nauthority: binding\nderives_from:\n  - ref: up#notes\n---\n# Down\n",
+        encoding="utf-8",
+    )
+    config = tmp_path / ".doc-lattice.yml"
+    config.write_text("lattice_format: 2\ndocs_roots:\n  - docs\n", encoding="utf-8")
+
+    monkeypatch.chdir(tmp_path)
+
+    result = runner.invoke(app, ["lint", "--format", "github"])
+
+    # One run, two severities: the ladder violation is what this command gates on, the ambiguity
+    # is what it only reports. Violations lead, matching the emission order of the two generators.
+    assert result.stdout.startswith("::error file=docs/down.md,title=doc-lattice ladder violation")
+    assert "\n::warning file=docs/down.md,title=doc-lattice AMBIGUOUS::" in result.stdout
+    assert result.exit_code == 1

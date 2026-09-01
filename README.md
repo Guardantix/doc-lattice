@@ -66,7 +66,7 @@ is out of date."
 
 ### Drift states
 
-`check` classifies every edge into one of four states:
+`check` classifies every edge into one of five states:
 
 | State | Meaning |
 |-------|---------|
@@ -74,6 +74,7 @@ is out of date."
 | **STALE** | The upstream changed since `seen` was locked. The downstream needs review. |
 | **UNRECONCILED** | The edge has no `seen` yet. The dependency was declared but never acknowledged. |
 | **BROKEN** | The ref points at an id that no longer exists. |
+| **AMBIGUOUS** | The ref resolves, but its target id sits in a slug-collision component, so document order can hand that id to a different heading. `check` exits 1, `reconcile` refuses to write `seen`, and every command names the colliding headings. `lint` reports it without gating on it, so its GitHub annotation for an ambiguous edge is a `::warning` where `check`'s is an `::error`. |
 
 The content hash is `sha256` of a *canonicalized* copy of the text, truncated to 128 bits.
 Canonicalization normalizes line endings, strips trailing whitespace per line, and trims
@@ -82,7 +83,11 @@ whitespace is preserved, so rewrapping a paragraph (which moves its line breaks)
 as a change.
 
 The hash input never includes frontmatter. A `file` ref hashes the canonicalized document body;
-a `section` ref hashes only the canonicalized text of the target section. Because `reconcile`
+a `section` ref hashes its ancestor heading chain followed by the section text, so a section that
+moves under a different parent heading, or whose ancestor is reworded, goes STALE even when its
+own text is untouched; a `file` ref has no ancestor chain and is unaffected. The chain covers
+every heading form GitHub assigns an id to, so a setext, indented, or nested parent supplies
+context to the sections under it just as a column-zero ATX one does. Because `reconcile`
 writes only `seen`, and `seen` lives inside frontmatter, a reconcile write can never change any
 target's hash. That is what lets `reconcile --all` converge in one pass over a stable snapshot:
 acknowledging one edge cannot invalidate another. Convergence covers the reconcilable edges
@@ -125,6 +130,11 @@ An edge whose source or target declares no `authority` cannot be ranked. `lint` 
 unranked rather than as a violation, so it never fails the gate. Every human run ends with a
 coverage line counting violations and unranked edges, and `--format json` carries the same edges
 in a `skipped` array with a `source-unannotated` or `target-unannotated` reason.
+
+Ambiguity is the third thing `lint` reports and the one it does not gate on. An ambiguous edge
+adds a row above the findings, a count to the end of that coverage line, and an `ambiguous`
+array to `--format json`, but never changes the exit code: that stays the ladder's alone, and
+`check` is the command that fails a lattice for ambiguity.
 
 ## A worked example
 
@@ -173,7 +183,7 @@ content hash no longer matches `seen`, so:
 ```console
 $ doc-lattice check
 STALE         billing-integration-guide -> api-design#pagination
-1 edge: 0 OK, 1 STALE, 0 UNRECONCILED, 0 BROKEN
+1 edge: 0 OK, 1 STALE, 0 UNRECONCILED, 0 BROKEN, 0 AMBIGUOUS
 
 $ doc-lattice impact api-design#pagination
 billing-integration-guide  ('/work/acme-api/docs/billing-integration-guide.md')  tickets: ENG-412
@@ -187,7 +197,7 @@ $ doc-lattice reconcile billing-integration-guide
 reconciled 'billing-integration-guide.md': api-design#pagination
 
 $ doc-lattice check
-1 edge: 1 OK, 0 STALE, 0 UNRECONCILED, 0 BROKEN
+1 edge: 1 OK, 0 STALE, 0 UNRECONCILED, 0 BROKEN, 0 AMBIGUOUS
 ```
 
 The listing is empty because there is nothing left to act on; the verdict line is what states
@@ -238,7 +248,7 @@ Contributor commands, gates, and the full verification set live in
 
 | Command | What it does | Exits non-zero |
 |---------|--------------|----------------|
-| `check [--only STATE ...] [--format human\|json\|github]` | Classify every `derives_from` edge as OK / STALE / UNRECONCILED / BROKEN. | 1 on drift, 2 on tool error |
+| `check [--only STATE ...] [--format human\|json\|github]` | Classify every `derives_from` edge as OK / STALE / UNRECONCILED / BROKEN / AMBIGUOUS. | 1 on drift, 2 on tool error |
 | `lint [--format human\|json\|github]` | Validate the authority ladder (binding > derived > exploratory) over the edges. | 1 on a violation, 2 on tool error |
 | `impact TOKEN [--depth N] [--format human\|json]` | List every downstream doc affected by a change to TOKEN; `--depth N` bounds the walk to N hops. | 2 on tool error |
 | `reconcile [ID] [--ref REF] [--all] [--dry-run] [--recover] [--format human\|json]` | Durably set `seen` for selected edges as one transaction, preview read-only with `--dry-run`, or recover an interrupted transaction with `--recover`. | 2 on tool error, conflict, lock contention, or persistence/recovery failure |
@@ -296,6 +306,10 @@ already-configured lattice is not something to guess at in either direction.
 Pass `--indent N` with JSON output on `check`, `lint`, `impact`, or `linear` to pretty-print the
 JSON with `N` spaces per level. JSON output is selected uniformly by `--format json`; `--indent`
 without an effective `--format json` is a usage error.
+
+`graph --format json`'s `ambiguous_targets` list is lattice-wide: it names every slug-collision
+component in the loaded docs, whether or not any edge targets it. `check`, `lint`, `impact`, and
+`linear`'s JSON only ever names a collision an edge actually resolved into.
 
 Two options are global rather than per-command, so they go before the command name:
 
@@ -377,14 +391,16 @@ lossy: the totals and every per-state count stay visible, so a clean run is expl
 silent. `--only` overrides the default in both directions, and `--format json` is unaffected.
 
 Every human `check` run ends with a one-line verdict counting the classified edges and breaking
-them down per state, for example `101 edges: 96 OK, 5 STALE, 0 UNRECONCILED, 0 BROKEN`. Every
+them down per state, for example
+`101 edges: 96 OK, 5 STALE, 0 UNRECONCILED, 0 BROKEN, 0 AMBIGUOUS`. Every
 state is listed, including the ones with a zero count, so truncated output such as `check | tail`
 still states the result rather than trailing off into whichever edges sort last. The line is one
 record on one line at any terminal width, so `check | tail -1` always gets the whole verdict.
 
 The line is present on a clean lattice too, where it is the entire output, and a lattice with no
-edges at all reports `0 edges: 0 OK, 0 STALE, 0 UNRECONCILED, 0 BROKEN`. Because the state names
-are always printed, match on the exit code rather than grepping human output for a state name.
+edges at all reports `0 edges: 0 OK, 0 STALE, 0 UNRECONCILED, 0 BROKEN, 0 AMBIGUOUS`. Because the
+state names are always printed, match on the exit code rather than grepping human output for a
+state name.
 
 `--format json` carries the same counts in a `summary` object alongside `edges`, so a wrapper
 can answer "is the tree clean?" without folding every edge record. JSON is the complete
@@ -438,6 +454,31 @@ selector details, dry-run and JSON output, the durability contract, and recovery
 | `derives_from[].ref` | each edge | The upstream id: bare (whole-file target, e.g. `api-design`) or file-scoped (section target, e.g. `api-design#pagination`). |
 | `derives_from[].seen` | each edge | The locked upstream hash, or omitted for a never-reconciled (UNRECONCILED) edge. |
 | `tickets` | optional | Issue ids associated with the doc (used by `impact` and `linear`). |
+
+This table describes the keys, not the envelope they load from. Every example in this README
+wraps them in `---` fences, but the identical YAML also loads from an HTML comment, which GitHub
+renders as nothing rather than as a table:
+
+```markdown
+<!-- doc-lattice
+id: architecture
+derives_from:
+  - ref: readme#configuration
+    seen: 647cc64481bee8d8541ef7d1733b5204
+-->
+```
+
+The comment body is the identical YAML; every key and rule on this page applies to it unchanged.
+The opener must be exactly `<!-- doc-lattice` on line 1, at column zero, with no byte-order mark
+ahead of it, and the body ends at the first line that is exactly `-->` at column zero. Both
+spellings are accepted unconditionally and forever, with no config to choose or forbid either one;
+`reconcile` preserves whichever spelling a file already uses and never converts one to the other.
+Unlike the fence, the comment spelling has no soft tiers: a comment envelope whose body is not a
+mapping carrying `id` is a `FRONTMATTER_ERROR` at exit 2 rather than being skipped, because
+`<!-- doc-lattice` names this engine and admits no other reading. The body must also not contain
+`--`, since that substring is where the HTML specification and CommonMark versions disagree on
+comment termination; a document whose id needs `--` keeps the fence spelling instead. See
+[AD-44](https://github.com/Guardantix/doc-lattice/blob/main/ARCHITECTURE.md) for the full grammar.
 
 Tracked lattice frontmatter is strict in both directions, and so is each nested `derives_from`
 entry. An unknown key is rejected rather than ignored, and after YAML parsing each value must
@@ -547,10 +588,18 @@ wrote, because silently dropping a file also silently drops every edge it declar
 
 | The file | Treatment |
 |----------|-----------|
-| No opening `---` fence | Untracked prose. Silent; nothing is reported. |
+| Opens neither envelope | Untracked prose. Silent; nothing is reported. |
 | Fenced, but the block holds no YAML mapping (empty, a scalar, a list) | The same as untracked prose. Silent. |
 | Fenced with an id-less mapping declaring none of `derives_from`, `authority`, or `tickets` | Skipped, with a warning on stderr naming the file. The exit status is unchanged. |
 | Fenced with an id-less mapping declaring any of `derives_from`, `authority`, or `tickets` | A tool error naming the file and the keys it declared. Exits 2. |
+| Line 1 nearly spells `<!-- doc-lattice` (indented, trailing space, different case) | A tool error naming the file. Exits 2, rather than being read as prose, so a typo cannot silently drop the node. |
+| Carries `<!-- doc-lattice` below line 1, outside any code block | Not a node, with a `misplaced doc-lattice envelope` warning on stderr naming the file. The exit status is unchanged. |
+| Tracked by a `---` fence *and* carries `<!-- doc-lattice` below it, outside any code block | A node under the fence's metadata, with a `shadowed doc-lattice envelope` warning on stderr naming the file. The envelope is body text and its metadata is ignored. The exit status is unchanged. |
+| Opens `<!-- doc-lattice`, but the body is not a mapping carrying `id` | A tool error naming the file. Exits 2; the comment envelope has no untracked or id-less tier. |
+
+The first row is about *both* envelopes: a file with no `---` fence can still be a tracked node
+when its first line is exactly `<!-- doc-lattice`. The last three rows are the comment envelope's,
+and the [frontmatter reference](#frontmatter-reference) states its grammar in full.
 
 Those three keys are the exact set that wires a file into the graph, so an id-less block carrying
 one is a node that lost its `id` (to a typo like `idd:`, or to an edit) rather than metadata
@@ -567,7 +616,10 @@ apply, but neither available form targets it precisely. `PYTHONWARNINGS=ignore` 
 warning the run emits. `PYTHONWARNINGS=ignore:skipping` looks narrower and is not: that field is a
 literal message prefix rather than a regular expression, and the warning for a document symlinked
 outside the project root opens with the same `skipping ` prefix, so filtering on it hides that one
-too. The report is identical whether the load was accelerated by the
+too. The two envelope warnings are the cases the prefix form does target, because each deliberately
+opens with its own word rather than `skipping `: `PYTHONWARNINGS=ignore:misplaced` silences the
+misplaced-envelope warning and nothing else, and `PYTHONWARNINGS=ignore:shadowed` does the same
+for the shadowed-envelope one. Neither silences the other. The report is identical whether the load was accelerated by the
 [load cache](#load-cache-opt-in) or not.
 
 An escalating filter is supported the same way. Under `PYTHONWARNINGS=error` (or `-W error`)
@@ -591,10 +643,43 @@ Addressable sections intentionally use a narrow Markdown subset: column-zero ATX
 levels 1 through 6, including empty headings and optional ATX closing sequences. CommonMark
 backtick and tilde fences suppress headings inside them. Setext headings, headings in block quotes
 or list items, and indented headings are not addressable. Inline Markdown remains part of the raw
-heading text used for slugging. Heading and fence recognition is pinned to
+heading text used for slugging.
+
+Not being addressable does not put a heading outside `AMBIGUOUS`. GitHub assigns ids to every
+heading form, including the ones above, and allocates them in document order across all of them,
+so a setext or nested heading can take an id an addressable heading would otherwise have had, or
+shift the duplicate suffix of one that follows it. Collision detection therefore reads the full
+GitHub heading inventory, and an `AMBIGUOUS` finding can name a heading that owns no lattice id of
+its own. Such a member is still the thing to change: reword it, or reword the addressable heading
+it collides with. Adding a `{#anchor}` marker to it does nothing, because the marker is only read
+on an addressable heading; adding one to the *addressable* member does fix the edge, by making
+that id reword-stable.
+
+Nor does it put a heading outside a descendant's drift context. The ancestor chain folded into a
+section's hash is derived by heading level over that same full inventory, so a section nested
+under a setext, indented, or otherwise non-addressable parent still carries that parent as
+context and still goes STALE when it is reworded. Every ancestor is rendered in one normalized
+ATX spelling whatever form it was written in, so rewriting a parent from setext to ATX at the
+same level does not restale the sections under it. Such a heading owns no lattice id either way.
+Heading and fence recognition is pinned to
 `markdown-it-py==4.2.0`; generated slugs and document-order duplicate suffixes target
 `github-slugger@2.0.0` under JavaScript Unicode 17.0. Generated lowercase patches and contextual
 casing-property tables bridge the minimum supported Python 3.13 Unicode 15.1 table to that target.
+
+## Publishing on GitHub
+
+For a docs repo that renders on GitHub, use the [comment envelope](#frontmatter-reference) and
+omit `{#anchor}` markers: the metadata block disappears from the rendered page, and headings get
+their ids from the GitHub slug they already have, with no marker syntax to add or maintain. Two
+facts about markers matter if you publish anyway.
+
+`{#anchor}` is doc-lattice syntax, not GitHub's: GitHub has no explicit-anchor grammar, so it
+renders a marker as literal heading text rather than parsing it. That means the marker also
+changes the GitHub-side fragment of the heading it is on: `## Notes {#n}` renders as the heading
+text `Notes {#n}`, whose GitHub-assigned id is `notes-n`, not `notes`. A Markdown link to that
+heading, `#notes`, is broken on GitHub even though doc-lattice resolves `file#n` correctly, since
+the two sides slug different text. Reserve markers for headings you specifically want reword-stable
+ids on, and expect a GitHub deep link into a marked heading to carry the marker's own fragment.
 
 ## Configuration
 
@@ -603,6 +688,7 @@ from the current directory:
 
 ```yaml
 # doc-lattice configuration. See https://github.com/Guardantix/doc-lattice
+lattice_format: 2
 docs_roots:
   - docs
 # ignore_globs:
@@ -613,12 +699,24 @@ docs_roots:
 ```
 
 That block is byte-for-byte what `init` writes with no flags, and a test holds the two together,
-so what you read here is what you get rather than a paraphrase that drifts. The commented keys
-are the optional ones: `ignore_globs` lists paths to skip within the roots, `cache_key` and
-`cache_trust_stat` are the opt-in load cache described below, and `linear_team` names the team
-the `linear` query targets. Uncomment what you need; `docs_roots` is the only active key the
-generated file writes, and it defaults to `["docs"]` whenever it is unset -- in a config file that
-omits it just as in zero-config mode, so a file carrying only `linear_team: ENG` is valid.
+so what you read here is what you get rather than a paraphrase that drifts. `lattice_format` is
+required in any config file this engine reads, and `2` is the only value it currently accepts; a
+config file omitting it, or naming another value, is a config error that exits 2 with a pointer to
+CHANGELOG's migration section. A zero-config run (no `.doc-lattice.yml` anywhere) is exempt from
+that error, since there is no file to declare the key in -- not because there is nothing to skew
+against; see [CHANGELOG.md](https://github.com/Guardantix/doc-lattice/blob/main/CHANGELOG.md)'s
+7.0.0 migration for what a zero-config upgrade from 6.x sees instead. `init` writes the key for
+you into the config it generates, as the leading line of the active block, which is why it is not
+commented out above. It writes only that config: run against a directory that already holds one,
+`init` leaves the existing file untouched, as it always has, and reports that the config predates
+this engine rather than editing it. Adding the key to a config `init` did not write is yours to
+do, per CHANGELOG's migration. The
+other commented keys are the optional ones:
+`ignore_globs` lists paths to skip within the roots, `cache_key` and `cache_trust_stat` are the
+opt-in load cache described below, and `linear_team` names the team the `linear` query targets.
+Uncomment what you need; `docs_roots` is the only other active key the generated file writes, and
+it defaults to `["docs"]` whenever it is unset -- in a config file that omits it just as in
+zero-config mode, so a file carrying only `lattice_format: 2` and `linear_team: ENG` is valid.
 
 Configuration is strict in both directions. An unknown key is rejected rather than ignored, and
 after YAML parsing each value must already have the schema's exact type, because values are not
@@ -687,7 +785,7 @@ your documents, then run `doc-lattice reconcile --all` once before
 [enabling the gates](#enabling-the-gates):
 
 ```bash
-uvx --python 3.13 --from doc-lattice==6.0.0 doc-lattice reconcile --all
+uvx --python 3.13 --from doc-lattice==7.0.0 doc-lattice reconcile --all
 ```
 
 Commit the annotated input state and start from an otherwise clean working tree before running
@@ -702,7 +800,15 @@ from a known baseline instead of reporting the whole backlog on their first run.
 on a first adoption: `init` is rerunnable against an existing config, and on an established
 lattice `reconcile --all` would acknowledge legitimate drift you have not reviewed. It also
 does not by itself make CI green, because `reconcile` skips BROKEN edges and those remain
-findings. See [RECONCILE.md](https://github.com/Guardantix/doc-lattice/blob/main/RECONCILE.md)
+findings.
+
+Run `doc-lattice check` *before* this baseline, not only after it. An `AMBIGUOUS` edge is not
+skipped the way a BROKEN one is: `reconcile` refuses the whole run on the first one it meets, so
+a single pair of identically-named headings anywhere in the tree makes `reconcile --all` exit 2
+and write nothing, including for every unrelated edge, and `--dry-run` fails the same way. `check`
+lists them all at once with the colliding headings and their lines. First adoptions are the most
+likely to have such a pair, since nothing has forced them to be disambiguated yet. See
+[RECONCILE.md](https://github.com/Guardantix/doc-lattice/blob/main/RECONCILE.md)
 for the selector semantics.
 
 ### Ordinary offline setup
@@ -711,7 +817,7 @@ Bootstrap config and the drift and authority-ladder gates for a repo whose docs 
 track:
 
 ```bash
-uvx --python 3.13 --from doc-lattice==6.0.0 doc-lattice init
+uvx --python 3.13 --from doc-lattice==7.0.0 doc-lattice init
 ```
 
 This writes `.doc-lattice.yml` (only if absent) and always prints the reconcile-artifact
@@ -811,13 +917,17 @@ baseline depends on. The order is:
 
 1. Paste the three blocks and commit them with the annotated input. The gates are inert, so this
    commit is not gated.
-2. Run `doc-lattice reconcile --all`.
-3. Run `check` and `lint`, and resolve whatever they still report. The baseline clears STALE and
+2. Run `doc-lattice check` and fix every `AMBIGUOUS` edge it reports, by rewording one of the
+   colliding headings or giving the target an explicit `{#anchor}` marker. `reconcile` refuses
+   its entire run while any edge is ambiguous, so skipping this step makes step 3 exit 2 without
+   writing anything.
+3. Run `doc-lattice reconcile --all`.
+4. Run `check` and `lint`, and resolve whatever they still report. The baseline clears STALE and
    UNRECONCILED edges and nothing else: `reconcile` skips BROKEN edges by design, `check` exits 1
    on them all the same, and neither command touches a lint finding. Anything left standing here
-   is what the gate refuses in step 5.
-4. Enable the gates with the two commands above.
-5. Stage and commit the reconcile-only diff. Both hooks run on it and pass, which is also how you
+   is what the gate refuses in step 6.
+5. Enable the gates with the two commands above.
+6. Stage and commit the reconcile-only diff. Both hooks run on it and pass, which is also how you
    confirm activation worked.
 
 **An established installation enables them immediately.** A conversion, or any repository that
@@ -828,7 +938,7 @@ Confirm activation with a commit that stages at least one Markdown file. Both ge
 entries carry `files: \.md$`, so an empty or non-Markdown commit runs pre-commit and reports both
 doc-lattice hooks as `Skipped`. That looks like a working gate and proves nothing about it.
 
-The hook entries run `uvx --python 3.13 --from doc-lattice==6.0.0`, so the pinned release has to
+The hook entries run `uvx --python 3.13 --from doc-lattice==7.0.0`, so the pinned release has to
 resolve on every gated commit, out of uv's cache once it is warm and from PyPI when it is not.
 These gates are offline in the sense that matters for secrets, meaning they never require or
 receive `LINEAR_API_KEY`. That is not the same as running without a network.

@@ -6,10 +6,12 @@ from pathlib import Path
 import pytest
 
 from doc_lattice.cli.github import (
+    Annotation,
     escape_github_message,
     escape_github_property,
     github_annotation,
     warn_unattachable_annotations,
+    write_annotations,
     write_document_annotation,
 )
 from doc_lattice.cli.pipe_policy import PipeClosed
@@ -42,6 +44,28 @@ def test_github_annotation_escapes_all_workflow_metacharacters(tmp_path: Path):
 
     assert result == (
         "::error file=sub%25%3A%2C%0Aline.md,title=title%25%3A%2C%0D%0Aline::message%25:,%0D%0Aline"
+    )
+
+
+def test_github_annotation_emits_the_requested_severity(tmp_path: Path):
+    line = github_annotation(tmp_path / "doc.md", tmp_path, "title", "message", "warning")
+
+    assert line == "::warning file=doc.md,title=title::message"
+
+
+def test_write_annotations_emits_each_items_own_severity(runtime: CliRuntime, tmp_path: Path):
+    # The mixed call lint makes: one writer, two severities, one unattachable sweep at the end.
+    write_annotations(
+        runtime,
+        [
+            Annotation(tmp_path / "gated.md", "gated", "message"),
+            Annotation(tmp_path / "reported.md", "reported", "message", "warning"),
+        ],
+    )
+
+    assert _contents(runtime.stdout) == (
+        "::error file=gated.md,title=gated::message\n"
+        "::warning file=reported.md,title=reported::message\n"
     )
 
 

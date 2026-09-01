@@ -13,6 +13,7 @@ import doc_lattice.config as config_module
 from doc_lattice.cli import app
 from doc_lattice.cli.github import escape_github_property
 from doc_lattice.constants import EdgeState
+from doc_lattice.path_utils import format_path_for_display
 
 from .helpers import _clean_docs, runner
 
@@ -57,7 +58,7 @@ def test_check_human_output_is_byte_identical(lattice_dir: Path, monkeypatch):
         "BROKEN        gdd -> ghost\n"
         "STALE         pc-design -> art-direction#accent\n"
         "UNRECONCILED  pc-design -> art-direction#motion\n"
-        "3 edges: 0 OK, 1 STALE, 1 UNRECONCILED, 1 BROKEN\n"
+        "3 edges: 0 OK, 1 STALE, 1 UNRECONCILED, 1 BROKEN, 0 AMBIGUOUS\n"
     )
 
 
@@ -122,7 +123,9 @@ def test_check_github_annotation_keeps_config_subdir_prefix(
         "---\nid: down\nderives_from:\n  - ref: ghost\n---\n# Down\nbody\n",
         encoding="utf-8",
     )
-    (project / ".doc-lattice.yml").write_text("docs_roots:\n  - docs\n", encoding="utf-8")
+    (project / ".doc-lattice.yml").write_text(
+        "lattice_format: 2\ndocs_roots:\n  - docs\n", encoding="utf-8"
+    )
     monkeypatch.chdir(tmp_path)
     if with_workspace:
         monkeypatch.setenv("GITHUB_WORKSPACE", str(tmp_path))
@@ -217,7 +220,7 @@ def test_check_only_filters_human_output(lattice_dir: Path, monkeypatch):
     assert all("STALE" in line for line in rows)
     # --only narrows the rows; the summary keeps counting every classified edge, so it
     # deliberately does not sum to the number of rows above it.
-    assert summary == "3 edges: 0 OK, 1 STALE, 1 UNRECONCILED, 1 BROKEN"
+    assert summary == "3 edges: 0 OK, 1 STALE, 1 UNRECONCILED, 1 BROKEN, 0 AMBIGUOUS"
 
 
 def test_check_only_filters_json_output(lattice_dir: Path, monkeypatch):
@@ -234,7 +237,7 @@ def test_check_only_is_case_insensitive(lattice_dir: Path, monkeypatch):
     *rows, summary = [line for line in result.stdout.splitlines() if line.strip()]
     assert rows
     assert all("STALE" in line for line in rows)
-    assert summary == "3 edges: 0 OK, 1 STALE, 1 UNRECONCILED, 1 BROKEN"
+    assert summary == "3 edges: 0 OK, 1 STALE, 1 UNRECONCILED, 1 BROKEN, 0 AMBIGUOUS"
 
 
 def test_check_only_unknown_state_exits_2(lattice_dir: Path, monkeypatch):
@@ -259,7 +262,7 @@ def test_check_only_ok_still_exits_1_on_drift(lattice_dir: Path, monkeypatch):
     result = runner.invoke(app, ["check", "--only", "OK"])
     assert result.exit_code == 1
     # No OK edge to list, yet the run still states the verdict rather than printing nothing.
-    assert result.stdout == "3 edges: 0 OK, 1 STALE, 1 UNRECONCILED, 1 BROKEN\n"
+    assert result.stdout == "3 edges: 0 OK, 1 STALE, 1 UNRECONCILED, 1 BROKEN, 0 AMBIGUOUS\n"
 
 
 def test_check_human_output_omits_ok_rows_by_default(tmp_path: Path, monkeypatch):
@@ -275,7 +278,7 @@ def test_check_human_output_omits_ok_rows_by_default(tmp_path: Path, monkeypatch
     assert result.stdout == (
         "BROKEN        zdown -> ghost\n"
         "UNRECONCILED  zdown -> up#other\n"
-        "3 edges: 1 OK, 0 STALE, 1 UNRECONCILED, 1 BROKEN\n"
+        "3 edges: 1 OK, 0 STALE, 1 UNRECONCILED, 1 BROKEN, 0 AMBIGUOUS\n"
     )
 
 
@@ -290,7 +293,8 @@ def test_check_only_ok_still_shows_ok_rows(tmp_path: Path, monkeypatch):
 
     assert result.exit_code == 1
     assert result.stdout == (
-        "OK            mid -> up#sec\n3 edges: 1 OK, 0 STALE, 1 UNRECONCILED, 1 BROKEN\n"
+        "OK            mid -> up#sec\n"
+        "3 edges: 1 OK, 0 STALE, 1 UNRECONCILED, 1 BROKEN, 0 AMBIGUOUS\n"
     )
 
 
@@ -328,10 +332,13 @@ def test_check_without_only_shows_all_states(lattice_dir: Path, monkeypatch):
 
 
 def test_check_exits_2_on_bad_config(tmp_path: Path, monkeypatch):
-    (tmp_path / ".doc-lattice.yml").write_text("docs_roots: ['../x']\n", encoding="utf-8")
+    (tmp_path / ".doc-lattice.yml").write_text(
+        "lattice_format: 2\ndocs_roots: ['../x']\n", encoding="utf-8"
+    )
     monkeypatch.chdir(tmp_path)
     result = runner.invoke(app, ["check"])
     assert result.exit_code == 2
+    assert "resolves outside the project root" in result.stderr
 
 
 def test_check_error_handler_escapes_markup_in_message(tmp_path: Path, monkeypatch):
@@ -374,7 +381,7 @@ def test_check_reports_unreconciled_for_a_file_docs_root(tmp_path: Path, monkeyp
         encoding="utf-8",
     )
     (tmp_path / ".doc-lattice.yml").write_text(
-        "docs_roots: [docs, ARCHITECTURE.md]\n", encoding="utf-8"
+        "lattice_format: 2\ndocs_roots: [docs, ARCHITECTURE.md]\n", encoding="utf-8"
     )
     monkeypatch.chdir(tmp_path)
 
@@ -396,7 +403,7 @@ def test_check_human_summary_is_present_on_a_clean_tree(tmp_path: Path, monkeypa
     assert result.exit_code == 0
     # A problem-free graph is the verdict line alone: the default listing is problem-only, and
     # the verdict is what keeps a clean run explicit rather than silent.
-    assert result.stdout == "1 edge: 1 OK, 0 STALE, 0 UNRECONCILED, 0 BROKEN\n"
+    assert result.stdout == "1 edge: 1 OK, 0 STALE, 0 UNRECONCILED, 0 BROKEN, 0 AMBIGUOUS\n"
 
 
 def test_check_human_summary_is_present_when_there_are_no_edges(tmp_path: Path, monkeypatch):
@@ -408,7 +415,7 @@ def test_check_human_summary_is_present_when_there_are_no_edges(tmp_path: Path, 
     result = runner.invoke(app, ["check"])
 
     assert result.exit_code == 0
-    assert result.stdout == "0 edges: 0 OK, 0 STALE, 0 UNRECONCILED, 0 BROKEN\n"
+    assert result.stdout == "0 edges: 0 OK, 0 STALE, 0 UNRECONCILED, 0 BROKEN, 0 AMBIGUOUS\n"
 
 
 def test_check_json_summary_covers_every_state_including_zero_counts(
@@ -417,7 +424,13 @@ def test_check_json_summary_covers_every_state_including_zero_counts(
     monkeypatch.chdir(lattice_dir)
     result = runner.invoke(app, ["check", "--format", "json"])
     payload = json.loads(result.stdout)
-    assert payload["summary"] == {"OK": 0, "STALE": 1, "UNRECONCILED": 1, "BROKEN": 1}
+    assert payload["summary"] == {
+        "OK": 0,
+        "STALE": 1,
+        "UNRECONCILED": 1,
+        "BROKEN": 1,
+        "AMBIGUOUS": 0,
+    }
     assert set(payload["summary"]) == set(get_args(EdgeState))
     assert sum(payload["summary"].values()) == len(payload["edges"])
 
@@ -447,7 +460,8 @@ def test_check_json_edge_records_are_unchanged_by_the_summary(lattice_dir: Path,
         ("pc-design", "art-direction#motion"),
     ]
     assert all(
-        set(edge) == {"source_id", "target_ref", "target_id", "state", "expected", "actual"}
+        set(edge)
+        == {"source_id", "target_ref", "target_id", "state", "expected", "actual", "collision"}
         for edge in payload["edges"]
     )
 
@@ -675,7 +689,9 @@ def test_check_id_less_stderr_is_byte_identical_uncached_cold_and_warm(tmp_path:
     env = {"XDG_CACHE_HOME": str(tmp_path / "xdg")}
 
     uncached = _check_in(tmp_path, env)
-    (tmp_path / ".doc-lattice.yml").write_text("cache_key: idless\n", encoding="utf-8")
+    (tmp_path / ".doc-lattice.yml").write_text(
+        "lattice_format: 2\ncache_key: idless\n", encoding="utf-8"
+    )
     cold = _check_in(tmp_path, env)  # writes the cache
     warm = _check_in(tmp_path, env)  # every file served from it
 
@@ -698,7 +714,9 @@ def test_check_reused_anchor_stderr_names_the_file_and_survives_a_warm_cache(tmp
     env = {"XDG_CACHE_HOME": str(tmp_path / "xdg")}
 
     uncached = _check_in(tmp_path, env)
-    (tmp_path / ".doc-lattice.yml").write_text("cache_key: anchored\n", encoding="utf-8")
+    (tmp_path / ".doc-lattice.yml").write_text(
+        "lattice_format: 2\ncache_key: anchored\n", encoding="utf-8"
+    )
     cold = _check_in(tmp_path, env)  # writes the cache
     warm = _check_in(tmp_path, env)  # the node is served from it
 
@@ -757,7 +775,9 @@ def _nested_annotation_project(tmp_path: Path) -> tuple[Path, Path]:
         "---\nid: down\nderives_from:\n  - ref: ghost\n---\n# Down\nbody\n",
         encoding="utf-8",
     )
-    (tmp_path / ".doc-lattice.yml").write_text("docs_roots:\n  - docs\n", encoding="utf-8")
+    (tmp_path / ".doc-lattice.yml").write_text(
+        "lattice_format: 2\ndocs_roots:\n  - docs\n", encoding="utf-8"
+    )
     nested = tmp_path / "tools" / "scripts"
     nested.mkdir(parents=True)
     return nested, docs / "down.md"
@@ -816,4 +836,56 @@ def test_check_github_annotation_ignores_a_workspace_that_excludes_the_document(
     assert result.exit_code == 1
     assert result.stdout == (
         "::error file=docs/down.md,title=doc-lattice BROKEN::down -> ghost is BROKEN\n"
+    )
+
+
+def test_check_exits_one_on_an_ambiguous_edge_and_names_it_in_both_formats(tmp_path: Path):
+    docs = tmp_path / "docs"
+    docs.mkdir()
+    (docs / "up.md").write_text("---\nid: up\n---\n# Notes\n\n# Notes\n", encoding="utf-8")
+    (docs / "down.md").write_text(
+        "---\nid: down\nderives_from:\n  - ref: up#notes\n---\n# Down\n", encoding="utf-8"
+    )
+    config = tmp_path / ".doc-lattice.yml"
+    config.write_text("lattice_format: 2\ndocs_roots:\n  - docs\n", encoding="utf-8")
+
+    human = runner.invoke(app, ["check", "--config", str(config)])
+    payload = runner.invoke(app, ["check", "--config", str(config), "--format", "json"])
+
+    assert human.exit_code == 1
+    assert payload.exit_code == 1
+    # File lines, envelope included: the two headings sit on lines 4 and 6 of up.md.
+    assert 'ambiguous with "Notes" (line 4), "Notes" (line 6)' in human.stdout
+    edge = json.loads(payload.stdout)["edges"][0]
+    assert edge["state"] == "AMBIGUOUS"
+    assert edge["collision"] == [
+        {"label": "Notes", "line": 4},
+        {"label": "Notes", "line": 6},
+    ]
+    assert json.loads(payload.stdout)["summary"]["AMBIGUOUS"] == 1
+
+
+def test_check_github_annotation_names_the_colliding_headings(tmp_path: Path, monkeypatch):
+    # The collision members are the only actionable part of an AMBIGUOUS finding, and the
+    # annotation is the surface a reviewer reads in the pull request.
+    docs = tmp_path / "docs"
+    docs.mkdir()
+    (docs / "up.md").write_text("---\nid: up\n---\n# Notes\n\n# Notes\n", encoding="utf-8")
+    (docs / "down.md").write_text(
+        "---\nid: down\nderives_from:\n  - ref: up#notes\n---\n# Down\n", encoding="utf-8"
+    )
+    config = tmp_path / ".doc-lattice.yml"
+    config.write_text("lattice_format: 2\ndocs_roots:\n  - docs\n", encoding="utf-8")
+
+    monkeypatch.chdir(tmp_path)
+
+    result = runner.invoke(app, ["check", "--format", "github"])
+
+    # The annotation attaches to the downstream file, so the message has to name the upstream
+    # one: the cited lines are in up.md, and down.md is only six lines long.
+    upstream = format_path_for_display((docs / "up.md").resolve())
+    assert result.stdout == (
+        "::error file=docs/down.md,title=doc-lattice AMBIGUOUS::"
+        f"down -> up#notes is AMBIGUOUS in {upstream} "
+        '(ambiguous with "Notes" (line 4), "Notes" (line 6))\n'
     )

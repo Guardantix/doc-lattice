@@ -143,6 +143,7 @@ def test_init_delegates_create_only_write_to_shared_persistence(tmp_path: Path, 
     assert target == tmp_path / ".doc-lattice.yml"
     assert data == (
         b"# doc-lattice configuration. See https://github.com/Guardantix/doc-lattice\n"
+        b"lattice_format: 2\n"
         b"docs_roots:\n"
         b"  - docs\n"
         b"# ignore_globs:\n"
@@ -413,6 +414,79 @@ def test_init_skips_existing_config_but_still_prints(tmp_path: Path, monkeypatch
     # same as the wrote line above it, so both sinks in this function are wrapped rather than
     # one of them riding an exemption written for the staged-file prefix beside them.
     assert "'.doc-lattice.yml' already exists, leaving it untouched" in result.stderr
+    # SENTINEL is a bare scalar, not a mapping, so the pre-v7 report cannot answer and says
+    # nothing. The next test is the one that pins the report itself.
+    assert "lattice_format" not in result.stderr
+
+
+def test_init_reports_an_existing_config_that_predates_the_lattice_format_key(
+    tmp_path: Path, monkeypatch
+):
+    # The failure this closes: init narrating a full success on a repository where check, lint,
+    # reconcile and the rest all exit 2, and naming nothing that connects the two.
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / ".doc-lattice.yml").write_text("docs_roots:\n  - docs\n", encoding="utf-8")
+
+    result = runner.invoke(app, ["init"])
+
+    assert result.exit_code == 0
+    # Reported, never repaired: init is create-only and does not edit a config it did not write.
+    assert (tmp_path / ".doc-lattice.yml").read_text(encoding="utf-8") == "docs_roots:\n  - docs\n"
+    assert "'.doc-lattice.yml' already exists, leaving it untouched" in result.stderr
+    assert "does not declare 'lattice_format: 2'" in result.stderr
+    assert "CHANGELOG.md" in result.stderr
+
+
+def test_init_reports_an_empty_existing_config_as_predating_the_key(tmp_path: Path, monkeypatch):
+    # An empty file parses to an empty mapping, which is a config that omits the key rather than
+    # one init cannot answer for, and load_config refuses it for exactly that reason.
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / ".doc-lattice.yml").write_text("", encoding="utf-8")
+
+    result = runner.invoke(app, ["init"])
+
+    assert result.exit_code == 0
+    assert (tmp_path / ".doc-lattice.yml").read_text(encoding="utf-8") == ""
+    assert "does not declare 'lattice_format: 2'" in result.stderr
+
+
+def test_init_says_nothing_about_an_existing_config_that_already_declares_the_key(
+    tmp_path: Path, monkeypatch
+):
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / ".doc-lattice.yml").write_text(
+        "lattice_format: 2\ndocs_roots:\n  - docs\n", encoding="utf-8"
+    )
+
+    result = runner.invoke(app, ["init"])
+
+    assert result.exit_code == 0
+    assert "'.doc-lattice.yml' already exists, leaving it untouched" in result.stderr
+    assert "lattice_format" not in result.stderr
+
+
+@pytest.mark.parametrize(
+    ("label", "contents"),
+    [
+        ("unparseable", "docs_roots: [unclosed\n"),
+        ("not-a-mapping", "- docs\n"),
+    ],
+)
+def test_init_stays_silent_and_succeeds_on_a_config_it_cannot_answer_for(
+    tmp_path: Path, monkeypatch, label: str, contents: str
+):
+    # init scaffolds; it is not a config gate. A config it cannot read is still a real failure,
+    # but it is the one every loading command already reports with the context to act on, and
+    # nothing init writes depends on the answer, so it must not raise or exit 2 here.
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / ".doc-lattice.yml").write_text(contents, encoding="utf-8")
+
+    result = runner.invoke(app, ["init"])
+
+    assert result.exit_code == 0, label
+    assert (tmp_path / ".doc-lattice.yml").read_text(encoding="utf-8") == contents
+    assert "'.doc-lattice.yml' already exists, leaving it untouched" in result.stderr
+    assert "lattice_format" not in result.stderr
 
 
 # A long name that passes the branch-name policy, so the branch record is wider than the pinned

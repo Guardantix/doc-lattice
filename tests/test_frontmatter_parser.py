@@ -12,10 +12,15 @@ import doc_lattice.frontmatter_parser as frontmatter_parser_module
 from doc_lattice.constants import LATTICE_INTENT_KEYS
 from doc_lattice.error_types import FrontmatterError, UnreadableDocError
 from doc_lattice.frontmatter_parser import (
+    _OPENER_NEAR_MISS,
+    detect_misplaced_envelope,
+    parse_document,
     parse_meta,
+    refuse_double_hyphen,
     split_frontmatter,
     split_frontmatter_parts,
 )
+from doc_lattice.hashing import normalize_newlines
 from doc_lattice.model import NodeMeta, RawEdge
 from doc_lattice.yaml_boundary import YAML_LOAD_ERRORS, SafeYamlLoader
 from doc_lattice.yaml_error_render import format_yaml_error_for_display
@@ -123,6 +128,9 @@ def test_split_frontmatter_detects_crlf_fences():
 def test_split_frontmatter_identity_when_no_opening_fence(text):
     first_line = text.lstrip("﻿").split("\n", 1)[0]
     assume(first_line.strip() != "---")
+    # The comment envelope claims line 1 too, and a first line that means it without spelling it
+    # exactly is an error rather than an identity, so both are drawn out of this property.
+    assume(_OPENER_NEAR_MISS.fullmatch(first_line) is None)
     raw, body = split_frontmatter(text, Path("a.md"))
     assert raw is None
     assert body == text
@@ -869,3 +877,299 @@ def test_the_carried_document_is_the_spelling_the_caller_passed():
         parse_meta("id: x\nlayer: bogus\n", source)
 
     assert exc.value.source == source
+
+
+def test_fence_split_reports_its_kind_and_inner_yaml_offsets():
+    text = "﻿---   \nid: pc\n---  \n# Body\n"
+
+    parts = split_frontmatter_parts(text, Path("a.md"))
+
+    assert parts is not None
+    assert parts.kind == "fence"
+    assert text[parts.meta_start : parts.meta_end] == parts.raw_meta
+    assert parts.raw_meta == "id: pc\n"
+
+
+def test_fence_split_offsets_are_empty_for_an_empty_block():
+    parts = split_frontmatter_parts("---\n---\n# Body\n", Path("a.md"))
+
+    assert parts is not None
+    assert parts.raw_meta == ""
+    assert parts.meta_start == parts.meta_end
+
+
+COMMENT_DOC = "<!-- doc-lattice\nid: pc\ntitle: PC\n-->\n# Body\ntext\n"
+
+
+def test_comment_envelope_is_split_like_a_fence():
+    parts = split_frontmatter_parts(COMMENT_DOC, Path("a.md"))
+
+    assert parts is not None
+    assert parts.kind == "comment"
+    assert parts.prefix == ""
+    assert parts.open_fence == "<!-- doc-lattice"
+    assert parts.raw_meta == "id: pc\ntitle: PC\n"
+    assert parts.close_fence == "-->"
+    assert parts.close_fence_newline == "\n"
+    assert parts.body == "# Body\ntext\n"
+    assert COMMENT_DOC[parts.meta_start : parts.meta_end] == parts.raw_meta
+
+
+def test_comment_envelope_body_ends_at_the_first_column_zero_terminator():
+    text = "<!-- doc-lattice\nid: pc\n  -->\n-->\n# Body\n"
+
+    parts = split_frontmatter_parts(text, Path("a.md"))
+
+    assert parts is not None
+    assert parts.raw_meta == "id: pc\n  -->\n"
+    assert parts.body == "# Body\n"
+
+
+def test_unclosed_comment_envelope_is_a_hard_error():
+    with pytest.raises(UnreadableDocError) as excinfo:
+        split_frontmatter_parts("<!-- doc-lattice\nid: x\n# no terminator\n", Path("broken.md"))
+
+    assert "unclosed doc-lattice comment envelope" in str(excinfo.value)
+    assert "'-->'" in str(excinfo.value)
+
+
+def test_a_byte_order_mark_before_the_comment_opener_is_refused():
+    with pytest.raises(FrontmatterError) as excinfo:
+        split_frontmatter_parts("﻿" + COMMENT_DOC, Path("bom.md"))
+
+    assert "byte-order mark" in str(excinfo.value)
+    assert "'---'" in str(excinfo.value)
+
+
+def test_comment_syntax_below_line_one_is_ordinary_content():
+    text = "---\nid: pc\n---\n# Body\n\n<!-- doc-lattice\nid: other\n-->\n"
+
+    parts = split_frontmatter_parts(text, Path("a.md"))
+
+    assert parts is not None
+    assert parts.kind == "fence"
+    assert "<!-- doc-lattice" in parts.body
+
+
+def test_a_crlf_comment_envelope_is_read_after_the_normalization_every_load_does():
+    # `discovery.decode_doc` translates CRLF and lone CR to LF before any splitter sees the
+    # text, which is what the fence suite's own CRLF case relies on. The fence grammar
+    # tolerates a raw `\r` anyway because it compares `line.strip()`; the comment grammar is
+    # byte-exact and does not, so a raw CRLF opener lands in the near-miss tier and fails loud
+    # rather than vanishing. Both halves are pinned, since the difference is deliberate.
+    raw = "<!-- doc-lattice\r\nid: pc\r\n-->\r\n# Body\r\n"
+
+    with pytest.raises(FrontmatterError):
+        split_frontmatter_parts(raw, Path("a.md"))
+
+    parts = split_frontmatter_parts(normalize_newlines(raw), Path("a.md"))
+
+    assert parts is not None
+    assert parts.kind == "comment"
+    assert parts.raw_meta == "id: pc\n"
+
+
+@pytest.mark.parametrize(
+    "opener",
+    [
+        "<!-- doc-lattice ",
+        " <!-- doc-lattice",
+        "    <!-- doc-lattice",
+        "\t<!-- doc-lattice",
+        "<!-- DOC-LATTICE",
+        "<!--doc-lattice",
+        "<!--  doc-lattice",
+        "<!-- doc-lattice\t",
+    ],
+)
+def test_a_near_miss_opener_is_an_actionable_error_not_untracked_prose(opener: str):
+    text = f"{opener}\nid: pc\n-->\n# Body\n"
+
+    with pytest.raises(FrontmatterError) as excinfo:
+        split_frontmatter_parts(text, Path("near.md"))
+
+    message = str(excinfo.value)
+    assert "'<!-- doc-lattice'" in message
+    assert "first line" in message
+
+
+def test_an_ordinary_html_comment_on_line_one_stays_untracked():
+    assert split_frontmatter_parts("<!-- notes -->\n# Body\n", Path("a.md")) is None
+    assert split_frontmatter_parts("<!-- doc-lattice notes -->\n# B\n", Path("a.md")) is None
+
+
+@pytest.mark.parametrize(
+    "raw_meta",
+    ["", "just a scalar\n", "- one\n- two\n", "title: PC\nlayer: design\n"],
+)
+def test_a_comment_envelope_without_an_id_fails_closed(raw_meta: str):
+    with pytest.raises(FrontmatterError) as excinfo:
+        parse_meta(raw_meta, Path("a.md"), kind="comment")
+
+    message = str(excinfo.value)
+    assert "doc-lattice comment envelope" in message
+    assert "'id'" in message
+
+
+def test_the_same_bodies_stay_soft_under_the_fence_spelling():
+    assert parse_meta("", Path("a.md")).disposition == "untracked"
+    assert parse_meta("- one\n", Path("a.md")).disposition == "untracked"
+    assert parse_meta("title: PC\n", Path("a.md")).disposition == "id-less"
+
+
+def test_a_comment_envelope_with_an_id_parses_like_a_fence():
+    outcome = parse_meta("id: pc\ntitle: PC\n", Path("a.md"), kind="comment")
+
+    assert outcome.disposition == "tracked"
+    assert outcome.meta == NodeMeta(id="pc", title="PC")
+
+
+def test_a_double_hyphen_in_a_comment_envelope_body_is_refused_by_line():
+    with pytest.raises(FrontmatterError) as excinfo:
+        refuse_double_hyphen("id: pc\nlayer: foo--bar\n", Path("a.md"), first_body_line=2)
+
+    message = str(excinfo.value)
+    assert "line 3" in message
+    assert "'--'" in message
+
+
+def test_a_body_without_a_double_hyphen_is_accepted():
+    assert refuse_double_hyphen("id: pc\nseen: abc123\n", Path("a.md"), first_body_line=2) is None
+
+
+def test_parse_document_reads_either_spelling_and_returns_the_body():
+    fence_outcome, fence_body = parse_document(DOC, Path("a.md"))
+    comment_outcome, comment_body = parse_document(COMMENT_DOC, Path("b.md"))
+
+    assert fence_outcome.disposition == "tracked"
+    assert comment_outcome.disposition == "tracked"
+    assert fence_outcome.meta is not None
+    assert comment_outcome.meta is not None
+    assert fence_outcome.meta.id == comment_outcome.meta.id == "pc"
+    assert fence_body == "# Body\ntext\n"
+    assert comment_body == "# Body\ntext\n"
+
+
+def test_parse_document_refuses_a_double_hyphen_naming_the_file_line():
+    text = "<!-- doc-lattice\nid: pc\ntitle: a--b\n-->\n# Body\n"
+
+    with pytest.raises(FrontmatterError) as excinfo:
+        parse_document(text, Path("a.md"))
+
+    assert "line 3" in str(excinfo.value)
+
+
+def test_parse_document_leaves_prose_untracked():
+    outcome, body = parse_document("# No frontmatter\n", Path("a.md"))
+
+    assert outcome.disposition == "untracked"
+    assert body == "# No frontmatter\n"
+
+
+def test_a_misplaced_envelope_below_line_one_is_detected():
+    text = "# Title\n\n<!-- doc-lattice\nid: pc\n-->\n"
+
+    outcome, body = parse_document(text, Path("a.md"))
+
+    assert outcome.disposition == "misplaced-envelope"
+    assert outcome.meta is None
+    assert body == text
+
+
+def test_a_quoted_envelope_example_is_not_a_misplacement():
+    text = "# Title\n\n```markdown\n<!-- doc-lattice\nid: pc\n-->\n```\n"
+
+    outcome, _body = parse_document(text, Path("a.md"))
+
+    assert outcome.disposition == "untracked"
+
+
+def test_a_tracked_file_carrying_a_second_envelope_stays_tracked_and_reports_it():
+    # The half-converted state the 7.0.0 migration warns about: the envelope was added and the
+    # fence it has to displace was not removed. The file is still a node, under the fence's
+    # `pc`, and the envelope's `other` is body text, so this cannot be a disposition. It is
+    # reported all the same, because a silent one is the whole failure the migration names.
+    text = "---\nid: pc\n---\n# Body\n\n<!-- doc-lattice\nid: other\n-->\n"
+
+    outcome, _body = parse_document(text, Path("a.md"))
+
+    assert outcome.disposition == "tracked"
+    assert outcome.meta is not None
+    assert outcome.meta.id == "pc"
+    assert outcome.shadowed_envelope is True
+
+
+def test_a_tracked_file_quoting_the_other_spelling_in_a_code_block_stays_quiet():
+    # The false-positive surface the scan has to leave alone: a document that documents the
+    # envelope form. `code_block_line_spans` excludes it, which is what makes running the scan
+    # over a tracked file's prose safe at all.
+    text = "---\nid: pc\n---\n# Body\n\n```markdown\n<!-- doc-lattice\nid: other\n-->\n```\n"
+
+    outcome, _body = parse_document(text, Path("a.md"))
+
+    assert outcome.disposition == "tracked"
+    assert outcome.shadowed_envelope is False
+
+
+def test_a_comment_tracked_file_quoting_its_own_opener_stays_quiet():
+    # The envelope consumed the top of the file, so an opener below it is the author quoting the
+    # form rather than a second envelope competing with the first. Nothing is shadowed.
+    text = "<!-- doc-lattice\nid: pc\n-->\n# Body\n\n<!-- doc-lattice\n"
+
+    outcome, _body = parse_document(text, Path("a.md"))
+
+    assert outcome.disposition == "tracked"
+    assert outcome.shadowed_envelope is False
+
+
+def test_an_ordinary_tracked_file_reports_no_shadowed_envelope():
+    outcome, _body = parse_document("---\nid: pc\n---\n# Body\n", Path("a.md"))
+
+    assert outcome.shadowed_envelope is False
+
+
+def test_the_substring_precheck_short_circuits_a_file_without_the_sentinel():
+    assert detect_misplaced_envelope("# Title\n\nordinary prose\n") is False
+
+
+def test_a_mid_sentence_mention_of_the_sentinel_is_rejected_before_any_parse():
+    # Stage two of the three-stage scan, and the reason the pre-check is a deliberate superset:
+    # the substring matches anywhere in a line, so prose naming the opener mid-sentence gets past
+    # it and is rejected by the per-line fullmatch, which costs a line scan and no parse. This
+    # file and ARCHITECTURE.md are both documents that would trip the pre-check this way.
+    assert detect_misplaced_envelope("# Title\n\nOpen with <!-- doc-lattice on line 1.\n") is False
+
+
+def test_an_untracked_fence_followed_by_a_comment_envelope_is_misplaced():
+    text = "---\ntitle: x\n---\n<!-- doc-lattice\nid: y\n-->\n# Doc\n"
+
+    outcome, body = parse_document(text, Path("a.md"))
+
+    assert outcome.disposition == "misplaced-envelope"
+    assert outcome.meta is None
+    assert body == "<!-- doc-lattice\nid: y\n-->\n# Doc\n"
+
+
+def test_an_id_less_fence_followed_by_a_comment_envelope_is_misplaced():
+    text = "---\nnote: hi\n---\n<!-- doc-lattice\nid: y\n-->\n# Doc\n"
+
+    outcome, _body = parse_document(text, Path("a.md"))
+
+    assert outcome.disposition == "misplaced-envelope"
+    assert outcome.meta is None
+
+
+def test_a_near_miss_opener_below_line_one_is_also_a_misplacement():
+    text = "# Title\n\n<!-- DOC-LATTICE\nid: pc\n-->\n"
+
+    outcome, _body = parse_document(text, Path("a.md"))
+
+    assert outcome.disposition == "misplaced-envelope"
+
+
+def test_a_near_miss_opener_inside_a_code_block_stays_untracked():
+    text = "# Title\n\n```markdown\n<!--doc-lattice\nid: pc\n-->\n```\n"
+
+    outcome, _body = parse_document(text, Path("a.md"))
+
+    assert outcome.disposition == "untracked"

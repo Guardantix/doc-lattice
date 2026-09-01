@@ -12,13 +12,35 @@ from .sections import section_text
 def target_content(lattice: Lattice, target_id: TargetId) -> str:
     """Return the content a target id covers, for hashing.
 
+    A section target's content is prefixed with its ancestor heading chain, so context is part
+    of target identity. Two byte-identical sections under different parents (a templated
+    ``### Setup`` under ``## Product A`` and ``## Product B``) no longer hash the same, which is
+    what closes the transient-collision hole: adding B's ``Setup`` and renaming A's in one
+    change would otherwise transfer ``#setup`` between products with no run ever seeing a
+    collision and the old ``seen`` still matching. A section that moves under a different
+    parent, or whose ancestor is reworded, therefore goes STALE even when its own bytes did not
+    change, which is correct: the context is part of what the downstream document derived from.
+    Whole-file targets are unaffected.
+
+    The chain comes from ``lattice.ancestor_context``, derived by heading level over every form
+    GitHub assigns an id to and rendered as normalized ATX. A setext parent, an ATX parent
+    indented one to three spaces, and a parent nested in a list item or a block quote all count,
+    even though none of them is addressable and none can appear in ``lattice.ancestors``. That
+    is deliberately not the span-containment chain ``impact`` walks; see ``model.Lattice``.
+
+    One benign residual collision survives this: a parent section immediately followed by its
+    first subheading, with no text between the two heading lines, hashes identically to that
+    child, since the parent's own span runs through the child's heading and body with nothing
+    of the parent's own in between. This is spec-tolerated rather than fixed, since either
+    target id names the same bytes and an edge into either classifies drift the same way.
+
     Args:
         lattice: The built lattice.
         target_id: A resolved TargetId present in ``lattice.index``.
 
     Returns:
-        The whole node body for a ``file`` location, or the anchored section text for a
-        ``section`` location.
+        The whole node body for a ``file`` location, or the ancestor heading chain followed by
+        the anchored section text for a ``section`` location.
 
     Raises:
         BrokenRefError: If ``target_id`` is not in the index.
@@ -30,7 +52,26 @@ def target_content(lattice: Lattice, target_id: TargetId) -> str:
     node = node_for_path(lattice, location.path)
     if location.kind == "file":
         return node.body
-    return section_text(node.body, location.span)
+    section = section_text(node.body, location.span)
+    chain = lattice.ancestor_context.get(target_id, ())
+    return "\n".join([*chain, section]) if chain else section
+
+
+def ancestor_headings(lattice: Lattice, target_id: TargetId) -> tuple[str, ...]:
+    """Return each enclosing heading rendered as normalized ATX, outermost first.
+
+    An accessor over ``lattice.ancestor_context``, kept as the named contract the tests assert
+    ``target_content``'s context prefix against. It has no production caller of its own.
+
+    Args:
+        lattice: The built lattice.
+        target_id: A resolved section TargetId present in ``lattice.index``.
+
+    Returns:
+        The ancestors as normalized ATX heading lines, outermost first, empty for a section
+        with no enclosing heading.
+    """
+    return lattice.ancestor_context.get(target_id, ())
 
 
 def cached_target_hash(lattice: Lattice, target_id: TargetId, cache: dict[TargetId, str]) -> str:

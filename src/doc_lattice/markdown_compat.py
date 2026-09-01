@@ -56,6 +56,27 @@ class Heading:
     line: int
 
 
+@dataclass(frozen=True, slots=True)
+class SluggedHeading:
+    """One heading in the full GitHub inventory, with the ids its allocation examined.
+
+    ``probes`` is every candidate id the document-order deduplicator tried for this
+    heading, its base slug first and each dedup suffix after, ending with the id it
+    kept. Ambiguity is derived from the probes rather than from bases or final ids,
+    because dedup examines ids it never emits, and an id a later heading merely probed
+    is one a rename can hand it.
+
+    ``level`` is the heading's nesting level whatever form it was written in, so a caller
+    can reconstruct the outline a reader sees across forms the addressable TOC cannot.
+    """
+
+    text: str
+    level: int
+    line: int
+    github_id: str
+    probes: tuple[str, ...]
+
+
 class _SourceMapState(StateBlock):
     """Minimal line-map state for markdown-it-py's pinned block rules.
 
@@ -119,6 +140,16 @@ class _SourceMapState(StateBlock):
 
 
 _PARSER = MarkdownIt("commonmark")
+# The same pinned parser with inline tokenization switched off. Every whole-document consumer in
+# this module reads only block structure: heading source lines, an inline token's raw ``content``,
+# and code-block spans. The ``inline`` core rule fills each inline token's ``children`` with a
+# second tokenization of every paragraph in the document, which nothing here reads, and it is the
+# dominant cost of a full parse. ``text_join`` is disabled with it because its only job is to
+# merge adjacent text tokens inside those children, so with ``inline`` off it walks every token in
+# the document to do nothing. Disabling both leaves ``Token.type``, ``Token.map``, and
+# ``Token.content`` untouched, so the derived values are byte-identical.
+_BLOCK_PARSER = MarkdownIt("commonmark")
+_BLOCK_PARSER.core.ruler.disable(["inline", "text_join"])
 
 
 def extract_headings(body: str) -> list[Heading]:
@@ -179,6 +210,28 @@ def extract_headings(body: str) -> list[Heading]:
     return headings
 
 
+def code_block_line_spans(body: str) -> list[tuple[int, int]]:
+    """Return the 1-based inclusive line spans of every code block a render would show.
+
+    Read from the pinned parser's full CommonMark parse rather than from the adapter's
+    restricted heading scan, because the caller asks a rendering question ("would a reader see
+    this as sample text") rather than an addressing one. Both fenced blocks and indented ones
+    count, since either turns the text it holds into a quoted example.
+
+    Args:
+        body: Markdown document text.
+
+    Returns:
+        ``(start, end)`` line ranges in document order, both bounds inclusive.
+    """
+    normalized = normalize_newlines(body).replace("\0", "�")
+    spans: list[tuple[int, int]] = []
+    for token in _BLOCK_PARSER.parse(normalized):
+        if token.type in ("fence", "code_block") and token.map is not None:
+            spans.append((token.map[0] + 1, token.map[1]))
+    return spans
+
+
 def _is_final_sigma(text: str, index: int) -> bool:
     for position in range(index - 1, -1, -1):
         character = text[position]
@@ -230,13 +283,19 @@ class _Slugger:
 
     def slug(self, text: str) -> str:
         """Return the next unique slug for heading content."""
+        return self.slug_with_probes(text)[0]
+
+    def slug_with_probes(self, text: str) -> tuple[str, tuple[str, ...]]:
+        """Return the next unique slug for heading content and every candidate it examined."""
         base = github_slug(text)
         result = base
+        probes = [base]
         while result in self._seen:
             self._seen[base] += 1
             result = f"{base}-{self._seen[base]}"
+            probes.append(result)
         self._seen[result] = 0
-        return result
+        return result, tuple(probes)
 
 
 def github_ids_for_texts(texts: Iterable[str]) -> list[str]:
@@ -294,6 +353,135 @@ def github_heading_ids(headings: list[Heading]) -> list[str]:
         pinned github-slugger collision rule.
     """
     return github_ids_for_texts(heading.text for heading in headings)
+
+
+def full_heading_inventory(body: str) -> list[SluggedHeading]:
+    """Return every heading a GitHub render assigns an id to, with its allocation trace.
+
+    Wider than ``extract_headings`` on purpose: this reads the pinned parser's unrestricted
+    CommonMark stream, so setext headings, ATX headings indented one to three spaces, and
+    headings nested in a list item or a block quote all arrive. That is the inventory
+    GitHub allocates ids from, and a collision between a form the engine addresses and one
+    it does not is the only way the lattice id and the GitHub fragment can diverge.
+    Addressability itself is unchanged; running *allocation* over this inventory is a
+    separate follow-up (GTX-277).
+
+    Args:
+        body: Markdown document text.
+
+    Returns:
+        One record per heading in document order, ids deduplicated by the pinned
+        github-slugger collision rule.
+
+    Raises:
+        RuntimeError: If the pinned parser returns a malformed heading token pair.
+    """
+    normalized = normalize_newlines(body).replace("\0", "�")
+    tokens = _BLOCK_PARSER.parse(normalized)
+    slugger = _Slugger()
+    inventory: list[SluggedHeading] = []
+    for index, token in enumerate(tokens):
+        if token.type != "heading_open":
+            continue
+        content = tokens[index + 1] if index + 1 < len(tokens) else None
+        if content is None or content.type != "inline" or token.map is None:
+            msg = f"{MARKDOWN_COMPAT_VERSION} returned a malformed heading token pair"
+            raise RuntimeError(msg)
+        github_id, probes = slugger.slug_with_probes(content.content)
+        inventory.append(
+            SluggedHeading(
+                text=content.content,
+                # ``token.markup`` is ``=`` or ``-`` for a setext heading, so only ``tag``
+                # carries the level uniformly across every heading form.
+                level=int(token.tag[1:]),
+                line=token.map[0] + 1,
+                github_id=github_id,
+                probes=probes,
+            )
+        )
+    return inventory
+
+
+def collision_components(
+    inventory: list[SluggedHeading],
+) -> list[tuple[SluggedHeading, ...]]:
+    """Group headings whose ids move together under a reword into collision components.
+
+    During allocation, every candidate id a heading examines (its base slug and each dedup
+    suffix tried) links that heading to the id's current holder. The connected components of
+    that graph are the collision components, and every generated id in a component is
+    ambiguous: rewording any member can hand a member's id to a different heading, which
+    resolves without breaking and therefore reads OK or STALE rather than BROKEN.
+
+    Args:
+        inventory: Headings in document order, from ``full_heading_inventory``.
+
+    Returns:
+        Each component of more than one heading, members in document order, components
+        ordered by their first member. A heading in no component is not returned.
+    """
+    parent = list(range(len(inventory)))
+
+    def find(node: int) -> int:
+        while parent[node] != node:
+            parent[node] = parent[parent[node]]
+            node = parent[node]
+        return node
+
+    def union(left: int, right: int) -> None:
+        left_root, right_root = find(left), find(right)
+        if left_root != right_root:
+            parent[max(left_root, right_root)] = min(left_root, right_root)
+
+    holder: dict[str, int] = {}
+    for index, heading in enumerate(inventory):
+        for probe in heading.probes:
+            if probe in holder:
+                union(index, holder[probe])
+        holder[heading.github_id] = index
+
+    grouped: dict[int, list[SluggedHeading]] = {}
+    for index, heading in enumerate(inventory):
+        grouped.setdefault(find(index), []).append(heading)
+    return [tuple(members) for _root, members in sorted(grouped.items()) if len(members) > 1]
+
+
+def addressable_heading_inventory(headings: list[Heading]) -> list[SluggedHeading]:
+    """Return the addressable TOC's own slug-allocation trace, one record per heading.
+
+    ``full_heading_inventory`` traces allocation over the full CommonMark parse, which misses a
+    heading the restricted addressable scanner still addresses: a column-zero ``#`` line inside
+    an HTML comment or another container the full parse renders as inert is not a heading token
+    there, but ``extract_headings`` is not container-aware and reads it as one anyway. This
+    traces the same allocation over ``build_toc``'s own output instead, so a caller can union
+    both traces' collision components and catch either direction of the mismatch.
+
+    Slug source is ``Heading.text``, the same input ``anchor_ids`` slugs, and allocation runs
+    over every heading in document order regardless of an explicit marker, matching
+    ``github_heading_ids``'s dedup state -- a marker-set heading still occupies a slot in the
+    document-order sequence even though its own id comes from the marker, not the slug.
+
+    Args:
+        headings: The addressable ATX subset from ``build_toc``, in document order.
+
+    Returns:
+        One record per heading in document order, ids deduplicated by the pinned
+        github-slugger collision rule.
+    """
+    slugger = _Slugger()
+    inventory: list[SluggedHeading] = []
+    for heading in headings:
+        github_id, probes = slugger.slug_with_probes(heading.text)
+        inventory.append(
+            SluggedHeading(
+                text=heading.text,
+                level=heading.level,
+                line=heading.line,
+                github_id=github_id,
+                probes=probes,
+            )
+        )
+    return inventory
 
 
 def anchor_ids(headings: list[Heading]) -> list[str]:

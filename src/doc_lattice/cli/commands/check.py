@@ -5,11 +5,19 @@ from typing import Annotated
 import typer
 from rich.markup import escape
 
-from ...check import EdgeStatus, check_lattice, has_drift, statuses_json, summarize_statuses
+from ...check import (
+    EdgeStatus,
+    check_lattice,
+    collision_file,
+    has_drift,
+    statuses_json,
+    summarize_statuses,
+)
 from ...constants import VALID_EDGE_STATES, VALID_REPORT_FORMATS
+from ...model import format_collision
 from ...report_render import render_statuses
 from ..errors import EXIT_FINDING, EXIT_TOOL_ERROR, exit_on_project_error
-from ..github import write_annotations
+from ..github import Annotation, write_annotations
 from ..options import ConfigOpt, IndentOpt, ReportFormatOpt
 from ..output import select_output, write_json
 from ..runtime import CliRuntime, get_runtime
@@ -75,7 +83,8 @@ def register_check(app: typer.Typer) -> None:
             typer.Option(
                 "--only",
                 help=(
-                    "Show only these states (repeatable): OK, STALE, UNRECONCILED, BROKEN. "
+                    "Show only these states (repeatable): OK, STALE, UNRECONCILED, BROKEN, "
+                    "AMBIGUOUS. "
                     "Without it, human output lists problem edges only; pass --only OK to "
                     "list OK edges. Filters display only; the exit code and the summary "
                     "counts always reflect every edge."
@@ -106,10 +115,20 @@ def register_check(app: typer.Typer) -> None:
             write_annotations(
                 runtime,
                 (
-                    (
+                    Annotation(
                         lattice.nodes_by_id[status.source_id].path,
                         f"doc-lattice {status.state}",
-                        f"{status.source_id} -> {status.target_ref} is {status.state}",
+                        f"{status.source_id} -> {status.target_ref} is {status.state}"
+                        # The collision members are the only actionable part of an AMBIGUOUS
+                        # finding, and this is the surface a reviewer reads in the pull request.
+                        # The annotation attaches to the downstream file while the member lines
+                        # are in the upstream one, so that file has to be named here.
+                        + (
+                            f" in {collision_file(lattice, status)} "
+                            f"({format_collision(status.collision)})"
+                            if status.collision
+                            else ""
+                        ),
                     )
                     for status in displayed
                     if status.state != "OK"

@@ -1,11 +1,13 @@
 """Load and validate .doc-lattice.yml, with project-root containment of docs_roots."""
 
 import re
+from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator, model_validator
 
+from .constants import LATTICE_FORMAT_VERSION
 from .error_types import ConfigError
 from .path_utils import format_path_for_display, safe_resolve
 from .validation_render import format_validation_error
@@ -44,11 +46,25 @@ class Config(BaseModel):
 
     model_config = ConfigDict(strict=True, extra="forbid")
 
+    lattice_format: int | None = None
     docs_roots: list[str] = Field(default_factory=lambda: ["docs"])
     ignore_globs: list[str] = Field(default_factory=list)
     linear_team: str | None = None
     cache_key: str | None = None
     cache_trust_stat: bool = False
+
+    @field_validator("lattice_format")
+    @classmethod
+    def _validate_lattice_format(cls, value: int | None) -> int | None:
+        """Reject a lattice_format this engine does not read."""
+        if value is not None and value != LATTICE_FORMAT_VERSION:
+            msg = (
+                f"lattice_format {value} is not a format this engine reads; it reads "
+                f"lattice_format {LATTICE_FORMAT_VERSION}. Install the doc-lattice release that "
+                "matches the lattice, or change the key"
+            )
+            raise ValueError(msg)
+        return value
 
     @field_validator("cache_key")
     @classmethod
@@ -121,8 +137,57 @@ def load_config(config_path: Path | None, cwd: Path) -> ProjectConfig:
     except ValidationError as exc:
         raise ConfigError(_format_validation_error(exc, source)) from exc
 
+    # Required only when a config file was actually read: a zero-config run has no file to
+    # carry the key, not no skew to catch. Skew lives in each section's `seen` hash, so a
+    # zero-config tree reconciled under 6.x will see nested-section edges report STALE under
+    # 7.0, not this ConfigError. Follow the v7 migration (fix AMBIGUOUS headings, then
+    # `reconcile --all`), or add a config with the key to get this loud guard instead.
+    if source is not None and config.lattice_format is None:
+        # The remedy names all three migration steps in order. Naming only the re-bless would
+        # send an adopter with any duplicate heading straight into reconcile's ambiguity refusal,
+        # which writes nothing and fails the whole run.
+        msg = (
+            f"config {format_path_for_display(source)} does not declare "
+            f"'lattice_format: {LATTICE_FORMAT_VERSION}', which doc-lattice 7 requires. Add the "
+            "key, then run 'doc-lattice check' and fix every AMBIGUOUS edge, then run "
+            "'doc-lattice reconcile --all' to re-bless the lattice under the 7.0 content hash; "
+            "see the 7.0.0 migration in CHANGELOG.md"
+        )
+        raise ConfigError(msg)
+
     roots = _resolve_roots(config.docs_roots, project_root)
     return ProjectConfig(config=config, project_root=project_root, resolved_roots=roots)
+
+
+def declares_lattice_format(path: Path) -> bool | None:
+    """Report whether an existing config already carries the ``lattice_format`` key.
+
+    A narrow question asked by ``init``, which scaffolds rather than loads: it needs to tell an
+    adopter that the config already in place predates this engine, and it has no other reason to
+    read the file. Answering it through ``load_config`` instead would validate the whole config
+    and raise on every unrelated defect, turning a scaffold run into a config gate.
+
+    The key's presence is the whole test. A wrong value is a different diagnostic, and
+    ``load_config`` is the surface that owns it; reporting it from here as well would mean two
+    commands disagreeing about which one refuses a config.
+
+    Args:
+        path: The existing config file, which the caller has already established is there.
+
+    Returns:
+        True or False for a config this can read, and None when it cannot be read, cannot be
+        parsed, or does not hold a mapping at its top level. The caller stays silent on None
+        rather than reporting: an unreadable config is a real failure, but it is the failure
+        every loading command already reports with the context to act on, and ``init`` writes
+        nothing that depends on the answer.
+    """
+    try:
+        data = _read_yaml(path)
+    except ConfigError:
+        return None
+    if not isinstance(data, Mapping):
+        return None
+    return "lattice_format" in data
 
 
 def _format_validation_error(exc: ValidationError, source: Path | None) -> str:

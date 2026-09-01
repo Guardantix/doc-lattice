@@ -10,7 +10,7 @@ from pathlib import Path
 from pydantic import BaseModel, ConfigDict
 
 from ..constants import FrontmatterDisposition
-from ..model import FileSections, NodeMeta, ParsedDoc, ParsedMeta, SectionRecord
+from ..model import CollisionMember, FileSections, NodeMeta, ParsedDoc, ParsedMeta, SectionRecord
 
 
 class StatRecord(BaseModel):
@@ -22,14 +22,35 @@ class StatRecord(BaseModel):
     mtime_ns: int
 
 
+class CollisionMemberModel(BaseModel):
+    """The serialized form of one member of a slug-collision component.
+
+    ``line`` is a file line, envelope included, matching ``model.CollisionMember``.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    label: str
+    line: int
+
+
 class SectionRecordModel(BaseModel):
-    """The serialized form of one anchored section span."""
+    """The serialized form of one anchored section span, its ancestor context, and collisions.
+
+    ``collision`` and ``context`` are both defaulted rather than required, unlike
+    ``Entry.disposition``, because a section that is in no component genuinely has no members to
+    record and a top-level section genuinely has no ancestors, and neither empty default can be
+    read as a silent drop. Entries written before either field existed are discarded by the
+    ``CACHE_VERSION`` bump that lands with it, never reinterpreted.
+    """
 
     model_config = ConfigDict(extra="forbid")
 
     anchor: str
     start: int
     end: int
+    collision: list[CollisionMemberModel] | None = None
+    context: list[str] = []
 
 
 class NodePayload(BaseModel):
@@ -56,6 +77,11 @@ class Entry(BaseModel):
     ``reused_anchors`` is required for the same reason and records the same kind of fact: the
     parse noticed a frontmatter block defining one anchor name twice, and a warm run has to say
     so too or the diagnostic would exist only on the run that first read the file.
+
+    ``shadowed_envelope`` is the third such field, required on the same grounds: the parse
+    noticed that a file tracked under its ``---`` fence also carries a comment envelope in its
+    body. It cannot be folded into ``disposition``, which is ``"tracked"`` for exactly these
+    files, so it travels beside it.
     """
 
     model_config = ConfigDict(extra="forbid")
@@ -65,6 +91,7 @@ class Entry(BaseModel):
     node: NodePayload | None
     disposition: FrontmatterDisposition
     reused_anchors: bool
+    shadowed_envelope: bool
 
 
 class CacheFile(BaseModel):
@@ -105,7 +132,20 @@ def reconstruct_doc(entry: Entry, path: Path) -> ParsedDoc | None:
         return None
     sections = FileSections(
         total_lines=node.total_lines,
-        sections=tuple(SectionRecord(r.anchor, r.start, r.end) for r in node.sections),
+        sections=tuple(
+            SectionRecord(
+                anchor=r.anchor,
+                start=r.start,
+                end=r.end,
+                collision=(
+                    None
+                    if r.collision is None
+                    else tuple(CollisionMember(label=m.label, line=m.line) for m in r.collision)
+                ),
+                context=tuple(r.context),
+            )
+            for r in node.sections
+        ),
     )
     return ParsedDoc(path=path, meta=node.meta, body=node.body, sections=sections)
 
@@ -140,7 +180,17 @@ def make_entry(  # noqa: PLR0913
             body=body,
             total_lines=sections.total_lines,
             sections=[
-                SectionRecordModel(anchor=r.anchor, start=r.start, end=r.end)
+                SectionRecordModel(
+                    anchor=r.anchor,
+                    start=r.start,
+                    end=r.end,
+                    collision=(
+                        None
+                        if r.collision is None
+                        else [CollisionMemberModel(label=m.label, line=m.line) for m in r.collision]
+                    ),
+                    context=list(r.context),
+                )
                 for r in sections.sections
             ],
         )
@@ -150,4 +200,5 @@ def make_entry(  # noqa: PLR0913
         node=node,
         disposition=parsed.disposition,
         reused_anchors=parsed.reused_anchors,
+        shadowed_envelope=parsed.shadowed_envelope,
     )

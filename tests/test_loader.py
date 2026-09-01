@@ -10,6 +10,7 @@ import doc_lattice.loader as loader_module
 from doc_lattice.error_types import DuplicateIdError
 from doc_lattice.loader import _line_count, _record_ancestors, build_lattice, derive_file_sections
 from doc_lattice.model import (
+    CollisionMember,
     FileSections,
     NodeMeta,
     ParsedDoc,
@@ -387,3 +388,144 @@ def test_ancestors_stack_pass_matches_reference_fixed_cases(levels: list[int]) -
 @given(st.lists(st.integers(min_value=1, max_value=6), min_size=1, max_size=60))
 def test_ancestors_stack_pass_matches_reference_generated(levels: list[int]) -> None:
     _assert_matches_reference(levels)
+
+
+def test_derive_file_sections_records_collision_provenance():
+    body = "# Notes\n\n# Notes\n"
+
+    sections = derive_file_sections(body)
+
+    assert [record.anchor for record in sections.sections] == ["notes", "notes-1"]
+    for record in sections.sections:
+        assert record.collision == (
+            CollisionMember(label="Notes", line=1),
+            CollisionMember(label="Notes", line=3),
+        )
+
+
+def test_a_marker_set_id_is_never_ambiguous():
+    body = "# Notes {#first}\n\n# Notes\n\n# Notes\n"
+
+    sections = derive_file_sections(body)
+
+    by_anchor = {record.anchor: record for record in sections.sections}
+    assert by_anchor["first"].collision is None
+    assert by_anchor["notes-1"].collision is not None
+
+
+def test_a_marker_heading_inside_a_collision_component_is_still_exempt():
+    body = "# Notes {#first}\n\n# Notes first\n"
+
+    sections = derive_file_sections(body)
+
+    by_anchor = {record.anchor: record for record in sections.sections}
+    assert by_anchor["first"].collision is None
+    assert by_anchor["notes-first-1"].collision is not None
+
+
+def test_a_cross_inventory_collision_marks_the_addressable_member():
+    body = "Overview\n--------\n\ntext\n\n# Overview\n"
+
+    sections = derive_file_sections(body)
+
+    assert [record.anchor for record in sections.sections] == ["overview"]
+    assert sections.sections[0].collision == (
+        CollisionMember(label="Overview", line=1),
+        CollisionMember(label="Overview", line=6),
+    )
+
+
+def test_an_addressable_only_collision_is_traced_via_the_addressable_toc():
+    # The restricted scanner is not container-aware, so it addresses this second "Overview" even
+    # though it sits inside an HTML comment the full CommonMark parse renders as inert; the full
+    # inventory alone would see only the first heading and report no collision at all.
+    body = "# Overview\n\ntext\n\n<!--\n# Overview\n-->\n"
+
+    sections = derive_file_sections(body)
+
+    assert [record.anchor for record in sections.sections] == ["overview", "overview-1"]
+    for record in sections.sections:
+        assert record.collision == (
+            CollisionMember(label="Overview", line=1),
+            CollisionMember(label="Overview", line=6),
+        )
+
+
+def test_overlapping_components_from_both_inventories_merge_into_one():
+    # The setext "Alpha" and the ATX one on line 3 collide in the full inventory; the ATX one on
+    # line 3 and the commented one on line 5 collide in the addressable inventory. Line 3 is in
+    # both, so the two are one connected hazard and every member names all three lines.
+    body = "Alpha\n=====\n# Alpha\n<!--\n# Alpha\n-->\n"
+
+    sections = derive_file_sections(body)
+
+    expected = (
+        CollisionMember(label="Alpha", line=1),
+        CollisionMember(label="Alpha", line=3),
+        CollisionMember(label="Alpha", line=5),
+    )
+    assert [record.anchor for record in sections.sections] == ["alpha", "alpha-1"]
+    assert [record.collision for record in sections.sections] == [expected, expected]
+
+
+def test_collision_member_lines_are_shifted_by_first_line():
+    body = "# Notes\n\n# Notes\n"
+
+    sections = derive_file_sections(body, first_line=4)
+
+    # Spans stay body-relative; only the printed member lines move into file coordinates.
+    assert [(record.start, record.end) for record in sections.sections] == [(1, 2), (3, 3)]
+    for record in sections.sections:
+        assert record.collision == (
+            CollisionMember(label="Notes", line=4),
+            CollisionMember(label="Notes", line=6),
+        )
+
+
+def test_build_lattice_exposes_collisions_by_target_id():
+    docs = [ParsedDoc(path=Path("docs/a.md"), meta=NodeMeta(id="a"), body="# Notes\n\n# Notes\n")]
+
+    lattice = build_lattice(docs)
+
+    assert lattice.collisions[TargetId("a", "notes")][0].label == "Notes"
+    assert TargetId("a") not in lattice.collisions
+
+
+def test_the_two_ancestor_maps_diverge_under_a_non_addressable_parent():
+    # '## A' is not terminated by the setext 'Product B', so its span still covers '### Child'
+    # and span containment names it Child's ancestor. Level nesting names Product B, which is
+    # the parent a reader sees. Both are right for their own consumer: impact walks spans, the
+    # drift hash walks the reader's outline. Neither map may be quietly changed to match.
+    body = "# Top\n\n## A\n\nProduct B\n---------\n\n### Child\nbody\n"
+    lattice = build_lattice([ParsedDoc(path=Path("docs/d.md"), meta=NodeMeta(id="d"), body=body)])
+    child = TargetId("d", "child")
+
+    assert lattice.ancestors[child] == (TargetId("d", "top"), TargetId("d", "a"))
+    assert lattice.ancestor_context[child] == ("# Top", "## Product B")
+
+
+def test_a_top_level_section_records_no_ancestor_context():
+    lattice = build_lattice(
+        [ParsedDoc(path=Path("docs/d.md"), meta=NodeMeta(id="d"), body="# Only\nbody\n")]
+    )
+
+    assert lattice.ancestor_context == {}
+
+
+def test_derive_file_sections_runs_one_full_parse_for_both_consumers(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    # Collision tracing and the ancestor chains share the hoisted parse, so the benchmarked
+    # derivation gains no second walk of the document.
+    calls = 0
+    original = loader_module.full_heading_inventory
+
+    def counted(body: str):
+        nonlocal calls
+        calls += 1
+        return original(body)
+
+    monkeypatch.setattr(loader_module, "full_heading_inventory", counted)
+    derive_file_sections("# Notes\n\n## Sub\n\n# Notes\n")
+
+    assert calls == 1

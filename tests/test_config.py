@@ -3,9 +3,11 @@
 from pathlib import Path
 
 import pytest
+from pydantic import BaseModel, ConfigDict, Field
+from pydantic import ValidationError as PydanticValidationError
 
 import doc_lattice.config as config_module
-from doc_lattice.config import Config, load_config
+from doc_lattice.config import Config, declares_lattice_format, load_config
 from doc_lattice.error_types import ConfigError
 from doc_lattice.path_utils import format_path_for_display
 from doc_lattice.yaml_boundary import YAML_LOAD_ERRORS
@@ -22,7 +24,7 @@ def test_absent_config_uses_defaults(tmp_path: Path):
 def test_loads_and_resolves_roots(tmp_path: Path):
     (tmp_path / "design").mkdir()
     (tmp_path / ".doc-lattice.yml").write_text(
-        "docs_roots: [design]\nignore_globs: ['**/x/**']\n", encoding="utf-8"
+        "lattice_format: 2\ndocs_roots: [design]\nignore_globs: ['**/x/**']\n", encoding="utf-8"
     )
     project = load_config(None, tmp_path)
     assert project.config.ignore_globs == ["**/x/**"]
@@ -52,16 +54,21 @@ def test_load_config_reuses_safe_yaml_loader(monkeypatch, tmp_path: Path):
     projects = [tmp_path / "first", tmp_path / "second"]
     for project in projects:
         project.mkdir()
-        (project / ".doc-lattice.yml").write_text("docs_roots: [docs]\n", encoding="utf-8")
+        (project / ".doc-lattice.yml").write_text(
+            "lattice_format: 2\ndocs_roots: [docs]\n", encoding="utf-8"
+        )
         load_config(None, project)
 
-    assert calls == ["docs_roots: [docs]\n", "docs_roots: [docs]\n"]
+    assert calls == [
+        "lattice_format: 2\ndocs_roots: [docs]\n",
+        "lattice_format: 2\ndocs_roots: [docs]\n",
+    ]
 
 
 def test_explicit_config_path_loads_and_resolves_roots(tmp_path: Path):
     (tmp_path / "design").mkdir()
     cfg = tmp_path / "custom.yml"
-    cfg.write_text("docs_roots: [design]\n", encoding="utf-8")
+    cfg.write_text("lattice_format: 2\ndocs_roots: [design]\n", encoding="utf-8")
     project = load_config(cfg, tmp_path)
     assert project.project_root == tmp_path.resolve()
     assert project.resolved_roots == (tmp_path.resolve() / "design",)
@@ -73,23 +80,28 @@ def test_explicit_config_in_subdir_anchors_root_at_its_parent(tmp_path: Path):
     sub = tmp_path / "sub"
     (sub / "design").mkdir(parents=True)
     cfg = sub / "custom.yml"
-    cfg.write_text("docs_roots: [design]\n", encoding="utf-8")
+    cfg.write_text("lattice_format: 2\ndocs_roots: [design]\n", encoding="utf-8")
     project = load_config(cfg, tmp_path)
     assert project.project_root == sub.resolve()
     assert project.resolved_roots == (sub.resolve() / "design",)
 
 
 def test_empty_config_file_falls_back_to_defaults(tmp_path: Path):
-    # A present-but-empty (comment-only) file yields None from the parser; the None -> {}
-    # coalescing means Config falls back to defaults instead of raising.
-    (tmp_path / ".doc-lattice.yml").write_text("# only a comment\n", encoding="utf-8")
+    # A present file carrying only the required key and a comment yields {"lattice_format": 2}
+    # from the parser; every other field still falls back to Config's defaults instead of
+    # raising, which is the coalescing behavior this test pins.
+    (tmp_path / ".doc-lattice.yml").write_text(
+        "# only a comment\nlattice_format: 2\n", encoding="utf-8"
+    )
     project = load_config(None, tmp_path)
     assert project.config.docs_roots == ["docs"]
     assert project.resolved_roots == (tmp_path.resolve() / "docs",)
 
 
 def test_multiple_roots_resolved_in_order(tmp_path: Path):
-    (tmp_path / ".doc-lattice.yml").write_text("docs_roots: [c, a, b]\n", encoding="utf-8")
+    (tmp_path / ".doc-lattice.yml").write_text(
+        "lattice_format: 2\ndocs_roots: [c, a, b]\n", encoding="utf-8"
+    )
     project = load_config(None, tmp_path)
     assert project.resolved_roots == (
         tmp_path.resolve() / "c",
@@ -99,7 +111,9 @@ def test_multiple_roots_resolved_in_order(tmp_path: Path):
 
 
 def test_empty_docs_roots_yields_no_resolved_roots(tmp_path: Path):
-    (tmp_path / ".doc-lattice.yml").write_text("docs_roots: []\n", encoding="utf-8")
+    (tmp_path / ".doc-lattice.yml").write_text(
+        "lattice_format: 2\ndocs_roots: []\n", encoding="utf-8"
+    )
     project = load_config(None, tmp_path)
     assert project.resolved_roots == ()
 
@@ -121,9 +135,10 @@ def test_binding_layers_is_rejected_with_the_migration_sentence_and_accepted_key
     message = str(exc.value)
     assert "binding_layers has been unsupported since 2.0" in message
     assert "there is no replacement" in message
-    assert "accepted keys: cache_key, cache_trust_stat, docs_roots, ignore_globs, linear_team" in (
-        message
-    )
+    assert (
+        "accepted keys: cache_key, cache_trust_stat, docs_roots, ignore_globs, lattice_format, "
+        "linear_team"
+    ) in message
 
 
 def test_config_error_names_the_file_and_omits_pydantic_url_and_input(tmp_path: Path):
@@ -217,14 +232,18 @@ def test_model_level_validator_error_renders_a_config_marker_not_a_field(tmp_pat
 
 
 def test_root_escaping_project_is_rejected(tmp_path: Path):
-    (tmp_path / ".doc-lattice.yml").write_text("docs_roots: ['../outside']\n", encoding="utf-8")
+    (tmp_path / ".doc-lattice.yml").write_text(
+        "lattice_format: 2\ndocs_roots: ['../outside']\n", encoding="utf-8"
+    )
     with pytest.raises(ConfigError) as exc:
         load_config(None, tmp_path)
     assert "resolves outside the project root" in str(exc.value)
 
 
 def test_absolute_outside_root_is_rejected(tmp_path: Path):
-    (tmp_path / ".doc-lattice.yml").write_text("docs_roots: ['/etc']\n", encoding="utf-8")
+    (tmp_path / ".doc-lattice.yml").write_text(
+        "lattice_format: 2\ndocs_roots: ['/etc']\n", encoding="utf-8"
+    )
     with pytest.raises(ConfigError) as exc:
         load_config(None, tmp_path)
     assert "resolves outside the project root" in str(exc.value)
@@ -236,7 +255,7 @@ def test_explicit_config_subdir_rejects_root_escaping_its_parent(tmp_path: Path)
     sub = tmp_path / "sub"
     sub.mkdir()
     cfg = sub / "custom.yml"
-    cfg.write_text("docs_roots: ['../design']\n", encoding="utf-8")
+    cfg.write_text("lattice_format: 2\ndocs_roots: ['../design']\n", encoding="utf-8")
     with pytest.raises(ConfigError) as exc:
         load_config(cfg, tmp_path)
     assert "resolves outside the project root" in str(exc.value)
@@ -249,7 +268,9 @@ def test_symlinked_root_escaping_project_is_rejected(tmp_path: Path):
     project = tmp_path / "proj"
     project.mkdir()
     (project / "design").symlink_to(outside, target_is_directory=True)
-    (project / ".doc-lattice.yml").write_text("docs_roots: [design]\n", encoding="utf-8")
+    (project / ".doc-lattice.yml").write_text(
+        "lattice_format: 2\ndocs_roots: [design]\n", encoding="utf-8"
+    )
     with pytest.raises(ConfigError) as exc:
         load_config(None, project)
     assert exc.value.code == "CONFIG_ERROR"
@@ -259,7 +280,9 @@ def test_symlinked_root_escaping_project_is_rejected(tmp_path: Path):
 def test_existing_markdown_file_root_is_accepted(tmp_path: Path):
     # A docs_roots entry may name a single .md file, not only a directory.
     (tmp_path / "AGENTS.md").write_text("# agents\n", encoding="utf-8")
-    (tmp_path / ".doc-lattice.yml").write_text("docs_roots: [AGENTS.md]\n", encoding="utf-8")
+    (tmp_path / ".doc-lattice.yml").write_text(
+        "lattice_format: 2\ndocs_roots: [AGENTS.md]\n", encoding="utf-8"
+    )
     project = load_config(None, tmp_path)
     assert project.resolved_roots == (tmp_path.resolve() / "AGENTS.md",)
 
@@ -267,7 +290,9 @@ def test_existing_markdown_file_root_is_accepted(tmp_path: Path):
 def test_existing_non_markdown_file_root_is_rejected(tmp_path: Path):
     # Discovery cannot walk a non-.md file, so accepting it here would silently drop the entry.
     (tmp_path / "notes.txt").write_text("x", encoding="utf-8")
-    (tmp_path / ".doc-lattice.yml").write_text("docs_roots: [notes.txt]\n", encoding="utf-8")
+    (tmp_path / ".doc-lattice.yml").write_text(
+        "lattice_format: 2\ndocs_roots: [notes.txt]\n", encoding="utf-8"
+    )
     with pytest.raises(ConfigError) as exc:
         load_config(None, tmp_path)
     assert exc.value.code == "CONFIG_ERROR"
@@ -277,7 +302,9 @@ def test_existing_non_markdown_file_root_is_rejected(tmp_path: Path):
 
 def test_missing_root_entry_is_tolerated(tmp_path: Path):
     # Classification only rejects entries that exist; a missing root stays discovery's problem.
-    (tmp_path / ".doc-lattice.yml").write_text("docs_roots: [gone, gone.md]\n", encoding="utf-8")
+    (tmp_path / ".doc-lattice.yml").write_text(
+        "lattice_format: 2\ndocs_roots: [gone, gone.md]\n", encoding="utf-8"
+    )
     project = load_config(None, tmp_path)
     assert project.resolved_roots == (
         tmp_path.resolve() / "gone",
@@ -294,7 +321,9 @@ def test_symlinked_file_root_escaping_project_is_rejected(tmp_path: Path):
     project = tmp_path / "proj"
     project.mkdir()
     (project / "linked.md").symlink_to(secret)
-    (project / ".doc-lattice.yml").write_text("docs_roots: [linked.md]\n", encoding="utf-8")
+    (project / ".doc-lattice.yml").write_text(
+        "lattice_format: 2\ndocs_roots: [linked.md]\n", encoding="utf-8"
+    )
     with pytest.raises(ConfigError) as exc:
         load_config(None, project)
     assert exc.value.code == "CONFIG_ERROR"
@@ -438,7 +467,7 @@ def test_safe_yaml_loader_recovers_after_malformed_config(tmp_path: Path):
     with pytest.raises(ConfigError):
         load_config(None, tmp_path)
 
-    config_path.write_text("docs_roots: [docs]\n", encoding="utf-8")
+    config_path.write_text("lattice_format: 2\ndocs_roots: [docs]\n", encoding="utf-8")
 
     project = load_config(None, tmp_path)
 
@@ -447,9 +476,11 @@ def test_safe_yaml_loader_recovers_after_malformed_config(tmp_path: Path):
 
 def test_safe_yaml_loader_resets_version_between_config_files(tmp_path: Path):
     first_config = tmp_path / "first.yml"
-    first_config.write_text("%YAML 1.1\n---\ndocs_roots: [docs]\n", encoding="utf-8")
+    first_config.write_text(
+        "%YAML 1.1\n---\nlattice_format: 2\ndocs_roots: [docs]\n", encoding="utf-8"
+    )
     second_config = tmp_path / "second.yml"
-    second_config.write_text("docs_roots: [on]\n", encoding="utf-8")
+    second_config.write_text("lattice_format: 2\ndocs_roots: [on]\n", encoding="utf-8")
 
     first_project = load_config(first_config, tmp_path)
     second_project = load_config(second_config, tmp_path)
@@ -460,7 +491,9 @@ def test_safe_yaml_loader_resets_version_between_config_files(tmp_path: Path):
 
 @pytest.mark.parametrize("key", ["docs", "my-project.docs_v2", "A", "x" * 64])
 def test_cache_key_accepts_safe_segments(tmp_path: Path, key: str):
-    (tmp_path / ".doc-lattice.yml").write_text(f"cache_key: {key}\n", encoding="utf-8")
+    (tmp_path / ".doc-lattice.yml").write_text(
+        f"lattice_format: 2\ncache_key: {key}\n", encoding="utf-8"
+    )
     project = load_config(None, tmp_path)
     assert project.config.cache_key == key
 
@@ -489,8 +522,94 @@ def test_trust_stat_without_cache_key_is_config_error(tmp_path: Path):
 
 def test_trust_stat_with_cache_key_is_accepted(tmp_path: Path):
     (tmp_path / ".doc-lattice.yml").write_text(
-        "cache_key: docs\ncache_trust_stat: true\n", encoding="utf-8"
+        "lattice_format: 2\ncache_key: docs\ncache_trust_stat: true\n", encoding="utf-8"
     )
     project = load_config(None, tmp_path)
     assert project.config.cache_key == "docs"
     assert project.config.cache_trust_stat is True
+
+
+def test_a_config_without_lattice_format_is_refused_with_a_migration_pointer(tmp_path: Path):
+    config = tmp_path / ".doc-lattice.yml"
+    config.write_text("docs_roots:\n  - docs\n", encoding="utf-8")
+
+    with pytest.raises(ConfigError) as excinfo:
+        load_config(config, tmp_path)
+
+    message = str(excinfo.value)
+    assert "lattice_format: 2" in message
+    assert "CHANGELOG.md" in message
+
+
+def test_a_config_declaring_the_key_loads(tmp_path: Path):
+    config = tmp_path / ".doc-lattice.yml"
+    config.write_text("lattice_format: 2\ndocs_roots:\n  - docs\n", encoding="utf-8")
+
+    assert load_config(config, tmp_path).config.lattice_format == 2
+
+
+def test_a_wrong_lattice_format_names_the_engine_it_needs(tmp_path: Path):
+    config = tmp_path / ".doc-lattice.yml"
+    config.write_text("lattice_format: 3\ndocs_roots:\n  - docs\n", encoding="utf-8")
+
+    with pytest.raises(ConfigError) as excinfo:
+        load_config(config, tmp_path)
+
+    assert "lattice_format 3" in str(excinfo.value)
+
+
+def test_zero_config_stays_supported(tmp_path: Path):
+    assert load_config(None, tmp_path).config.lattice_format is None
+
+
+def test_a_pre_v7_config_model_rejects_the_key():
+    # Reconstructed in-test rather than imported, because the point is what an engine that
+    # predates the field does, and this engine has it. `extra="forbid"` is what makes every
+    # pre-v7 release hard-error on a converted repository before loading or reconciling.
+    class PreV7Config(BaseModel):
+        model_config = ConfigDict(strict=True, extra="forbid")
+
+        docs_roots: list[str] = Field(default_factory=lambda: ["docs"])
+        ignore_globs: list[str] = Field(default_factory=list)
+        linear_team: str | None = None
+        cache_key: str | None = None
+        cache_trust_stat: bool = False
+
+    with pytest.raises(PydanticValidationError):
+        PreV7Config.model_validate({"docs_roots": ["docs"], "lattice_format": 2})
+
+
+@pytest.mark.parametrize(
+    ("label", "contents", "expected"),
+    [
+        ("declared", "lattice_format: 2\ndocs_roots:\n  - docs\n", True),
+        ("wrong-value-still-declared", "lattice_format: 1\n", True),
+        ("omitted", "docs_roots:\n  - docs\n", False),
+        ("empty", "", False),
+        ("unparseable", "docs_roots: [unclosed\n", None),
+        ("not-a-mapping", "- docs\n", None),
+        ("scalar", "SENTINEL\n", None),
+    ],
+)
+def test_declares_lattice_format_answers_only_what_it_can(
+    tmp_path: Path, label: str, contents: str, expected: bool | None
+):
+    path = tmp_path / ".doc-lattice.yml"
+    path.write_text(contents, encoding="utf-8")
+
+    assert declares_lattice_format(path) is expected, label
+
+
+def test_declares_lattice_format_reports_a_wrong_value_as_declared(tmp_path: Path):
+    # Presence is the whole test. load_config owns the wrong-value diagnostic, and answering it
+    # here as well would mean two commands disagreeing about which one refuses a config.
+    path = tmp_path / ".doc-lattice.yml"
+    path.write_text("lattice_format: 99\n", encoding="utf-8")
+
+    assert declares_lattice_format(path) is True
+    with pytest.raises(ConfigError, match="not a format this engine reads"):
+        load_config(path, tmp_path)
+
+
+def test_declares_lattice_format_is_none_for_a_missing_file(tmp_path: Path):
+    assert declares_lattice_format(tmp_path / "absent.yml") is None

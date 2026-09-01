@@ -34,10 +34,10 @@ from ruamel.yaml.tokens import (
     ValueToken,
 )
 
-from .error_types import BrokenRefError, UnreadableDocError, ValidationError
-from .frontmatter_parser import split_frontmatter_parts
+from .error_types import BrokenRefError, FrontmatterError, UnreadableDocError, ValidationError
+from .frontmatter_parser import FrontmatterParts, refuse_double_hyphen, split_frontmatter_parts
 from .hashing import normalize_newlines
-from .model import Lattice, TargetId, parse_ref
+from .model import Lattice, TargetId, format_collision, parse_ref
 from .path_utils import format_path_for_display
 from .resolve import cached_target_hash
 from .yaml_boundary import YAML_LOAD_ERRORS
@@ -1177,6 +1177,34 @@ def _verify_reconciled_meta(new_meta: str, expected: object, source: Path) -> No
     raise UnreadableDocError(msg, source=source)
 
 
+def _refuse_rewritten_double_hyphen(
+    new_meta: str, parts: FrontmatterParts, current_file_text: str, source: Path
+) -> None:
+    """Re-run the ``--`` refusal against the rewritten comment envelope before it is staged.
+
+    Not argued by construction from "reconcile only writes hex ``seen`` values": the rewriter
+    can re-spell content beyond the value it targets, and adversarial review produced a YAML
+    alias-relocation candidate where an escaped ``"--"`` could be re-emitted literally. The
+    commit transaction never rereads what it stages, so this is the last point at which such a
+    rewrite can be refused instead of published.
+
+    Args:
+        new_meta: The spliced envelope body about to be reattached.
+        parts: The split result the rewrite was measured against.
+        current_file_text: The fresh read, used to locate the body's first file line.
+        source: The downstream file, for the error message.
+
+    Raises:
+        UnreadableDocError: If the rewritten body carries ``--``.
+    """
+    first_body_line = current_file_text[: parts.meta_start].count("\n") + 1
+    try:
+        refuse_double_hyphen(new_meta, source, first_body_line=first_body_line)
+    except FrontmatterError as exc:
+        msg = f"{exc}, so nothing was rewritten"
+        raise UnreadableDocError(msg, source=source) from exc
+
+
 @dataclass(frozen=True, slots=True)
 class _EntryEdit:
     """The source edits one entry's update needs, and the anchored value it displaces.
@@ -1498,8 +1526,9 @@ def reconcile(
         caller applies these via ``apply_reconcile`` and an atomic write (the CLI does).
 
     Raises:
-        ValidationError: If ``downstream_id`` is not in the lattice, or if ``ref`` is
-            given but matches no edge on the node (both only when not ``reconcile_all``).
+        ValidationError: If ``downstream_id`` is not in the lattice, if ``ref`` is given but
+            matches no edge on the node (both only when not ``reconcile_all``), or if an edge
+            resolves to a target id that sits in a slug-collision component.
         BrokenRefError: If ``ref`` targets an edge that has no resolvable target.
     """
     if not reconcile_all and downstream_id not in lattice.nodes_by_id:
@@ -1531,6 +1560,18 @@ def reconcile(
                         " fix the ref first"
                     )
                 continue
+            collision = lattice.collisions.get(edge.target_id)
+            if collision is not None:
+                # Refusing keeps the tool from blessing a dependency the declaration cannot
+                # unambiguously name. Writing `seen` here would lock a hash to an id document
+                # order can hand to a different heading, which resolves without breaking.
+                raise ValidationError(
+                    f"cannot reconcile {node_id!r} -> {edge.target_ref!r}: the target id is "
+                    f"{format_collision(collision)}; disambiguate by rewording one of the "
+                    "colliding headings, or give the target an explicit '{#anchor}' marker; "
+                    "no seen values were written, and this refusal names one edge at a time, so "
+                    "run 'doc-lattice check' to list every ambiguous edge before re-running"
+                )
             new_seen = cached_target_hash(lattice, edge.target_id, cache)
             if edge.seen is not None and new_seen == edge.seen:
                 continue
@@ -1569,8 +1610,9 @@ def apply_reconcile(
         written, and the body after the closing one.
 
     Raises:
-        UnreadableDocError: If the fresh frontmatter cannot be parsed or is malformed, or
-            if the planned source edits would not reproduce the intended frontmatter.
+        UnreadableDocError: If the fresh frontmatter cannot be parsed or is malformed, if the
+            planned source edits would not reproduce the intended frontmatter, or if a comment
+            envelope rewrite would introduce a ``--`` the rewritten body did not already carry.
     """
     parts = split_frontmatter_parts(current_file_text, source)
     if parts is None:
@@ -1609,6 +1651,8 @@ def apply_reconcile(
     _append_seen_anchor_relocations(context.anchors, list(plan.anchored_seen), edits)
     new_meta = _apply_source_edits(raw_meta, edits)
     _verify_reconciled_meta(new_meta, _expected_frontmatter(data, plan.entry_updates), source)
+    if parts.kind == "comment":
+        _refuse_rewritten_double_hyphen(new_meta, parts, current_file_text, source)
     rewritten = (
         f"{parts.prefix}{parts.open_fence}\n{new_meta}"
         f"{parts.close_fence}{parts.close_fence_newline}{parts.body}"

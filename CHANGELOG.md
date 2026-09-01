@@ -6,6 +6,80 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [7.0.0] - 2026-08-31
+
+### Migration
+
+`.doc-lattice.yml` must now declare `lattice_format: 2`. A config file that omits the key is
+refused with a pointer to this section. A zero-config run (no `.doc-lattice.yml` anywhere) gets
+no such refusal, since there is no file to declare the key in, but a tree reconciled under 6.x
+still hits step 3 below: nested-section edges report STALE, not a `lattice_format` error. The
+same steps 2 and 3 apply, or create `.doc-lattice.yml` with `lattice_format: 2` for the explicit
+guard. Three steps:
+
+1. Add `lattice_format: 2` to `.doc-lattice.yml`, as the first key. doc-lattice 7 refuses to run
+   without it, and every earlier release refuses to run with it, so the two never operate on the
+   same tree by accident. A zero-config project has nothing to add.
+2. An edge whose target id sits in a slug-collision component now fails `AMBIGUOUS`, `check`
+   exits 1 on it, and `reconcile` refuses to write its `seen`. Fix each one first, by rewording a
+   colliding heading or giving the target an explicit `{#anchor}` marker, before running the
+   re-bless in step 3: the refusal is run-scoped, so `reconcile --all` writes no `seen` values
+   at all while any edge in the run is still ambiguous, not just the ambiguous one.
+3. The section content hash now includes the target's ancestor heading chain, so every `seen`
+   value on a section that sits under a parent heading mismatches once. Run
+   `doc-lattice reconcile --all` to re-bless the lattice. The chain covers every heading form
+   GitHub assigns an id to, so a section under a setext, indented, or nested parent is included
+   even though such a parent is not itself addressable. Whole-file refs and sections with no
+   enclosing heading are unaffected.
+
+To make a tracked file's metadata invisible on GitHub, replace its opening `---` with
+`<!-- doc-lattice`, replace its closing `---` with `-->`, and rerun `check`. The YAML between
+them is unchanged. Replace both delimiters in the same edit: a file that keeps its `---` fence
+and gains a comment envelope below it stays tracked under the *fence's* metadata, and the
+envelope you added is read as body text. That file is reported, with a
+`shadowed doc-lattice envelope` warning naming it, so a half-finished conversion is visible
+rather than silent; the exit status is unchanged. A file whose id or any other value contains `--` keeps
+the fence spelling or renames the value.
+
+### Added
+
+- A second spelling of the frontmatter block: the identical YAML wrapped in
+  `<!-- doc-lattice` / `-->` instead of `---` fences, which GitHub renders as nothing, so a
+  tracked README keeps a clean landing page. Both spellings are accepted unconditionally and
+  forever, with no config to select or forbid either one, and `reconcile` preserves whichever
+  spelling a file already uses. The comment spelling fails closed: a body that is not a mapping
+  carrying `id` is an error rather than untracked prose, a near-miss opener on line 1 is an
+  error, a byte-order mark before the opener is an error, and the body may not contain `--`.
+- `AMBIGUOUS`, a fifth `check` drift state, for an edge whose resolved target id sits in a
+  slug-collision component. `check` exits 1 on it and names the colliding headings and their
+  lines; `lint`, `impact`, `graph`, and `linear` report the same finding in both human and JSON
+  output; `reconcile` refuses to write `seen` for such an edge. Only `check` gates on it, so
+  `lint --format github` annotates an ambiguous edge as a `::warning` and still exits 0, while
+  `check --format github` annotates it as an `::error` and exits 1.
+- `graph --format json` gains an `ambiguous_targets` list and an `ambiguous` flag on each edge;
+  `check`, `lint`, `impact`, and `linear` JSON gain an `ambiguous` block.
+- A warning for a file that carries the `<!-- doc-lattice` opener somewhere other than line 1 and
+  outside a code block, which would otherwise leave the file silently out of the lattice. A file
+  already tracked by a `---` fence gets its own `shadowed doc-lattice envelope` warning instead,
+  since it stays a node and it is the envelope that was ignored. Each opens with its own word, so
+  `PYTHONWARNINGS=ignore:misplaced` and `PYTHONWARNINGS=ignore:shadowed` target one apiece.
+- A warning from `init` when the config it left untouched does not declare `lattice_format`, so a
+  rerun against a pre-7.0 config says why every other command is exiting 2. `init` reports it and
+  does not edit a config it did not write.
+
+### Changed
+
+- A `section` ref now hashes its ancestor heading chain followed by the section text, so a
+  section that moves under a different parent heading, or whose ancestor is reworded, goes STALE
+  even when its own text is untouched. `file` refs are unaffected. The chain is derived by
+  heading level over every form GitHub assigns an id to, so setext, indented, and nested parents
+  supply context alongside column-zero ATX ones, and each is rendered in one normalized ATX
+  spelling so rewriting a parent between forms at the same level does not restale its
+  descendants.
+- `.doc-lattice.yml` gains a required `lattice_format` key, which `doc-lattice init` now writes as
+  the first key of every generated config.
+- The load cache version is 7; caches written by earlier releases are discarded rather than read.
+
 ## [6.0.0] - 2026-08-25
 
 ### Migration

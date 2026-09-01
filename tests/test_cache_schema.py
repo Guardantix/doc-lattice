@@ -48,6 +48,7 @@ def _sample_cache_file() -> CacheFile:
                 ),
                 disposition="tracked",
                 reused_anchors=False,
+                shadowed_envelope=False,
             ),
             "docs/plain.md": Entry(
                 file_sha256="b" * 64,
@@ -55,6 +56,7 @@ def _sample_cache_file() -> CacheFile:
                 node=None,
                 disposition="untracked",
                 reused_anchors=False,
+                shadowed_envelope=False,
             ),
             "docs/id-less.md": Entry(
                 file_sha256="c" * 64,
@@ -62,6 +64,7 @@ def _sample_cache_file() -> CacheFile:
                 node=None,
                 disposition="id-less",
                 reused_anchors=False,
+                shadowed_envelope=False,
             ),
         },
     )
@@ -140,7 +143,22 @@ def test_entry_requires_every_replayed_diagnostic_rather_than_defaulting_one() -
         )
 
     missing = {error["loc"] for error in exc.value.errors() if error["type"] == "missing"}
-    assert missing == {("disposition",), ("reused_anchors",)}
+    assert missing == {("disposition",), ("reused_anchors",), ("shadowed_envelope",)}
+
+
+def test_entry_round_trips_a_shadowed_envelope_flag() -> None:
+    # The cached half of the shadowed-envelope diagnostic. Without it a warm run would go quiet
+    # about a file whose fence is silently outranking the envelope below it.
+    entry = Entry(
+        file_sha256="e" * 64,
+        stats={ROOT: StatRecord(size=9, mtime_ns=2)},
+        node=None,
+        disposition="untracked",
+        reused_anchors=False,
+        shadowed_envelope=True,
+    )
+
+    assert Entry.model_validate_json(entry.model_dump_json()).shadowed_envelope is True
 
 
 def test_entry_round_trips_a_reused_anchor_flag() -> None:
@@ -152,6 +170,7 @@ def test_entry_round_trips_a_reused_anchor_flag() -> None:
         node=None,
         disposition="untracked",
         reused_anchors=True,
+        shadowed_envelope=False,
     )
 
     assert Entry.model_validate_json(entry.model_dump_json()).reused_anchors is True
@@ -171,6 +190,7 @@ def test_reconstruct_doc_rebuilds_parsed_doc_at_supplied_path() -> None:
         ),
         disposition="tracked",
         reused_anchors=False,
+        shadowed_envelope=False,
     )
 
     assert reconstruct_doc(entry, path) == ParsedDoc(
@@ -191,6 +211,7 @@ def test_reconstruct_doc_non_node_returns_none() -> None:
         node=None,
         disposition="untracked",
         reused_anchors=False,
+        shadowed_envelope=False,
     )
     assert reconstruct_doc(entry, Path("docs/plain.md")) is None
 
@@ -231,3 +252,49 @@ def test_file_sections_survive_cache_codec_round_trip(body: str) -> None:
     assert reconstructed is not None
     assert reconstructed.sections == original
     assert reconstructed.body == body
+
+
+def test_collision_provenance_round_trips_through_the_cache():
+    sections = derive_file_sections("# Notes\n\n# Notes\n")
+    entry = make_entry(
+        b"# Notes\n\n# Notes\n",
+        ParsedMeta(meta=NodeMeta.model_validate({"id": "a"}), disposition="tracked"),
+        "# Notes\n\n# Notes\n",
+        sections,
+        _fake_stat(),  # ty: ignore[invalid-argument-type]
+        ROOT,
+    )
+
+    revived = Entry.model_validate_json(entry.model_dump_json())
+    doc = reconstruct_doc(revived, Path("docs/a.md"))
+
+    assert doc is not None
+    assert doc.sections is not None
+    assert doc.sections.sections == sections.sections
+
+
+def test_ancestor_context_round_trips_through_the_cache():
+    # A setext parent: the chain cannot be re-derived from the cached spans alone, so it has to
+    # survive serialization for a cache hit to match the uncached result.
+    body = "Product A\n---------\n\n### Setup\nrun it\n"
+    sections = derive_file_sections(body)
+    entry = make_entry(
+        body.encode(),
+        ParsedMeta(meta=NodeMeta.model_validate({"id": "a"}), disposition="tracked"),
+        body,
+        sections,
+        _fake_stat(),  # ty: ignore[invalid-argument-type]
+        ROOT,
+    )
+
+    revived = Entry.model_validate_json(entry.model_dump_json())
+    doc = reconstruct_doc(revived, Path("docs/a.md"))
+
+    assert doc is not None
+    assert doc.sections is not None
+    assert [record.context for record in doc.sections.sections] == [("## Product A",)]
+    assert doc.sections.sections == sections.sections
+
+
+def test_the_cache_version_is_seven():
+    assert CACHE_VERSION == 7

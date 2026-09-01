@@ -22,23 +22,31 @@ _SEVERITY_RANK: dict[Severity, int] = {"DANGER": 0, "BLOCKED": 1, "WARNING": 2, 
 
 
 def build_audit_trigger(lattice: Lattice, target: str | None) -> dict[str, tuple[str, ...]]:
-    """Map each currently-STALE node to its stale upstream refs.
+    """Map each node with a drifted or ambiguous upstream ref to those refs.
+
+    AMBIGUOUS is a trigger state alongside STALE because ``check_lattice`` classifies an edge
+    into exactly one state: an edge whose target sits in a slug-collision component is reported
+    AMBIGUOUS *instead of* STALE, so gating on STALE alone would drop a genuinely drifted edge
+    out of the audit the moment a duplicate heading appeared upstream, turning
+    ``linear --exit-code`` green on drift it reported before. An ambiguous edge is at least as
+    serious: its ``seen`` is locked to an id document order can hand to a different heading, and
+    ``reconcile`` refuses to re-bless it.
 
     Args:
         lattice: The built lattice.
-        target: An optional id; when given, the trigger is narrowed to STALE nodes that are
+        target: An optional id; when given, the trigger is narrowed to triggering nodes that are
             ``target`` itself or fall in its impact set, so scoping the audit to a node still
             grades that node's own shipped tickets, not only its dependents'.
 
     Returns:
-        A map of downstream node id to the tuple of its STALE ``target_ref`` values.
+        A map of downstream node id to the tuple of its STALE or AMBIGUOUS ``target_ref`` values.
 
     Raises:
         ValidationError: If ``target`` is given but resolves to no id.
     """
     grouped: dict[str, list[str]] = {}
     for status in check_lattice(lattice):
-        if status.state == "STALE":
+        if status.state in ("STALE", "AMBIGUOUS"):
             grouped.setdefault(status.source_id, []).append(status.target_ref)
     trigger = {node_id: tuple(refs) for node_id, refs in grouped.items()}
     if target is not None:

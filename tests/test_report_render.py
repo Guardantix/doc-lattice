@@ -10,7 +10,7 @@ from rich.console import Console
 from doc_lattice.check import EdgeStatus, summarize_statuses
 from doc_lattice.constants import EDGE_STATES, EdgeState
 from doc_lattice.lint import LadderViolation, LintResult, SkippedEdge
-from doc_lattice.model import Node, TargetId
+from doc_lattice.model import CollisionMember, Node, TargetId
 from doc_lattice.report_render import (
     _STATE_COLORS,
     _state_summary,
@@ -41,7 +41,8 @@ def test_render_statuses_writes_exact_plain_text_and_escapes_markup():
     render_statuses(console, statuses, summarize_statuses(statuses))
 
     assert output.getvalue() == (
-        "BROKEN        down[/] -> up[bold]\n1 edge: 0 OK, 0 STALE, 0 UNRECONCILED, 1 BROKEN\n"
+        "BROKEN        down[/] -> up[bold]\n"
+        "1 edge: 0 OK, 0 STALE, 0 UNRECONCILED, 1 BROKEN, 0 AMBIGUOUS\n"
     )
 
 
@@ -61,7 +62,7 @@ def test_render_statuses_summarizes_a_clean_lattice():
     render_statuses(console, statuses, summarize_statuses(statuses))
 
     assert output.getvalue() == (
-        "OK            down -> up\n1 edge: 1 OK, 0 STALE, 0 UNRECONCILED, 0 BROKEN\n"
+        "OK            down -> up\n1 edge: 1 OK, 0 STALE, 0 UNRECONCILED, 0 BROKEN, 0 AMBIGUOUS\n"
     )
 
 
@@ -70,7 +71,7 @@ def test_render_statuses_summarizes_an_empty_lattice():
 
     render_statuses(console, [], summarize_statuses([]))
 
-    assert output.getvalue() == "0 edges: 0 OK, 0 STALE, 0 UNRECONCILED, 0 BROKEN\n"
+    assert output.getvalue() == "0 edges: 0 OK, 0 STALE, 0 UNRECONCILED, 0 BROKEN, 0 AMBIGUOUS\n"
 
 
 def test_render_statuses_summary_counts_every_edge_not_only_the_displayed_ones():
@@ -98,7 +99,8 @@ def test_render_statuses_summary_counts_every_edge_not_only_the_displayed_ones()
     render_statuses(console, displayed, summarize_statuses(every))
 
     assert output.getvalue() == (
-        "STALE         drifted -> up\n2 edges: 1 OK, 1 STALE, 0 UNRECONCILED, 0 BROKEN\n"
+        "STALE         drifted -> up\n"
+        "2 edges: 1 OK, 1 STALE, 0 UNRECONCILED, 0 BROKEN, 0 AMBIGUOUS\n"
     )
 
 
@@ -109,7 +111,9 @@ def test_render_statuses_keeps_the_verdict_on_one_line_at_any_width():
 
     render_statuses(console, [], {"OK": 1234567, "STALE": 2, "UNRECONCILED": 3, "BROKEN": 4})
 
-    assert output.getvalue() == ("1234576 edges: 1234567 OK, 2 STALE, 3 UNRECONCILED, 4 BROKEN\n")
+    assert output.getvalue() == (
+        "1234576 edges: 1234567 OK, 2 STALE, 3 UNRECONCILED, 4 BROKEN, 0 AMBIGUOUS\n"
+    )
 
 
 def test_render_statuses_keeps_every_row_on_one_line_at_any_width():
@@ -131,7 +135,7 @@ def test_render_statuses_keeps_every_row_on_one_line_at_any_width():
 
     assert output.getvalue() == (
         "STALE         billing-integration-guide -> api-design#pagination\n"
-        "1 edge: 0 OK, 1 STALE, 0 UNRECONCILED, 0 BROKEN\n"
+        "1 edge: 0 OK, 1 STALE, 0 UNRECONCILED, 0 BROKEN, 0 AMBIGUOUS\n"
     )
 
 
@@ -159,7 +163,7 @@ def test_render_statuses_emits_no_ansi_under_no_color():
 def test_state_summary_of_a_sparse_counter_still_names_every_state():
     # The parameter is a Mapping, so a caller may pass a counter that omits absent states.
     assert _state_summary(Counter(["OK", "OK", "STALE"])) == (
-        "3 edges: 2 OK, 1 STALE, 0 UNRECONCILED, 0 BROKEN"
+        "3 edges: 2 OK, 1 STALE, 0 UNRECONCILED, 0 BROKEN, 0 AMBIGUOUS"
     )
 
 
@@ -204,6 +208,45 @@ def test_render_lint_writes_violations_and_exact_skip_summary():
         "1 ladder violation, 2 edges unranked "
         "(1 target unannotated, 1 source unannotated)\n"
     )
+
+
+def test_render_lint_names_the_ambiguous_count_in_the_summary():
+    # A run that printed ambiguity rows and then summarized only the ladder read as clean on the
+    # one line most likely to be quoted out of it. The count stays outside the ladder total,
+    # which is what lint's exit code answers for.
+    console, output = _recording_console()
+    result = LintResult(
+        violations=(),
+        skipped=(),
+        ambiguous=(
+            EdgeStatus(
+                source_id="down",
+                target_ref="up#notes",
+                target_id=TargetId("up#notes"),
+                state="AMBIGUOUS",
+                expected=None,
+                actual=None,
+                collision=(
+                    CollisionMember(label="Notes", line=4),
+                    CollisionMember(label="Notes", line=6),
+                ),
+            ),
+        ),
+    )
+
+    render_lint(console, result)
+
+    summary = output.getvalue().splitlines()[-1]
+
+    assert summary == "0 ladder violations, 0 edges unranked, 1 ambiguous"
+
+
+def test_render_lint_omits_the_ambiguous_clause_when_there_is_none():
+    console, output = _recording_console()
+
+    render_lint(console, LintResult(violations=(), skipped=(), ambiguous=()))
+
+    assert output.getvalue() == "0 ladder violations, 0 edges unranked\n"
 
 
 def test_render_lint_keeps_every_line_on_one_line_at_any_width():
@@ -355,3 +398,42 @@ def test_render_impact_emits_no_ansi_under_no_color():
 
 def test_state_colors_cover_every_edge_state():
     assert set(_STATE_COLORS) == set(get_args(EdgeState))
+
+
+def test_an_ambiguous_row_names_the_colliding_headings():
+    stream = StringIO()
+    console = Console(file=stream, no_color=True, width=200)
+    status = EdgeStatus(
+        "down",
+        "up#notes",
+        TargetId("up", "notes"),
+        "AMBIGUOUS",
+        None,
+        None,
+        (CollisionMember(label="Notes", line=1), CollisionMember(label="Notes", line=3)),
+    )
+
+    render_statuses(console, [status], summarize_statuses([status]))
+
+    output = stream.getvalue()
+    assert "AMBIGUOUS" in output
+    assert 'ambiguous with "Notes" (line 1), "Notes" (line 3)' in output
+    assert output.rstrip().endswith("1 edge: 0 OK, 0 STALE, 0 UNRECONCILED, 0 BROKEN, 1 AMBIGUOUS")
+
+
+def test_rich_markup_in_a_heading_label_is_escaped_not_interpreted():
+    stream = StringIO()
+    console = Console(file=stream, no_color=True, width=200)
+    status = EdgeStatus(
+        "down",
+        "up#x",
+        TargetId("up", "x"),
+        "AMBIGUOUS",
+        None,
+        None,
+        (CollisionMember(label="[bold]hi[/bold]", line=2),),
+    )
+
+    render_statuses(console, [status], summarize_statuses([status]))
+
+    assert "[bold]hi[/bold]" in stream.getvalue()

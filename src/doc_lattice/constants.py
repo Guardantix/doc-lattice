@@ -34,10 +34,29 @@ AUTHORITY_LADDER: tuple[Authority, ...] = ("exploratory", "derived", "binding")
 # What one discovered file's frontmatter turned out to be. "untracked" and "id-less" are the two
 # distinct ways a file is left out of the lattice, which a bare "no node" answer conflated: the
 # first is prose the engine has nothing to say about, the second is a metadata block that lost or
-# never had its `id`. The load cache persists this so a warm run replays the diagnostic a cold run
-# emitted.
-FrontmatterDisposition = Literal["tracked", "untracked", "id-less"]
+# never had its `id`. "misplaced-envelope" is the third: an otherwise untracked or id-less file
+# carrying the comment opener (or a near-miss spelling of it) somewhere other than line 1 and
+# outside a code block, which is the "I put the envelope after the H1 (or after a Jekyll fence)
+# and the file silently vanished" hole. The load cache persists this so a warm run replays the
+# diagnostic a cold run emitted.
+FrontmatterDisposition = Literal["tracked", "untracked", "id-less", "misplaced-envelope"]
 VALID_FRONTMATTER_DISPOSITIONS: frozenset[str] = frozenset(get_args(FrontmatterDisposition))
+
+# Which envelope a metadata-bearing file declares its frontmatter with. Both spellings are
+# accepted unconditionally and forever (AD-44); there is no selector, because nothing needs to
+# forbid either one. "fence" is the historical `---` block. "comment" is the HTML comment GitHub
+# renders as nothing, which is what lets a tracked README keep a clean landing page. The kind is
+# derived from the file at read time and deliberately not cached: reconcile rereads the file it
+# rewrites anyway.
+EnvelopeKind = Literal["fence", "comment"]
+VALID_ENVELOPE_KINDS: frozenset[str] = frozenset(get_args(EnvelopeKind))
+
+# The comment envelope's two delimiter lines, byte-exact. The opener admits no whitespace
+# variance at all, unlike the fence rule, because CommonMark reads a four-space-indented opener
+# as an indented code block and would print the "invisible" envelope as literal text while
+# doc-lattice tracked the file.
+COMMENT_ENVELOPE_OPEN: str = "<!-- doc-lattice"
+COMMENT_ENVELOPE_CLOSE: str = "-->"
 
 # Which ruamel parser a YAML boundary reads through. The two members are not symmetric and the
 # domain exists to keep them from reading as though they were. "pure" is a pin: it fixes the
@@ -61,7 +80,10 @@ LATTICE_INTENT_KEYS: frozenset[str] = frozenset({"authority", "derives_from", "t
 LocationKind = Literal["file", "section"]
 VALID_LOCATION_KINDS: frozenset[str] = frozenset(get_args(LocationKind))
 
-EdgeState = Literal["OK", "STALE", "UNRECONCILED", "BROKEN"]
+# "AMBIGUOUS" is last so the ordered form keeps every earlier state in its published position.
+# It is a first-class state, not an advisory: the same condition gets the same verdict in every
+# command, and a warning-only design would leave CI green on a lattice reconcile itself refuses.
+EdgeState = Literal["OK", "STALE", "UNRECONCILED", "BROKEN", "AMBIGUOUS"]
 # EDGE_STATES is the ordered form, in Literal declaration order. Report output that must be
 # deterministic (the check summary breakdown) iterates it; VALID_EDGE_STATES stays the
 # membership test and must never drive output order, being a frozenset.
@@ -104,7 +126,7 @@ C1_CONTROL_MAX: int = 0x9F
 # releases.
 # MAX_STAT_ROOTS bounds the per-root stat ledger. CACHE_FILE_NAME is the single JSON document under
 # the cache slot.
-CACHE_VERSION: int = 5
+CACHE_VERSION: int = 7
 MAX_STAT_ROOTS: int = 8
 CACHE_FILE_NAME: str = "load-cache.json"
 
@@ -148,6 +170,17 @@ VALID_RECONCILE_SELECTOR_MODES: frozenset[str] = frozenset(get_args(ReconcileSel
 RECONCILE_JOURNAL_NAME: str = ".doc-lattice-reconcile.json"
 RECONCILE_JOURNAL_VERSION: Literal[2] = 2
 RECONCILE_JOURNAL_LEGACY_VERSION: Literal[1] = 1
+
+# The lattice format this engine reads, declared as `lattice_format` in `.doc-lattice.yml` and
+# required there from 7.0. Both skew directions fail loud with no cooperation from code that
+# predates the feature: a v7 engine refuses a config that omits the key, and every pre-v7 engine
+# refuses one that carries it, because `Config` is `strict=True, extra="forbid"`. Literal-typed so
+# the one accepted value is a type rather than a magic number; `Config.lattice_format` stays
+# `int | None` and holds the field to it in a validator, which is what lets a config naming
+# another format be reported as that format rather than as a shape error. The hash scheme is
+# deliberately not versioned separately: the config boundary is the guard, and a second version
+# channel would be redundant surface (AD-15 spirit).
+LATTICE_FORMAT_VERSION: Literal[2] = 2
 PERSISTENCE_TEMP_SUFFIX: str = ".tmp"
 RECONCILE_BEFORE_IMAGE_INFIX: str = ".doc-lattice-before."
 RECONCILE_AFTER_IMAGE_INFIX: str = ".doc-lattice-after."

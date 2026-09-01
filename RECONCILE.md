@@ -22,6 +22,15 @@ Normal reconcile needs either a downstream id or `--all` (running it with neithe
   without loading the lattice or planning a new batch. It cannot be combined with a downstream id,
   `--all`, `--ref`, or `--dry-run`; those combinations exit 2. `--format json` is supported.
 
+An `AMBIGUOUS` edge is the one exception to every "skipped" above. Reconcile refuses the whole run
+rather than skipping it, because writing `seen` there would lock a hash to an id that document
+order can hand to a different heading. The refusal is run-scoped and precedes the already-OK
+check, so a single ambiguous edge anywhere in the selection exits 2 and writes nothing, even when
+that edge already held its planned hash and even under `--dry-run`. Run `doc-lattice check` to
+list every `AMBIGUOUS` edge at once, disambiguate each one (reword a colliding heading, or give
+the target an explicit `{#anchor}` marker), then re-run. See the drift-state table in
+[README.md](README.md) for what `AMBIGUOUS` means.
+
 ## Dry-run previews
 
 Add `--dry-run` to any normal selector above to preview the plan without writing: it prints

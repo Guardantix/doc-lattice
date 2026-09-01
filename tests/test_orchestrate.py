@@ -96,7 +96,9 @@ def test_cached_and_uncached_loads_reject_unclosed_frontmatter_identically(
     with pytest.raises(UnreadableDocError) as uncached:
         load_lattice(load_config(None, tmp_path))
 
-    (tmp_path / ".doc-lattice.yml").write_text("cache_key: unclosed\n", encoding="utf-8")
+    (tmp_path / ".doc-lattice.yml").write_text(
+        "lattice_format: 2\ncache_key: unclosed\n", encoding="utf-8"
+    )
     with pytest.raises(UnreadableDocError) as cached:
         load_lattice(load_config(None, tmp_path))
 
@@ -156,7 +158,7 @@ def test_ignore_globs_exclude_nodes(tmp_path: Path):
     (docs / "kept.md").write_text("---\nid: kept\n---\n# Kept\n", encoding="utf-8")
     (docs / "drafts" / "wip.md").write_text("---\nid: wip\n---\n# WIP\n", encoding="utf-8")
     (tmp_path / ".doc-lattice.yml").write_text(
-        'docs_roots: ["docs"]\nignore_globs: ["drafts/**"]\n', encoding="utf-8"
+        'lattice_format: 2\ndocs_roots: ["docs"]\nignore_globs: ["drafts/**"]\n', encoding="utf-8"
     )
     project = load_config(None, tmp_path)
     lat = load_lattice(project)
@@ -171,7 +173,7 @@ def test_multiple_docs_roots_combine(tmp_path: Path):
     (tmp_path / "design" / "a.md").write_text("---\nid: a\n---\n# A\n", encoding="utf-8")
     (tmp_path / "production" / "b.md").write_text("---\nid: b\n---\n# B\n", encoding="utf-8")
     (tmp_path / ".doc-lattice.yml").write_text(
-        'docs_roots: ["design", "production"]\n', encoding="utf-8"
+        'lattice_format: 2\ndocs_roots: ["design", "production"]\n', encoding="utf-8"
     )
     project = load_config(None, tmp_path)
     lat = load_lattice(project)
@@ -192,7 +194,7 @@ def test_load_lattice_deduplicates_in_project_symlink_target(
     link = docs / "linked.md"
     link.symlink_to(Path("../shared/spec.md"))
 
-    config_lines = ['docs_roots: ["docs", "shared"]']
+    config_lines = ["lattice_format: 2", 'docs_roots: ["docs", "shared"]']
     if cache_enabled:
         config_lines.append("cache_key: symlink-test")
     (project_root / ".doc-lattice.yml").write_text("\n".join(config_lines) + "\n", encoding="utf-8")
@@ -205,7 +207,7 @@ def test_load_lattice_deduplicates_in_project_symlink_target(
 
 
 def _with_cache(tmp_path: Path, *, trust_stat: bool = False) -> Path:
-    lines = ["cache_key: testslot"]
+    lines = ["lattice_format: 2", "cache_key: testslot"]
     if trust_stat:
         lines.append("cache_trust_stat: true")
     (tmp_path / ".doc-lattice.yml").write_text("\n".join(lines) + "\n", encoding="utf-8")
@@ -325,11 +327,14 @@ def test_mixed_directory_and_file_docs_roots_load_identically_cached_and_uncache
     )
     config_path = tmp_path / ".doc-lattice.yml"
 
-    config_path.write_text("docs_roots: [docs, ARCHITECTURE.md]\n", encoding="utf-8")
+    config_path.write_text(
+        "lattice_format: 2\ndocs_roots: [docs, ARCHITECTURE.md]\n", encoding="utf-8"
+    )
     uncached = load_lattice(load_config(None, tmp_path))
 
     config_path.write_text(
-        "docs_roots: [docs, ARCHITECTURE.md]\ncache_key: mixed-file-root\n", encoding="utf-8"
+        "lattice_format: 2\ndocs_roots: [docs, ARCHITECTURE.md]\ncache_key: mixed-file-root\n",
+        encoding="utf-8",
     )
     cold = load_lattice(load_config(None, tmp_path))  # writes the cache
     warm = load_lattice(load_config(None, tmp_path))  # reads it back
@@ -344,19 +349,19 @@ def test_mixed_directory_and_file_docs_roots_load_identically_cached_and_uncache
 
 def test_warm_cached_run_reparses_nothing(lattice_dir: Path, monkeypatch, tmp_path):
     # Proof the warm path serves from the cache instead of re-parsing: after a cold run populates
-    # the cache, a warm run must call parse_meta zero times (every file is a verify-tier hit
+    # the cache, a warm run must call parse_document zero times (every file is a verify-tier hit
     # reconstructed from the cache). A no-op alias would re-parse every discovered node.
     monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path / "xdg"))
     _with_cache(lattice_dir)
 
     calls = {"n": 0}
-    real = orchestrate.parse_meta
+    real = orchestrate.parse_document
 
     def counting(*args, **kwargs):
         calls["n"] += 1
         return real(*args, **kwargs)
 
-    monkeypatch.setattr(orchestrate, "parse_meta", counting)
+    monkeypatch.setattr(orchestrate, "parse_document", counting)
 
     load_lattice(load_config(None, lattice_dir))  # cold: cache empty, every node parsed
     assert calls["n"] > 0
@@ -532,3 +537,84 @@ def test_id_less_frontmatter_declaring_lattice_intent_fails_identically_across_t
     assert str(uncached.value) == expected
     assert str(cold.value) == expected
     assert str(warm.value) == expected
+
+
+def test_a_comment_spelling_document_becomes_a_node(tmp_path: Path):
+    docs = tmp_path / "docs"
+    docs.mkdir()
+    (docs / "up.md").write_text(
+        "<!-- doc-lattice\nid: up\n-->\n# Up\n\n## Section\nbody\n", encoding="utf-8"
+    )
+    (docs / "down.md").write_text(
+        "---\nid: down\nderives_from:\n  - ref: up#section\n---\n# Down\n", encoding="utf-8"
+    )
+    project = load_config(None, tmp_path)
+
+    lattice = load_lattice(project)
+
+    assert set(lattice.nodes_by_id) == {"up", "down"}
+    assert TargetId("up", "section") in lattice.index
+
+
+def test_the_misplacement_warning_replays_on_every_cache_tier(tmp_path: Path, monkeypatch):
+    monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path / "cache"))
+    docs = tmp_path / "docs"
+    docs.mkdir()
+    (docs / "late.md").write_text("# Title\n\n<!-- doc-lattice\nid: late\n-->\n", encoding="utf-8")
+    (tmp_path / ".doc-lattice.yml").write_text(
+        "lattice_format: 2\ndocs_roots:\n  - docs\ncache_key: parity\ncache_trust_stat: true\n",
+        encoding="utf-8",
+    )
+    project = load_config(None, tmp_path)
+
+    messages = []
+    for _ in range(3):
+        with warnings.catch_warnings(record=True) as captured:
+            warnings.simplefilter("always")
+            load_lattice(project)
+        messages.append([str(entry.message) for entry in captured])
+
+    assert messages[0] == messages[1] == messages[2]
+    assert any("misplaced doc-lattice envelope" in message for message in messages[0])
+
+
+def test_the_shadowed_envelope_warning_replays_on_every_cache_tier(tmp_path: Path, monkeypatch):
+    # The tracked half of the same contract: the file is a node, so the diagnostic rides beside
+    # the disposition rather than replacing it, and the cache has to carry it either way.
+    monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path / "cache"))
+    docs = tmp_path / "docs"
+    docs.mkdir()
+    (docs / "half.md").write_text(
+        "---\nid: half\n---\n# Title\n\n<!-- doc-lattice\nid: other\n-->\n", encoding="utf-8"
+    )
+    (tmp_path / ".doc-lattice.yml").write_text(
+        "lattice_format: 2\ndocs_roots:\n  - docs\ncache_key: shadow\ncache_trust_stat: true\n",
+        encoding="utf-8",
+    )
+    project = load_config(None, tmp_path)
+
+    messages = []
+    for _ in range(3):
+        with warnings.catch_warnings(record=True) as captured:
+            warnings.simplefilter("always")
+            lattice = load_lattice(project)
+        messages.append([str(entry.message) for entry in captured])
+
+    # Tracked under the fence's id on every tier, not the envelope's.
+    assert set(lattice.nodes_by_id) == {"half"}
+    assert messages[0] == messages[1] == messages[2]
+    assert any("shadowed doc-lattice envelope" in message for message in messages[0])
+
+
+def test_the_shadowed_and_misplaced_warnings_are_separately_filterable():
+    # README documents PYTHONWARNINGS=ignore:misplaced as targeting exactly one diagnostic, and
+    # that filter matches on a message prefix. The two envelope warnings therefore have to open
+    # with different words, or silencing one silently silences the other.
+    with warnings.catch_warnings(record=True) as captured:
+        warnings.simplefilter("always")
+        orchestrate._report_misplaced_envelope("misplaced-envelope", Path("a.md"))
+        orchestrate._report_shadowed_envelope(True, Path("b.md"))
+
+    first, second = (str(entry.message) for entry in captured)
+    assert first.startswith("misplaced ")
+    assert second.startswith("shadowed ")
