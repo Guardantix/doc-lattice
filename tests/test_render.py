@@ -3,7 +3,6 @@
 import json
 from pathlib import Path
 
-from doc_lattice.check import ambiguous_edges
 from doc_lattice.loader import build_lattice
 from doc_lattice.model import Lattice, NodeMeta, ParsedDoc, RawEdge, TargetId
 from doc_lattice.render import to_dot, to_json, to_mermaid
@@ -275,13 +274,7 @@ def _ambiguous_lattice() -> Lattice:
 
 def test_graph_json_marks_the_edge_and_names_the_colliding_headings():
     lattice = _ambiguous_lattice()
-    ambiguous = {
-        (status.source_id, status.target_id)
-        for status in ambiguous_edges(lattice)
-        if status.target_id is not None
-    }
-
-    payload = to_json(lattice, set(), ambiguous)
+    payload = to_json(lattice, set())
 
     assert payload["edges"][0]["ambiguous"] is True
     assert payload["ambiguous_targets"] == [
@@ -294,14 +287,8 @@ def test_graph_json_marks_the_edge_and_names_the_colliding_headings():
 
 def test_dot_and_mermaid_mark_the_edge_and_comment_the_component():
     lattice = _ambiguous_lattice()
-    ambiguous = {
-        (status.source_id, status.target_id)
-        for status in ambiguous_edges(lattice)
-        if status.target_id is not None
-    }
-
-    dot = to_dot(lattice, set(), ambiguous)
-    mermaid = to_mermaid(lattice, set(), ambiguous)
+    dot = to_dot(lattice, set())
+    mermaid = to_mermaid(lattice, set())
 
     assert 'style=dotted color="red"' in dot
     assert '// ambiguous up#notes: "Notes" (line 1), "Notes" (line 3)' in dot
@@ -320,9 +307,9 @@ def _hostile_lattice() -> Lattice:
 def test_no_sink_that_names_a_heading_emits_a_control_character():
     lattice = _hostile_lattice()
 
-    dot = to_dot(lattice, set(), set())
-    mermaid = to_mermaid(lattice, set(), set())
-    payload = json.dumps(to_json(lattice, set(), set()))
+    dot = to_dot(lattice, set())
+    mermaid = to_mermaid(lattice, set())
+    payload = json.dumps(to_json(lattice, set()))
 
     for rendered in (dot, mermaid, payload):
         assert "\x1b" not in rendered
@@ -350,15 +337,15 @@ def test_identical_components_in_different_files_each_keep_their_row():
         ]
     )
 
-    payload = to_json(lattice, set(), frozenset())
+    payload = to_json(lattice, set())
 
     assert [entry["target_id"] for entry in payload["ambiguous_targets"]] == [
         "up#notes",
         "zzz#notes",
     ]
 
-    dot = to_dot(lattice, set(), frozenset())
-    mermaid = to_mermaid(lattice, set(), frozenset())
+    dot = to_dot(lattice, set())
+    mermaid = to_mermaid(lattice, set())
     assert '// ambiguous up#notes: "Notes" (line 1), "Notes" (line 3)' in dot
     assert '// ambiguous zzz#notes: "Notes" (line 1), "Notes" (line 3)' in dot
     assert '%% ambiguous up#notes: "Notes" (line 1), "Notes" (line 3)' in mermaid

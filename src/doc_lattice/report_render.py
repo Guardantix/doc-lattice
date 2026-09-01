@@ -63,6 +63,28 @@ def _state_summary(summary: Mapping[EdgeState, int]) -> str:
     return f"{total} {label}: {breakdown}"
 
 
+def _status_row(status: EdgeStatus) -> str:
+    """Render one edge classification as the single row spelling every human sink shares.
+
+    ``render_statuses`` and ``render_ambiguous`` both print this, so ``check``'s per-edge
+    listing and the appended block ``lint``, ``impact``, and ``linear`` emit cannot drift into
+    two layouts for one condition. The colour and the column width come from the same two
+    declarations either way, and the collision detail appears exactly when there is one.
+
+    Args:
+        status: The edge classification to render.
+
+    Returns:
+        The Rich markup for one row, ids and labels already escaped.
+    """
+    color = _STATE_COLORS[status.state]
+    detail = f" ({escape(format_collision(status.collision))})" if status.collision else ""
+    return (
+        f"[{color}]{status.state:<{_STATE_COL_WIDTH}}[/{color}] "
+        f"{escape(status.source_id)} -> {escape(status.target_ref)}{detail}"
+    )
+
+
 def render_statuses(
     console: Console, statuses: list[EdgeStatus], summary: Mapping[EdgeState, int]
 ) -> None:
@@ -83,14 +105,7 @@ def render_statuses(
     # width, so `check | tail -1` (or grep) gets the whole record rather than the fragment
     # Rich's wrapping would leave on a narrow console. Same fix GTX-2 applied to render_impact.
     for status in statuses:
-        color = _STATE_COLORS[status.state]
-        detail = f" ({escape(format_collision(status.collision))})" if status.collision else ""
-        console.print(
-            f"[{color}]{status.state:<{_STATE_COL_WIDTH}}[/{color}] "
-            f"{escape(status.source_id)} -> {escape(status.target_ref)}{detail}",
-            highlight=False,
-            soft_wrap=True,
-        )
+        console.print(_status_row(status), highlight=False, soft_wrap=True)
     console.print(_state_summary(summary), highlight=False, soft_wrap=True)
 
 
@@ -128,10 +143,9 @@ def render_ambiguous(console: Console, statuses: Sequence[EdgeStatus]) -> None:
     """Render ambiguous-target findings, one record per line.
 
     The one human spelling ``lint``, ``impact``, and ``linear`` share, so the same condition
-    reads the same way wherever it is reported. ``check`` renders its own row instead, because
-    the state is part of that command's per-edge listing rather than an appended block. The
-    colour and the state column width are read from the same two declarations ``render_statuses``
-    reads, so the state cannot end up rendered two ways depending on which command emitted it.
+    reads the same way wherever it is reported. ``check`` prints the same row inside its own
+    per-edge listing rather than as an appended block; both go through ``_status_row``, so the
+    state cannot end up rendered two ways depending on which command emitted it.
 
     Args:
         console: Destination console.
@@ -140,16 +154,10 @@ def render_ambiguous(console: Console, statuses: Sequence[EdgeStatus]) -> None:
     # highlight=False and soft_wrap for the reason every renderer in this module carries them:
     # Rich's highlighter bolds bare numbers and bold survives no_color, and each record must
     # stay one line at any width so a pipe or a grep gets the whole record.
-    color = _STATE_COLORS["AMBIGUOUS"]
     for status in statuses:
         if status.state != "AMBIGUOUS":
             continue
-        console.print(
-            f"[{color}]{'AMBIGUOUS':<{_STATE_COL_WIDTH}}[/{color}] {escape(status.source_id)} -> "
-            f"{escape(status.target_ref)} ({escape(format_collision(status.collision))})",
-            highlight=False,
-            soft_wrap=True,
-        )
+        console.print(_status_row(status), highlight=False, soft_wrap=True)
 
 
 def render_impact(

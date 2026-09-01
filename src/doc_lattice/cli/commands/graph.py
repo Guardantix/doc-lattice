@@ -42,14 +42,9 @@ def register_graph(app: typer.Typer) -> None:
                 for status in statuses
                 if status.state == "STALE" and status.target_id is not None
             }
-            ambiguous = {
-                (status.source_id, status.target_id)
-                for status in statuses
-                if status.state == "AMBIGUOUS" and status.target_id is not None
-            }
         if selection.format == "json":
-            write_json(runtime, to_json(lattice, stale, ambiguous))
+            write_json(runtime, to_json(lattice, stale))
         elif selection.format == "dot":
-            write_text(runtime, to_dot(lattice, stale, ambiguous), newline=False)
+            write_text(runtime, to_dot(lattice, stale), newline=False)
         else:
-            write_text(runtime, to_mermaid(lattice, stale, ambiguous), newline=False)
+            write_text(runtime, to_mermaid(lattice, stale), newline=False)

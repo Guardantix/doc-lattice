@@ -63,8 +63,13 @@ def derive_file_sections(body: str, *, first_line: int = 1) -> FileSections:
     """
     total_lines = _line_count(body)
     toc = build_toc(body)
-    inventory = addressable_heading_inventory(toc)
-    full = full_heading_inventory(body)
+    # One memo of the pure text -> base slug function for both inventories. They keep separate
+    # dedup state, since each allocates over its own heading sequence, but a document written
+    # entirely in the addressable subset hands both the same texts and would otherwise pay for
+    # every base slug twice.
+    base_cache: dict[str, str] = {}
+    inventory = addressable_heading_inventory(toc, base_cache)
+    full = full_heading_inventory(body, base_cache)
     anchors = [
         heading.anchor if heading.anchor is not None else record.github_id
         for heading, record in zip(toc, inventory, strict=True)
