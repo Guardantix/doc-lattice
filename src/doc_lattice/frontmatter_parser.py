@@ -123,9 +123,8 @@ def split_frontmatter_parts(text: str, source: Path) -> FrontmatterParts | None:
     # "---" fence recognized on line 0 instead of being read as having no frontmatter.
     stripped = text.lstrip(_BOM)
     prefix = text[: len(text) - len(stripped)]
+    # `str.split` always yields at least one element, so `lines[0]` needs no emptiness guard.
     lines = stripped.split("\n")
-    if not lines:
-        return None
     if lines[0].strip() == _FENCE:
         return _split_envelope(prefix, lines, "fence", source)
     if lines[0] == COMMENT_ENVELOPE_OPEN:
@@ -168,8 +167,13 @@ def _split_envelope(
     closer = _FENCE if kind == "fence" else COMMENT_ENVELOPE_CLOSE
     for closing_index, line in enumerate(lines[1:], start=1):
         # The fence rule has always tolerated surrounding space on its closing line. The comment
-        # closer does not, for the reason its opener does not: an indented "-->" is not a comment
-        # terminator to CommonMark either.
+        # closer does not, and the reason is this engine's rather than CommonMark's: CommonMark
+        # ends an HTML comment block at the first line *containing* "-->", so indentation and
+        # trailing space are both terminators to a renderer. Byte-exactness here is what keeps
+        # the span doc-lattice reads as the envelope identical to the span it rewrites, the same
+        # property the opener's byte-exact rule buys. The cost is that a stray space after an
+        # otherwise correct "-->" fails loud as an unclosed envelope, which is why the
+        # diagnostic below names whitespace as the thing to look for.
         matched = line.strip() == closer if kind == "fence" else line == closer
         if not matched:
             continue
@@ -198,7 +202,9 @@ def _split_envelope(
     else:
         msg = (
             f"unclosed doc-lattice comment envelope in {format_path_for_display(source)}: "
-            "add a closing '-->' line at column zero"
+            "add a closing '-->' line at column zero, spelled exactly, with no indentation and "
+            "no trailing whitespace. A renderer ends the comment at any line containing '-->', "
+            "so a closer that only looks right to the eye reaches this message"
         )
     raise UnreadableDocError(msg, source=source)
 

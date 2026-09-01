@@ -1132,6 +1132,14 @@ def test_the_substring_precheck_short_circuits_a_file_without_the_sentinel():
     assert detect_misplaced_envelope("# Title\n\nordinary prose\n") is False
 
 
+def test_a_mid_sentence_mention_of_the_sentinel_is_rejected_before_any_parse():
+    # Stage two of the three-stage scan, and the reason the pre-check is a deliberate superset:
+    # the substring matches anywhere in a line, so prose naming the opener mid-sentence gets past
+    # it and is rejected by the per-line fullmatch, which costs a line scan and no parse. This
+    # file and ARCHITECTURE.md are both documents that would trip the pre-check this way.
+    assert detect_misplaced_envelope("# Title\n\nOpen with <!-- doc-lattice on line 1.\n") is False
+
+
 def test_an_untracked_fence_followed_by_a_comment_envelope_is_misplaced():
     text = "---\ntitle: x\n---\n<!-- doc-lattice\nid: y\n-->\n# Doc\n"
 
