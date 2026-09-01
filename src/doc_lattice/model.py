@@ -177,11 +177,28 @@ class CollisionMember:
 
     ``label`` is already sanitized by ``text_utils.safe_heading_label`` at derivation time, so
     the cached and uncached paths cannot disagree about it. ``line`` is the heading's 1-based
-    source line in the document body.
+    line in the file, envelope included, because every sink prints it to a reader opening that
+    file. It is not a body offset and is not comparable with a ``SectionRecord`` span, which
+    stays body-relative for slicing.
     """
 
     label: str
     line: int
+
+
+def format_collision_members(members: tuple[CollisionMember, ...]) -> str:
+    """Render a collision component's members as the one comma-joined phrase every sink prints.
+
+    This is the single owner of the human-readable phrase fragment naming collision members;
+    every sink that lists them calls this instead of re-deriving the join.
+
+    Args:
+        members: The component's headings in document order.
+
+    Returns:
+        A comma-joined listing of each member's quoted label and line, with no leading verb.
+    """
+    return ", ".join(f'"{member.label}" (line {member.line})' for member in members)
 
 
 def format_collision(members: tuple[CollisionMember, ...]) -> str:
@@ -194,8 +211,22 @@ def format_collision(members: tuple[CollisionMember, ...]) -> str:
         A single-line phrase naming each member and its line. The caller applies its own
         quoting; the labels carry no control character, so the phrase is safe to embed.
     """
-    listed = ", ".join(f'"{member.label}" (line {member.line})' for member in members)
-    return f"ambiguous with {listed}"
+    return f"ambiguous with {format_collision_members(members)}"
+
+
+def collision_members_json(members: tuple[CollisionMember, ...]) -> list[dict[str, str | int]]:
+    """Render a collision component's members as the one JSON wire shape every sink emits.
+
+    This is the single owner of the JSON representation of collision members; every sink that
+    serializes them calls this instead of re-deriving the shape.
+
+    Args:
+        members: The component's headings in document order.
+
+    Returns:
+        A list of ``{"label": ..., "line": ...}`` dicts, one per member, in document order.
+    """
+    return [{"label": member.label, "line": member.line} for member in members]
 
 
 @dataclass(frozen=True, slots=True)

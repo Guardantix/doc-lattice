@@ -451,6 +451,37 @@ def test_an_addressable_only_collision_is_traced_via_the_addressable_toc():
         )
 
 
+def test_overlapping_components_from_both_inventories_merge_into_one():
+    # The setext "Alpha" and the ATX one on line 3 collide in the full inventory; the ATX one on
+    # line 3 and the commented one on line 5 collide in the addressable inventory. Line 3 is in
+    # both, so the two are one connected hazard and every member names all three lines.
+    body = "Alpha\n=====\n# Alpha\n<!--\n# Alpha\n-->\n"
+
+    sections = derive_file_sections(body)
+
+    expected = (
+        CollisionMember(label="Alpha", line=1),
+        CollisionMember(label="Alpha", line=3),
+        CollisionMember(label="Alpha", line=5),
+    )
+    assert [record.anchor for record in sections.sections] == ["alpha", "alpha-1"]
+    assert [record.collision for record in sections.sections] == [expected, expected]
+
+
+def test_collision_member_lines_are_shifted_by_first_line():
+    body = "# Notes\n\n# Notes\n"
+
+    sections = derive_file_sections(body, first_line=4)
+
+    # Spans stay body-relative; only the printed member lines move into file coordinates.
+    assert [(record.start, record.end) for record in sections.sections] == [(1, 2), (3, 3)]
+    for record in sections.sections:
+        assert record.collision == (
+            CollisionMember(label="Notes", line=4),
+            CollisionMember(label="Notes", line=6),
+        )
+
+
 def test_build_lattice_exposes_collisions_by_target_id():
     docs = [ParsedDoc(path=Path("docs/a.md"), meta=NodeMeta(id="a"), body="# Notes\n\n# Notes\n")]
 

@@ -5,6 +5,7 @@ from collections import defaultdict
 
 from .error_types import DuplicateIdError
 from .markdown_compat import (
+    SluggedHeading,
     addressable_heading_inventory,
     collision_components,
     full_heading_inventory,
@@ -22,11 +23,11 @@ from .model import (
     parse_ref,
 )
 from .path_utils import format_path_for_display
-from .sections import Heading, anchor_ids, build_toc, section_spans, split_body_lines
+from .sections import build_toc, section_spans, split_body_lines
 from .text_utils import safe_heading_label
 
 
-def derive_file_sections(body: str) -> FileSections:
+def derive_file_sections(body: str, *, first_line: int = 1) -> FileSections:
     """Derive a document's total line count, anchored section spans, and collision provenance.
 
     This is the single derivation the load cache stores and replays: the TOC, its de-duped
@@ -35,8 +36,20 @@ def derive_file_sections(body: str) -> FileSections:
     cache hit to match the uncached result exactly, and a diagnostic naming colliding headings
     cannot be reconstructed from a boolean, so the members are derived here and persisted.
 
+    Spans stay body-relative because they are slicing coordinates for ``body`` itself. Collision
+    member lines are the opposite: they are only ever printed to a reader looking at the file, so
+    they are shifted by ``first_line`` into file coordinates.
+
+    The addressable inventory is computed once and reused for both the anchor ids and the
+    collision trace. ``addressable_heading_inventory`` runs the same pinned document-order dedup
+    over the same texts ``github_heading_ids`` does and guarantees the same dedup state, so
+    taking each generated id from that inventory is the ``anchor_ids`` result without slugging
+    every heading a second time.
+
     Args:
         body: The verbatim document body after the frontmatter envelope.
+        first_line: The 1-based file line that body line 1 occupies. Defaults to 1, which is
+            correct for a file with no envelope and for a caller holding a whole file.
 
     Returns:
         A FileSections with the 1-based total line count and one SectionRecord per heading, in
@@ -44,9 +57,13 @@ def derive_file_sections(body: str) -> FileSections:
     """
     total_lines = _line_count(body)
     toc = build_toc(body)
-    anchors = anchor_ids(toc)
+    inventory = addressable_heading_inventory(toc)
+    anchors = [
+        heading.anchor if heading.anchor is not None else record.github_id
+        for heading, record in zip(toc, inventory, strict=True)
+    ]
     spans = section_spans(toc, total_lines)
-    members_by_line = _collision_members_by_line(body, toc)
+    members_by_line = _collision_members_by_line(body, inventory, first_line=first_line)
     records: list[SectionRecord] = []
     for heading, anchor, (start_line, end_line) in zip(toc, anchors, spans, strict=True):
         # A marker-set id is reword-stable by construction, so it is never ambiguous.
@@ -58,9 +75,9 @@ def derive_file_sections(body: str) -> FileSections:
 
 
 def _collision_members_by_line(
-    body: str, toc: list[Heading]
+    body: str, addressable: list[SluggedHeading], *, first_line: int
 ) -> dict[int, tuple[CollisionMember, ...]]:
-    """Map each colliding heading's source line to its component's safe display members.
+    """Map each colliding heading's body line to its component's safe display members.
 
     Keyed by line because that is what the two heading inventories share: the full GitHub
     inventory and the addressable ATX subset read the same normalized text, so a heading both
@@ -68,32 +85,58 @@ def _collision_members_by_line(
     leaves a hole: the full inventory misses a heading the addressable scanner still addresses
     (a column-zero ``#`` line inside an HTML comment or another container the full parse treats
     as inert), so that heading's ambiguity would never surface. Both inventories' components are
-    unioned by line to close that hole in either direction; a line present in both is not
-    double-counted, and the full inventory's record wins when both saw it, since it is the
-    inventory the existing cases and this function's return contract were already written
-    against.
+    unioned by line to close that hole in either direction.
+
+    The union is over components, not over lines alone. Two components from different
+    inventories that share even one line describe one connected hazard, so they are merged into
+    a single member listing rather than left as two partial ones: every sink prints the listing
+    a reader is meant to act on whole, and a line must map to exactly one of them. A line seen
+    by both inventories is not double-counted, and the full inventory's record wins, since it is
+    the inventory the existing cases and this function's return contract were already written
+    against; it is traversed first, and an already-recorded line is never overwritten.
 
     Args:
         body: The verbatim document body.
-        toc: The addressable ATX subset, from ``build_toc(body)``.
+        addressable: The addressable ATX subset's own allocation trace, from
+            ``addressable_heading_inventory(build_toc(body))``.
+        first_line: The 1-based file line that body line 1 occupies. Member lines are reported
+            in file coordinates; the returned keys stay body-relative, matching the TOC.
 
     Returns:
-        One entry per heading in a collision component, in either inventory's terms.
+        One entry per heading in a collision component, in either inventory's terms, every
+        member of one merged component sharing one tuple.
     """
-    found: dict[int, tuple[CollisionMember, ...]] = {}
-    for inventory in (full_heading_inventory(body), addressable_heading_inventory(toc)):
+    merged: list[dict[int, SluggedHeading]] = []
+    for inventory in (full_heading_inventory(body), addressable):
         for component in collision_components(inventory):
-            members = tuple(
-                CollisionMember(label=safe_heading_label(heading.text), line=heading.line)
-                for heading in component
-            )
-            for heading in component:
-                found.setdefault(heading.line, members)
+            combined = {heading.line: heading for heading in component}
+            disjoint: list[dict[int, SluggedHeading]] = []
+            for group in merged:
+                if group.keys() & combined.keys():
+                    combined = {**combined, **group}
+                else:
+                    disjoint.append(group)
+            merged = [*disjoint, combined]
+
+    found: dict[int, tuple[CollisionMember, ...]] = {}
+    for group in merged:
+        members = tuple(
+            CollisionMember(label=safe_heading_label(heading.text), line=line + first_line - 1)
+            for line, heading in sorted(group.items())
+        )
+        for line in group:
+            found[line] = members
     return found
 
 
 def build_lattice(docs: list[ParsedDoc]) -> Lattice:
     """Build the lattice from parsed docs.
+
+    A doc that carries no ``sections`` has them derived here as a fallback. Both production load
+    paths derive them ahead of this call, because only they know where the body starts in the
+    file; the fallback has no such offset and so yields body-relative collision member lines. It
+    exists for a synthetic caller that builds a ``ParsedDoc`` by hand, where body and file
+    coordinates coincide anyway.
 
     Args:
         docs: Tracked files with validated frontmatter and bodies.

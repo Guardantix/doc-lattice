@@ -59,6 +59,10 @@ _MISPLACED = ParsedMeta(meta=None, disposition="misplaced-envelope")
 # reaches validation, so this is defensive: it exists so a future whole-block rule cannot
 # render a field name the author never wrote.
 _ROOT_LOCATION = "<frontmatter>"
+# Cheap module-level pre-check for `detect_misplaced_envelope`: matches the same near-miss
+# spellings the scan itself looks for, so a file using the exact opener or a near-miss both pay
+# the parse, and everything else is answered by one `search` with no parse at all.
+_MISPLACED_PRECHECK = re.compile(r"<!--\s*doc-lattice", re.IGNORECASE)
 
 
 @dataclass(frozen=True, slots=True)
@@ -247,24 +251,29 @@ def refuse_double_hyphen(raw_meta: str, source: Path, *, first_body_line: int) -
 
 
 def detect_misplaced_envelope(text: str) -> bool:
-    """Report whether an untracked document carries the comment opener where it will not be read.
+    """Report whether a document carries the comment opener where it will not be read as one.
 
-    Two stage on purpose. The substring pre-check is what every ordinary document pays, and the
+    Two stage on purpose. The regex pre-check is what every ordinary document pays, and the
     markdown-it parse runs only on the rare file that actually holds the sentinel, so a
     README quoting the syntax in a fenced example is answered correctly without charging every
-    other file for the parse.
+    other file for the parse. A line qualifies the same way line 1 of the file does: the exact
+    opener or one of the near-miss spellings `_OPENER_NEAR_MISS` accepts, since an author who
+    misplaced `<!--doc-lattice` or `<!-- DOC-LATTICE` meant the envelope just as plainly as one
+    who misplaced the exact spelling.
 
     Args:
-        text: The full file text of a document that opened no envelope.
+        text: The full file text of a document whose parse found no node, tracked or not: an
+            untracked file, or an id-less one whose declared metadata did not open an envelope.
 
     Returns:
-        True when a line stripping to the opener sits outside every code block.
+        True when a line matching the opener, exactly or by near miss, sits outside every code
+        block.
     """
-    if COMMENT_ENVELOPE_OPEN not in text:
+    if not _MISPLACED_PRECHECK.search(text):
         return False
     coded = code_block_line_spans(text)
     for number, line in enumerate(normalize_newlines(text).split("\n"), start=1):
-        if line.strip() != COMMENT_ENVELOPE_OPEN:
+        if not _OPENER_NEAR_MISS.fullmatch(line):
             continue
         if not any(start <= number <= end for start, end in coded):
             return True
@@ -349,12 +358,21 @@ def parse_document(text: str, source: Path) -> tuple[ParsedMeta, str]:
     ``--`` refusal is measured against the file's own line numbers, which only the split knows,
     and the fail-closed classification needs the envelope kind, which only the split derives.
 
+    A file whose parse found no node runs the misplaced-envelope scan over its body, whether that
+    is because it opened no envelope at all or because it opened a fence that declared no ``id``
+    (Jekyll frontmatter, say) ahead of a comment envelope the fence's own scan never reaches. A
+    tracked file never runs it: line 1's own scan already covers the comment kind, and a fence
+    that resolved to a node is not missing anything for the scan to find.
+
     Args:
         text: The full file text, already newline-normalized by ``discovery.decode_doc``.
         source: The discovered path, named in every diagnostic this raises.
 
     Returns:
-        The parse outcome and the document body after the envelope.
+        The parse outcome and the document body after the envelope. The outcome is
+        ``"misplaced-envelope"`` in place of ``"untracked"`` or ``"id-less"`` when the document,
+        or the body left after an untracked or id-less fence, carries the comment opener (or a
+        near-miss spelling of it) outside every code block.
 
     Raises:
         UnreadableDocError: If an opening delimiter has no closing delimiter, or the YAML
@@ -373,7 +391,10 @@ def parse_document(text: str, source: Path) -> tuple[ParsedMeta, str]:
             source,
             first_body_line=text[: parts.meta_start].count("\n") + 1,
         )
-    return parse_meta(parts.raw_meta, source, kind=parts.kind), parts.body
+    outcome = parse_meta(parts.raw_meta, source, kind=parts.kind)
+    if outcome.meta is None and detect_misplaced_envelope(parts.body):
+        return _MISPLACED, parts.body
+    return outcome, parts.body
 
 
 def _load_recording_reused_anchors(raw_meta: str) -> tuple[Any, bool]:

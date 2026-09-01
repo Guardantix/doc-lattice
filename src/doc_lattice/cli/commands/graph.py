@@ -4,7 +4,7 @@ from typing import Annotated
 
 import typer
 
-from ...check import ambiguous_edges, check_lattice
+from ...check import check_lattice
 from ...constants import VALID_GRAPH_FORMATS
 from ...render import to_dot, to_json, to_mermaid
 from ..errors import exit_on_project_error
@@ -36,15 +36,16 @@ def register_graph(app: typer.Typer) -> None:
         with exit_on_project_error(runtime):
             project = runtime.project(config)
             lattice = runtime.lattice(project)
+            statuses = check_lattice(lattice)
             stale = {
                 (status.source_id, status.target_id)
-                for status in check_lattice(lattice)
+                for status in statuses
                 if status.state == "STALE" and status.target_id is not None
             }
             ambiguous = {
                 (status.source_id, status.target_id)
-                for status in ambiguous_edges(lattice)
-                if status.target_id is not None
+                for status in statuses
+                if status.state == "AMBIGUOUS" and status.target_id is not None
             }
         if selection.format == "json":
             write_json(runtime, to_json(lattice, stale, ambiguous))

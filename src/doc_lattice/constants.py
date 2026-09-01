@@ -34,10 +34,11 @@ AUTHORITY_LADDER: tuple[Authority, ...] = ("exploratory", "derived", "binding")
 # What one discovered file's frontmatter turned out to be. "untracked" and "id-less" are the two
 # distinct ways a file is left out of the lattice, which a bare "no node" answer conflated: the
 # first is prose the engine has nothing to say about, the second is a metadata block that lost or
-# never had its `id`. "misplaced-envelope" is the third: an otherwise untracked file carrying the
-# comment opener somewhere other than line 1 and outside a code block, which is the "I put the
-# envelope after the H1 and the file silently vanished" hole. The load cache persists this so a
-# warm run replays the diagnostic a cold run emitted.
+# never had its `id`. "misplaced-envelope" is the third: an otherwise untracked or id-less file
+# carrying the comment opener (or a near-miss spelling of it) somewhere other than line 1 and
+# outside a code block, which is the "I put the envelope after the H1 (or after a Jekyll fence)
+# and the file silently vanished" hole. The load cache persists this so a warm run replays the
+# diagnostic a cold run emitted.
 FrontmatterDisposition = Literal["tracked", "untracked", "id-less", "misplaced-envelope"]
 VALID_FRONTMATTER_DISPOSITIONS: frozenset[str] = frozenset(get_args(FrontmatterDisposition))
 

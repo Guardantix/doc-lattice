@@ -23,7 +23,10 @@ class StatRecord(BaseModel):
 
 
 class CollisionMemberModel(BaseModel):
-    """The serialized form of one member of a slug-collision component."""
+    """The serialized form of one member of a slug-collision component.
+
+    ``line`` is a file line, envelope included, matching ``model.CollisionMember``.
+    """
 
     model_config = ConfigDict(extra="forbid")
 

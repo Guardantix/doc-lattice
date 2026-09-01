@@ -87,10 +87,14 @@ def render_statuses(
 def render_lint(console: Console, result: LintResult) -> None:
     """Render authority-lint findings to a Rich console.
 
+    Renders the ambiguous-target block first, then the authority-ladder findings, mirroring
+    render_impact and render_findings so lint's stdout ordering does not depend on its caller.
+
     Args:
         console: Destination console.
-        result: Authority-lint violations and skipped edges to render.
+        result: Authority-lint violations, ambiguous edges, and skipped edges to render.
     """
+    render_ambiguous(console, result.ambiguous)
     # soft_wrap on both prints: each violation and the skip summary are one record on one
     # line at any width, matching render_statuses. The summary carries no id or ref of its
     # own, but soft_wrap keeps every print in this renderer to the same record contract.

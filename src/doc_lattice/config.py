@@ -136,9 +136,11 @@ def load_config(config_path: Path | None, cwd: Path) -> ProjectConfig:
     except ValidationError as exc:
         raise ConfigError(_format_validation_error(exc, source)) from exc
 
-    # Required only when a config file was actually read. A zero-config run has no file to
-    # declare it in, and an engine of any version reading the same tree has none either, so
-    # there is no skew for the key to catch.
+    # Required only when a config file was actually read: a zero-config run has no file to
+    # carry the key, not no skew to catch. Skew lives in each section's `seen` hash, so a
+    # zero-config tree reconciled under 6.x will see nested-section edges report STALE under
+    # 7.0, not this ConfigError. Follow the v7 migration (fix AMBIGUOUS headings, then
+    # `reconcile --all`), or add a config with the key to get this loud guard instead.
     if source is not None and config.lattice_format is None:
         msg = (
             f"config {format_path_for_display(source)} does not declare "

@@ -853,11 +853,12 @@ def test_check_exits_one_on_an_ambiguous_edge_and_names_it_in_both_formats(tmp_p
 
     assert human.exit_code == 1
     assert payload.exit_code == 1
-    assert 'ambiguous with "Notes" (line 1), "Notes" (line 3)' in human.stdout
+    # File lines, envelope included: the two headings sit on lines 4 and 6 of up.md.
+    assert 'ambiguous with "Notes" (line 4), "Notes" (line 6)' in human.stdout
     edge = json.loads(payload.stdout)["edges"][0]
     assert edge["state"] == "AMBIGUOUS"
     assert edge["collision"] == [
-        {"label": "Notes", "line": 1},
-        {"label": "Notes", "line": 3},
+        {"label": "Notes", "line": 4},
+        {"label": "Notes", "line": 6},
     ]
     assert json.loads(payload.stdout)["summary"]["AMBIGUOUS"] == 1

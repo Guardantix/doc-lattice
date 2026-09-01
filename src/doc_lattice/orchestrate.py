@@ -136,8 +136,26 @@ def _report_misplaced_envelope(disposition: FrontmatterDisposition, path: Path) 
     )
 
 
+def _body_first_line(text: str, body: str) -> int:
+    """Return the 1-based file line that the body's first line occupies.
+
+    The parse returns the body as a verbatim suffix of the file text, so the prefix the envelope
+    consumed is what the two lengths differ by and its newline count is the offset. A BOM
+    carries no newline, and an untracked or envelope-free file hands back the whole text, which
+    lands on 1.
+
+    Args:
+        text: The decoded file text handed to the parse.
+        body: The verbatim body the parse returned for it.
+
+    Returns:
+        The file line number of body line 1.
+    """
+    return text[: len(text) - len(body)].count("\n") + 1
+
+
 def _load_uncached(project: ProjectConfig) -> Lattice:
-    """Today's cache-free load path, unchanged."""
+    """Today's cache-free load path, unchanged apart from deriving sections eagerly."""
     parsed: list[ParsedDoc] = []
     for path in discover_doc_paths(
         project.resolved_roots, project.config.ignore_globs, project.project_root
@@ -149,7 +167,8 @@ def _load_uncached(project: ProjectConfig) -> Lattice:
         _report_misplaced_envelope(outcome.disposition, path)
         if outcome.meta is None:
             continue
-        parsed.append(ParsedDoc(path=path, meta=outcome.meta, body=body))
+        sections = derive_file_sections(body, first_line=_body_first_line(text, body))
+        parsed.append(ParsedDoc(path=path, meta=outcome.meta, body=body, sections=sections))
     return build_lattice(parsed)
 
 
@@ -191,7 +210,11 @@ def _load_cached(
         _report_reused_anchors(outcome.reused_anchors, doc_path)
         _report_misplaced_envelope(outcome.disposition, doc_path)
         meta = outcome.meta
-        sections = derive_file_sections(body) if meta is not None else None
+        sections = (
+            derive_file_sections(body, first_line=_body_first_line(text, body))
+            if meta is not None
+            else None
+        )
         state.replace(
             rel_key,
             make_entry(result.data, outcome, body, sections, result.stat, current_root),

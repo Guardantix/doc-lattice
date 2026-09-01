@@ -230,5 +230,6 @@ def test_lint_names_an_ambiguous_target_in_human_and_json(tmp_path: Path):
         app, ["lint", "--config", str(tmp_path / ".doc-lattice.yml"), "--format", "json"]
     )
 
-    assert 'ambiguous with "Notes" (line 1), "Notes" (line 3)' in human.stdout
+    # File lines, envelope included: the two headings sit on lines 4 and 6 of up.md.
+    assert 'ambiguous with "Notes" (line 4), "Notes" (line 6)' in human.stdout
     assert json.loads(payload.stdout)["ambiguous"][0]["target_ref"] == "up#notes"

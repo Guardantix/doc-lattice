@@ -269,13 +269,7 @@ class _Slugger:
 
     def slug(self, text: str) -> str:
         """Return the next unique slug for heading content."""
-        base = github_slug(text)
-        result = base
-        while result in self._seen:
-            self._seen[base] += 1
-            result = f"{base}-{self._seen[base]}"
-        self._seen[result] = 0
-        return result
+        return self.slug_with_probes(text)[0]
 
     def slug_with_probes(self, text: str) -> tuple[str, tuple[str, ...]]:
         """Return the next unique slug for heading content and every candidate it examined."""

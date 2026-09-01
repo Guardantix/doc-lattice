@@ -666,10 +666,12 @@ That block is byte-for-byte what `init` writes with no flags, and a test holds t
 so what you read here is what you get rather than a paraphrase that drifts. `lattice_format` is
 required in any config file this engine reads, and `2` is the only value it currently accepts; a
 config file omitting it, or naming another value, is a config error that exits 2 with a pointer to
-CHANGELOG's migration section. A zero-config run (no `.doc-lattice.yml` anywhere) is exempt, since
-there is no file to declare the key in and nothing to skew against; the requirement binds exactly
-when a config file is read. `init` writes the key for you, as the leading line of the active block,
-which is why it is not commented out above. The other commented keys are the optional ones:
+CHANGELOG's migration section. A zero-config run (no `.doc-lattice.yml` anywhere) is exempt from
+that error, since there is no file to declare the key in -- not because there is nothing to skew
+against; see [CHANGELOG.md](https://github.com/Guardantix/doc-lattice/blob/main/CHANGELOG.md)'s
+7.0.0 migration for what a zero-config upgrade from 6.x sees instead. `init` writes the key for
+you, as the leading line of the active block, which is why it is not commented out above. The
+other commented keys are the optional ones:
 `ignore_globs` lists paths to skip within the roots, `cache_key` and `cache_trust_stat` are the
 opt-in load cache described below, and `linear_team` names the team the `linear` query targets.
 Uncomment what you need; `docs_roots` is the only other active key the generated file writes, and

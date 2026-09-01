@@ -11,8 +11,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ### Migration
 
 `.doc-lattice.yml` must now declare `lattice_format: 2`. A config file that omits the key is
-refused with a pointer to this section; a zero-config run (no `.doc-lattice.yml` anywhere) is
-unaffected, since there is no file to declare it in. Three steps:
+refused with a pointer to this section. A zero-config run (no `.doc-lattice.yml` anywhere) gets
+no such refusal, since there is no file to declare the key in, but a tree reconciled under 6.x
+still hits step 3 below: nested-section edges report STALE, not a `lattice_format` error. The
+same steps 2 and 3 apply, or create `.doc-lattice.yml` with `lattice_format: 2` for the explicit
+guard. Three steps:
 
 1. Add `lattice_format: 2` to `.doc-lattice.yml`, as the first key. doc-lattice 7 refuses to run
    without it, and every earlier release refuses to run with it, so the two never operate on the

@@ -2,7 +2,13 @@
 
 from collections.abc import Set as AbstractSet
 
-from .model import CollisionMember, Lattice, TargetId
+from .model import (
+    CollisionMember,
+    Lattice,
+    TargetId,
+    collision_members_json,
+    format_collision_members,
+)
 
 
 def _ambiguous_components(lattice: Lattice) -> list[tuple[TargetId, tuple[CollisionMember, ...]]]:
@@ -81,8 +87,7 @@ def _ambiguous_lines(lattice: Lattice, prefix: str) -> list[str]:
         One line per ambiguous target, ordered by target ref.
     """
     return [
-        f"{prefix} ambiguous {target_id.as_ref()}: "
-        + ", ".join(f'"{member.label}" (line {member.line})' for member in members)
+        f"{prefix} ambiguous {target_id.as_ref()}: " + format_collision_members(members)
         for target_id, members in _ambiguous_components(lattice)
     ]
 
@@ -242,7 +247,7 @@ def to_json(
     ambiguous_targets = [
         {
             "target_id": target_id.as_ref(),
-            "members": [{"label": m.label, "line": m.line} for m in members],
+            "members": collision_members_json(members),
         }
         for target_id, members in _ambiguous_components(lattice)
     ]

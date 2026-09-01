@@ -4,7 +4,7 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 
 from .constants import EDGE_STATES, EdgeState
-from .model import CollisionMember, Edge, Lattice, TargetId
+from .model import CollisionMember, Edge, Lattice, TargetId, collision_members_json
 from .resolve import cached_target_hash
 
 
@@ -74,9 +74,7 @@ def ambiguous_json(statuses: Sequence[EdgeStatus]) -> list[dict]:
             "source_id": status.source_id,
             "target_ref": status.target_ref,
             "target_id": status.target_id.as_ref() if status.target_id else None,
-            "collision": [
-                {"label": member.label, "line": member.line} for member in status.collision
-            ],
+            "collision": collision_members_json(status.collision),
         }
         for status in statuses
         if status.state == "AMBIGUOUS"
@@ -124,9 +122,7 @@ def statuses_json(statuses: list[EdgeStatus], summary: Mapping[EdgeState, int]) 
                 "state": status.state,
                 "expected": status.expected,
                 "actual": status.actual,
-                "collision": [
-                    {"label": member.label, "line": member.line} for member in status.collision
-                ],
+                "collision": collision_members_json(status.collision),
             }
             for status in statuses
         ],

@@ -4,7 +4,7 @@ import typer
 
 from ...constants import VALID_REPORT_FORMATS
 from ...lint import lint_json, lint_lattice
-from ...report_render import render_ambiguous, render_lint
+from ...report_render import render_lint
 from ..errors import EXIT_FINDING, exit_on_project_error
 from ..github import write_annotations
 from ..options import ConfigOpt, IndentOpt, ReportFormatOpt
@@ -54,6 +54,5 @@ def register_lint(app: typer.Typer) -> None:
                 ),
             )
         else:
-            render_ambiguous(runtime.stdout, result.ambiguous)
             render_lint(runtime.stdout, result)
         raise typer.Exit(EXIT_FINDING if result.violations else 0)

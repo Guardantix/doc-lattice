@@ -7,7 +7,7 @@ from .hashing import content_hash
 from .markdown_compat import strip_heading_anchor
 from .model import Lattice, Node, TargetId
 from .path_utils import format_path_for_display
-from .sections import section_text, split_body_lines
+from .sections import section_text_from_lines, split_body_lines
 
 
 def target_content(lattice: Lattice, target_id: TargetId) -> str:
@@ -47,8 +47,9 @@ def target_content(lattice: Lattice, target_id: TargetId) -> str:
     node = node_for_path(lattice, location.path)
     if location.kind == "file":
         return node.body
-    section = section_text(node.body, location.span)
-    chain = ancestor_headings(lattice, target_id)
+    lines = split_body_lines(node.body)
+    section = section_text_from_lines(lines, location.span)
+    chain = _ancestor_heading_lines(lattice, target_id, lines)
     return "\n".join([*chain, section]) if chain else section
 
 
@@ -66,10 +67,32 @@ def ancestor_headings(lattice: Lattice, target_id: TargetId) -> tuple[str, ...]:
     Returns:
         The ancestors' heading source lines, outermost first, empty for a top-level section.
     """
+    if not lattice.ancestors.get(target_id, ()):
+        return ()
+    lines = split_body_lines(node_for_path(lattice, lattice.index[target_id].path).body)
+    return _ancestor_heading_lines(lattice, target_id, lines)
+
+
+def _ancestor_heading_lines(
+    lattice: Lattice, target_id: TargetId, lines: list[str]
+) -> tuple[str, ...]:
+    """Return each enclosing section's heading line from already-split body lines.
+
+    Shared by ``ancestor_headings`` and ``target_content`` so a caller that already has
+    the body split into lines, such as ``target_content``, does not pay for a second
+    split of the same body.
+
+    Args:
+        lattice: The built lattice.
+        target_id: A resolved section TargetId present in ``lattice.index``.
+        lines: The owning body's lines, as returned by ``split_body_lines``.
+
+    Returns:
+        The ancestors' heading source lines, outermost first, empty for a top-level section.
+    """
     ancestors = lattice.ancestors.get(target_id, ())
     if not ancestors:
         return ()
-    lines = split_body_lines(node_for_path(lattice, lattice.index[target_id].path).body)
     return tuple(
         strip_heading_anchor(lines[lattice.index[ancestor].span[0] - 1]) for ancestor in ancestors
     )

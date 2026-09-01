@@ -1094,3 +1094,38 @@ def test_a_tracked_file_quoting_the_other_spelling_stays_tracked():
 
 def test_the_substring_precheck_short_circuits_a_file_without_the_sentinel():
     assert detect_misplaced_envelope("# Title\n\nordinary prose\n") is False
+
+
+def test_an_untracked_fence_followed_by_a_comment_envelope_is_misplaced():
+    text = "---\ntitle: x\n---\n<!-- doc-lattice\nid: y\n-->\n# Doc\n"
+
+    outcome, body = parse_document(text, Path("a.md"))
+
+    assert outcome.disposition == "misplaced-envelope"
+    assert outcome.meta is None
+    assert body == "<!-- doc-lattice\nid: y\n-->\n# Doc\n"
+
+
+def test_an_id_less_fence_followed_by_a_comment_envelope_is_misplaced():
+    text = "---\nnote: hi\n---\n<!-- doc-lattice\nid: y\n-->\n# Doc\n"
+
+    outcome, _body = parse_document(text, Path("a.md"))
+
+    assert outcome.disposition == "misplaced-envelope"
+    assert outcome.meta is None
+
+
+def test_a_near_miss_opener_below_line_one_is_also_a_misplacement():
+    text = "# Title\n\n<!-- DOC-LATTICE\nid: pc\n-->\n"
+
+    outcome, _body = parse_document(text, Path("a.md"))
+
+    assert outcome.disposition == "misplaced-envelope"
+
+
+def test_a_near_miss_opener_inside_a_code_block_stays_untracked():
+    text = "# Title\n\n```markdown\n<!--doc-lattice\nid: pc\n-->\n```\n"
+
+    outcome, _body = parse_document(text, Path("a.md"))
+
+    assert outcome.disposition == "untracked"
