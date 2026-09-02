@@ -207,15 +207,48 @@ def _validate_init_flags(docs_roots: tuple[str, ...], linear_team: str | None) -
         raise ValidationError(msg)
 
 
+def _stat_mode(path: Path, *, follow_symlinks: bool = True) -> int | None:
+    """Read one entry's mode, or None when the filesystem reports it is not there.
+
+    ``Path.exists`` is not a stable predicate across the versions this package supports: 3.13
+    re-raises an ``OSError`` outside its ignored set, while 3.14 delegates to ``os.path.exists``
+    and answers False for every one of them. A guard built on it therefore crashes with an
+    uncoded error on one interpreter and silently scaffolds the nested config it exists to
+    prevent on the other, against the same filesystem. ``Path.stat`` raises on both, which is why
+    the decision is made here rather than delegated, and why it is made once: every guard in this
+    module reads absence the same way, and ``_ABSENT_ERRNOS`` is the whole of that rule.
+
+    What each caller does with an unanswerable filesystem differs, so that half stays with the
+    caller: the bare ``OSError`` is re-raised for it to classify.
+
+    Args:
+        path: The entry to stat.
+        follow_symlinks: False to stat the link itself, so a dangling symlink still reads as
+            present. The repository marker and the component walk want that; a configuration
+            file does not.
+
+    Returns:
+        The entry's ``st_mode``, or None when the entry is absent.
+
+    Raises:
+        OSError: If the filesystem refused for any reason other than absence.
+    """
+    try:
+        return path.stat(follow_symlinks=follow_symlinks).st_mode
+    except OSError as exc:
+        if exc.errno in _ABSENT_ERRNOS:
+            return None
+        raise
+
+
 def _docs_root_mode(root: str, candidate: Path) -> int | None:
     """Read one docs root's mode, refusing to answer when the filesystem cannot.
 
-    The same stat decision ``_walk_entry_mode`` makes, and it shares that function's
-    ``_ABSENT_ERRNOS`` reasoning, but not its diagnostic: the ancestor walk's refusal explains
-    that it could not tell whether this directory sits inside a configured lattice, which is a
-    sentence about a question this caller is not asking. What is unanswerable here is which
-    ``link_sources`` selector shape the root takes, and the message has to say so or it sends a
-    reader after the wrong file.
+    The absence rule is ``_stat_mode``'s; only the diagnostic is this function's. The ancestor
+    walk's refusal explains that it could not tell whether this directory sits inside a
+    configured lattice, which is a sentence about a question this caller is not asking. What is
+    unanswerable here is which ``link_sources`` selector shape the root takes, and the message
+    has to say so or it sends a reader after the wrong file.
 
     Args:
         root: The ``--docs-root`` value as written, for the diagnostic.
@@ -230,10 +263,8 @@ def _docs_root_mode(root: str, candidate: Path) -> int | None:
         InitPersistenceError: If the root can be neither confirmed nor ruled out.
     """
     try:
-        return candidate.stat().st_mode
+        return _stat_mode(candidate)
     except OSError as exc:
-        if exc.errno in _ABSENT_ERRNOS:
-            return None
         error = InitPersistenceError(
             f"cannot determine what --docs-root {format_path_for_display(root)} is: {exc}. That "
             "answer decides the link_sources selector written for it, so init refuses to "
@@ -242,32 +273,6 @@ def _docs_root_mode(root: str, candidate: Path) -> int | None:
         )
         copy_exception_notes(error, exc)
         raise error from exc
-
-
-def _component_mode(component: Path) -> int | None:
-    """Read one intermediate component's mode, or None when it is simply not there.
-
-    Narrower than ``_docs_root_mode`` on purpose. This is only reached once that function has
-    already refused every errno that means the filesystem could not answer for the whole path,
-    and a component of a path stat could not classify can only be present or absent, so an
-    absence here is the ordinary one rather than a question left open.
-
-    Args:
-        component: One component of a docs root, resolved against the invocation directory.
-
-    Returns:
-        The component's ``st_mode``, or None when it does not exist.
-
-    Raises:
-        OSError: If the filesystem refused for any reason other than absence, which
-            ``_docs_root_mode`` has already ruled out for this path.
-    """
-    try:
-        return component.stat(follow_symlinks=False).st_mode
-    except OSError as exc:
-        if exc.errno in _ABSENT_ERRNOS:
-            return None
-        raise
 
 
 def _first_blocking_component(root: str, cwd: Path) -> tuple[str, str] | None:
@@ -309,14 +314,54 @@ def _first_blocking_component(root: str, cwd: Path) -> tuple[str, str] | None:
     for part in Path(root).parts:
         current = current / part
         walked.append(part)
-        if current.is_symlink():
-            return "/".join(walked), "symlink"
-        mode = _component_mode(current)
+        # One no-follow stat answers both questions: a link reports as a link rather than as
+        # whatever it points at, and anything left that is not a directory is the file case.
+        # An unanswerable filesystem is left to propagate: `_docs_root_mode` has already refused
+        # every errno that is not an absence for this path, so a component of it can only be
+        # present or absent, and an absence here is the ordinary one rather than a question left
+        # open.
+        mode = _stat_mode(current, follow_symlinks=False)
         if mode is None:
             break
+        if stat.S_ISLNK(mode):
+            return "/".join(walked), "symlink"
         if not stat.S_ISDIR(mode):
             return "/".join(walked), "file"
     return None
+
+
+def _blocked_root_error(root: str, blocker: tuple[str, str]) -> ValidationError:
+    """Explain why a root standing behind a symlink or a regular file gets no selector.
+
+    The subject names what the reader has to repair and the refusal names why the link gate
+    stops there, so the two vary together with what was found rather than independently.
+
+    Args:
+        root: The ``--docs-root`` value as written.
+        blocker: The blocking component and its kind, from ``_first_blocking_component``.
+
+    Returns:
+        The rejection to raise.
+    """
+    component, kind_found = blocker
+    displayed = format_path_for_display(root)
+    if kind_found == "symlink":
+        # A blocker that is the root itself can only be a symlink: a component the walk would
+        # reach through would have made `stat` answer, and this function would not have been
+        # called. That is why only this arm distinguishes the root from an ancestor.
+        subject = (
+            f"--docs-root {displayed} is a symlink"
+            if component == root
+            else f"--docs-root {displayed} sits under the symlink "
+            f"{format_path_for_display(component)}"
+        )
+        refusal = "which the link gate never enters"
+    else:
+        subject = (
+            f"--docs-root {displayed} sits under the file {format_path_for_display(component)}"
+        )
+        refusal = "which is not a directory the link gate can descend into"
+    return ValidationError(f"{subject}, {refusal}, so a link_sources selector cannot reach it")
 
 
 def _link_selectors(docs_roots: tuple[str, ...], cwd: Path) -> tuple[str, ...]:
@@ -359,24 +404,7 @@ def _link_selectors(docs_roots: tuple[str, ...], cwd: Path) -> tuple[str, ...]:
         if mode is None:
             blocker = _first_blocking_component(root, cwd)
             if blocker is not None:
-                component, kind_found = blocker
-                displayed = format_path_for_display(root)
-                # A blocker that is the root itself can only be a symlink: a component the walk
-                # would reach through would have made `stat` answer, so this branch would not
-                # have been taken.
-                subject = (
-                    f"--docs-root {displayed} is a symlink"
-                    if component == root
-                    else f"--docs-root {displayed} sits under the {kind_found} "
-                    f"{format_path_for_display(component)}"
-                )
-                refusal = (
-                    "which the link gate never enters"
-                    if kind_found == "symlink"
-                    else "which is not a directory the link gate can descend into"
-                )
-                msg = f"{subject}, {refusal}, so a link_sources selector cannot reach it"
-                raise ValidationError(msg)
+                raise _blocked_root_error(root, blocker)
             selector = selector_for_root(root, "directory")
         else:
             try:
@@ -425,14 +453,9 @@ def _walk_unreadable_error(path: Path, cause: OSError) -> InitPersistenceError:
 def _walk_entry_mode(path: Path, *, follow_symlinks: bool = True) -> int | None:
     """Read one walk entry's mode, refusing to answer when the filesystem cannot.
 
-    ``Path.exists`` is not a stable predicate across the versions this package supports: 3.13
-    re-raises an ``OSError`` outside its ignored set, while 3.14 delegates to ``os.path.exists``
-    and answers False for every one of them. A guard built on it therefore crashes with an
-    uncoded error on one interpreter and silently scaffolds the nested config it exists to
-    prevent on the other, against the same filesystem. ``Path.stat`` raises on both, which is why
-    the decision is made here rather than delegated: ``_ABSENT_ERRNOS`` means the entry is not
-    there, and anything else means the question is unanswerable, which becomes a coded refusal
-    rather than a guess in either direction.
+    The absence rule is ``_stat_mode``'s, and this adds the ancestor walk's consequence for the
+    other half: a question the filesystem leaves unanswerable becomes a coded refusal rather
+    than a guess in either direction, because guessing either way is wrong here.
 
     Args:
         path: The entry to stat.
@@ -446,10 +469,8 @@ def _walk_entry_mode(path: Path, *, follow_symlinks: bool = True) -> int | None:
         InitPersistenceError: If the entry can be neither confirmed nor ruled out.
     """
     try:
-        return path.stat(follow_symlinks=follow_symlinks).st_mode
+        return _stat_mode(path, follow_symlinks=follow_symlinks)
     except OSError as exc:
-        if exc.errno in _ABSENT_ERRNOS:
-            return None
         raise _walk_unreadable_error(path, exc) from exc
 
 

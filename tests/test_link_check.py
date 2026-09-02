@@ -6,6 +6,7 @@ import sys
 from pathlib import Path
 
 import pytest
+from link_gate_helpers import _requires_permission_enforcement, _write
 
 from doc_lattice import link_check as link_check_module
 from doc_lattice.error_types import ConfigError, UnreadableDocError
@@ -39,20 +40,9 @@ def check_repository_links(root: Path) -> list[str]:
     return [_line(finding) for finding in check_links(root, _root_sources(root))]
 
 
-_requires_permission_enforcement = pytest.mark.skipif(
-    os.name != "posix" or os.geteuid() == 0, reason="needs a POSIX filesystem that enforces modes"
-)
-
-
 def _links(markdown: str) -> list:
     """Return the links of a Markdown string, for tests that drive the scan from text."""
     return _links_in(_PARSER.parse(markdown))
-
-
-def _write(root: Path, name: str, text: str) -> None:
-    path = root / name
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(text, encoding="utf-8")
 
 
 def _only_message(root: Path) -> str:

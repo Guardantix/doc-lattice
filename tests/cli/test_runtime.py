@@ -29,6 +29,8 @@ from doc_lattice.cli.runtime import (
 from doc_lattice.config import Config, ProjectConfig
 from doc_lattice.model import Lattice
 
+from .helpers import _RefusingStream
+
 
 def _runtime(stdout: StringIO, stderr: StringIO, cwd: Path, *, no_color: bool) -> CliRuntime:
     def load_config(_config: Path | None, seen_cwd: Path) -> ProjectConfig:
@@ -419,22 +421,6 @@ def test_lattice_restores_the_previous_showwarning_after_a_loader_exception(tmp_
 
     assert len(seen) == 1
     assert seen[0] is not sentinel
-
-
-class _RefusingStream(StringIO):
-    """A stream that refuses the first ``refusals`` writes, recording how many were attempted."""
-
-    def __init__(self, error: OSError | ValueError, refusals: int | None = None):
-        super().__init__()
-        self.error = error
-        self.refusals = refusals
-        self.attempts = 0
-
-    def write(self, s: str) -> int:
-        self.attempts += 1
-        if self.refusals is None or self.attempts <= self.refusals:
-            raise self.error
-        return super().write(s)
 
 
 def _refusing_runtime(stream: _RefusingStream, tmp_path: Path, load_lattice: LatticeLoader):

@@ -15,6 +15,22 @@ from doc_lattice.model import Lattice
 runner = CliRunner()
 
 
+class _RefusingStream(StringIO):
+    """A stream that refuses the first ``refusals`` writes, recording how many were attempted."""
+
+    def __init__(self, error: OSError | ValueError, refusals: int | None = None):
+        super().__init__()
+        self.error = error
+        self.refusals = refusals
+        self.attempts = 0
+
+    def write(self, s: str) -> int:
+        self.attempts += 1
+        if self.refusals is None or self.attempts <= self.refusals:
+            raise self.error
+        return super().write(s)
+
+
 def _contents(console: Console) -> str:
     """Return everything written to a console backed by a StringIO."""
     stream = console.file

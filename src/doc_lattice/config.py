@@ -10,7 +10,7 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_valida
 
 from .constants import LATTICE_FORMAT_VERSION
 from .error_types import ConfigError
-from .link_selectors import validate_link_selector
+from .link_selectors import selector_defect_message, validate_link_selector
 from .path_utils import format_path_for_display, safe_resolve
 from .validation_render import format_validation_error
 from .yaml_boundary import YAML_LOAD_ERRORS, SafeYamlLoader
@@ -94,7 +94,7 @@ class Config(BaseModel):
             try:
                 validate_link_selector(entry)
             except ValueError as exc:
-                msg = f"link_sources entry {format_path_for_display(entry)} {exc}"
+                msg = selector_defect_message(entry, exc)
                 raise ValueError(msg) from exc
         return value
 
