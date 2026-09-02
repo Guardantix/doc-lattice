@@ -1266,6 +1266,16 @@ def test_init_escapes_a_metacharacter_in_a_root(tmp_path: Path, monkeypatch):
     assert "link_sources:\n  - notes [[]draft]/**/*.md\n" in _written_config(tmp_path)
 
 
+def test_init_derives_the_selector_from_a_nested_root_nobody_has_created(
+    tmp_path: Path, monkeypatch
+):
+    # The ordinary absence the literal selector is written for, spelled deeply enough that the
+    # component walk has to stop at the first missing name rather than read a refusal into it.
+    monkeypatch.chdir(tmp_path)
+    assert runner.invoke(app, ["init", "--docs-root", "docs/guides"]).exit_code == 0
+    assert "link_sources:\n  - docs/guides/**/*.md\n" in _written_config(tmp_path)
+
+
 def test_init_derives_the_selector_from_a_symlinked_roots_resolved_path(
     tmp_path: Path, monkeypatch
 ):
@@ -1278,14 +1288,14 @@ def test_init_derives_the_selector_from_a_symlinked_roots_resolved_path(
     assert "link_sources:\n  - real/**/*.md\n" in _written_config(tmp_path)
 
 
-def _assert_rejected_unfollowable_root(result, tmp_path: Path, root: str) -> None:
+def _assert_rejected_linked_root(result, tmp_path: Path, subject: str) -> None:
     # Not `_assert_rejected_before_any_write`: that helper asserts the directory holds only
     # `.git`, and each of these cases has to create the symlink it is rejecting.
     assert result.exit_code == 2
     assert result.stdout == ""
     assert result.stderr.startswith("error (VALIDATION_ERROR): ")
-    assert format_path_for_display(root) in result.stderr
-    assert "is a symlink init cannot follow" in result.stderr
+    assert subject in result.stderr
+    assert "which the link gate never enters" in result.stderr
     assert not (tmp_path / ".doc-lattice.yml").exists()
 
 
@@ -1300,7 +1310,7 @@ def test_init_rejects_a_docs_root_that_is_a_symlink_loop(tmp_path: Path, monkeyp
 
     result = runner.invoke(app, ["init", "--docs-root", "a"])
 
-    _assert_rejected_unfollowable_root(result, tmp_path, "a")
+    _assert_rejected_linked_root(result, tmp_path, "--docs-root 'a' is a symlink")
 
 
 def test_init_rejects_a_dangling_symlink_docs_root(tmp_path: Path, monkeypatch):
@@ -1311,20 +1321,49 @@ def test_init_rejects_a_dangling_symlink_docs_root(tmp_path: Path, monkeypatch):
 
     result = runner.invoke(app, ["init"])
 
-    _assert_rejected_unfollowable_root(result, tmp_path, "docs")
+    _assert_rejected_linked_root(result, tmp_path, "--docs-root 'docs' is a symlink")
+
+
+def test_init_rejects_a_docs_root_under_a_dangling_symlink(tmp_path: Path, monkeypatch):
+    # The link need not be the last component. Statting the whole path cannot see this one: both
+    # `stat` and `lstat` report ENOENT for `linked/child` exactly as they would for a root nobody
+    # has created, so the components are tested one at a time from the invocation directory down.
+    (tmp_path / "linked").symlink_to(tmp_path / "no-such-directory", target_is_directory=True)
+    monkeypatch.chdir(tmp_path)
+
+    result = runner.invoke(app, ["init", "--docs-root", "linked/child"])
+
+    _assert_rejected_linked_root(
+        result, tmp_path, "--docs-root 'linked/child' sits under the symlink 'linked'"
+    )
+
+
+def test_init_rejects_a_docs_root_under_a_working_symlink(tmp_path: Path, monkeypatch):
+    # The same refusal where the link resolves perfectly well: `real/child` is simply not there
+    # yet, and repairing nothing would help, because the walk still would not enter `linked`.
+    (tmp_path / "real").mkdir()
+    (tmp_path / "linked").symlink_to(tmp_path / "real", target_is_directory=True)
+    monkeypatch.chdir(tmp_path)
+
+    result = runner.invoke(app, ["init", "--docs-root", "linked/child"])
+
+    _assert_rejected_linked_root(
+        result, tmp_path, "--docs-root 'linked/child' sits under the symlink 'linked'"
+    )
 
 
 def test_init_rejects_a_docs_root_reached_through_a_looping_parent(tmp_path: Path, monkeypatch):
-    # Here `lstat` cannot traverse the path either, so the link is not the final component but
-    # one further up. It is still a link standing between the walk and the root, so it is still
-    # not the absence the literal selector is written for.
+    # A loop reached through a parent component, where statting the whole path raises ELOOP
+    # rather than ENOENT. The component walk answers it the same way, at the link itself.
     (tmp_path / "a").symlink_to(tmp_path / "b")
     (tmp_path / "b").symlink_to(tmp_path / "a")
     monkeypatch.chdir(tmp_path)
 
     result = runner.invoke(app, ["init", "--docs-root", "a/docs"])
 
-    _assert_rejected_unfollowable_root(result, tmp_path, "a/docs")
+    _assert_rejected_linked_root(
+        result, tmp_path, "--docs-root 'a/docs' sits under the symlink 'a'"
+    )
 
 
 def test_init_rejects_a_root_that_resolves_outside_the_project(tmp_path: Path, monkeypatch):
