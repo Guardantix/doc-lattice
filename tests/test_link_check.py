@@ -1137,3 +1137,38 @@ def test_an_unscannable_directory_is_a_config_error(tmp_path):
             select_link_sources(tmp_path, ["docs/**/*.md"])
     finally:
         locked.chmod(0o755)
+
+
+def test_adjacent_recursive_segments_match_the_same_set_as_one(tmp_path):
+    _write(tmp_path, "a/x/y/z/b.md", "# b\n")
+    _write(tmp_path, "a/b.md", "# b\n")
+    _write(tmp_path, "a/x/b.md", "# b\n")
+
+    stacked = select_link_sources(tmp_path, ["a/**/**/**/b.md"])
+    single = select_link_sources(tmp_path, ["a/**/b.md"])
+
+    assert _relative(tmp_path, stacked) == _relative(tmp_path, single)
+    assert _relative(tmp_path, single) == ["a/b.md", "a/x/b.md", "a/x/y/z/b.md"]
+
+
+def test_recursive_segments_scan_each_directory_a_bounded_number_of_times(tmp_path, monkeypatch):
+    depth = 12
+    parts = [f"d{n}" for n in range(1, depth + 1)]
+    _write(tmp_path, "/".join(parts) + "/leaf.md", "# leaf\n")
+
+    calls = 0
+    real_scan = link_check_module._scan
+
+    def counting_scan(directory):
+        nonlocal calls
+        calls += 1
+        return real_scan(directory)
+
+    monkeypatch.setattr(link_check_module, "_scan", counting_scan)
+
+    selected = select_link_sources(tmp_path, ["**/**/**/**/**/*.md"])
+
+    directories = depth + 1  # the chain plus the project root
+    segments = 6  # five recursive segments plus the trailing "*.md"
+    assert calls <= directories * segments
+    assert _relative(tmp_path, selected) == ["/".join(parts) + "/leaf.md"]

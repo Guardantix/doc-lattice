@@ -666,16 +666,16 @@ def select_link_sources(project_root: Path, selectors: Sequence[str]) -> list[Pa
         except ValueError as exc:
             msg = f"link_sources entry {format_path_for_display(entry)} {exc}"
             raise ConfigError(msg) from exc
-        found: set[str] = set()
-        _walk(root, "", segments, 0, found)
-        if not found:
+        state = _WalkState(found=set(), visited=set())
+        _walk(root, "", segments, 0, state)
+        if not state.found:
             msg = (
                 f"link_sources entry {format_path_for_display(entry)} matches no file under "
                 f"the project root {format_path_for_display(root)}; the links command refuses "
                 "to run over a selector that selects nothing"
             )
             raise ConfigError(msg)
-        matched.update(found)
+        matched.update(state.found)
     seen: set[Path] = set()
     sources: list[Path] = []
     for relative in sorted(matched):
@@ -727,32 +727,61 @@ def _join(prefix: str, name: str) -> str:
     return name if prefix == "" else f"{prefix}{SELECTOR_SEPARATOR}{name}"
 
 
+@dataclass(slots=True)
+class _WalkState:
+    """The mutable state one ``select_link_sources`` walk threads through ``_walk``.
+
+    ``found`` collects matched project-relative spellings. ``visited`` memoizes ``(prefix,
+    index)`` states already scanned, as the ``_walk`` docstring explains; it is created fresh
+    per selector, so one selector's memoization never suppresses a scan another selector needs.
+    """
+
+    found: set[str]
+    visited: set[tuple[str, int]]
+
+
 def _walk(
-    directory: Path, prefix: str, segments: tuple[str, ...], index: int, found: set[str]
+    directory: Path, prefix: str, segments: tuple[str, ...], index: int, state: _WalkState
 ) -> None:
     """Match ``segments[index:]`` beneath one directory, collecting project-relative spellings.
 
     A directory is a traversal node and never a match; only a non-directory entry can satisfy
     the last segment. ``**`` matches zero or more directories, so it is tried against the
     remaining segments here before descending with itself still current.
+
+    ``state.visited`` memoizes ``(prefix, index)`` states for the one selector this walk is
+    expanding. Adjacent ``**`` segments are valid grammar, and without memoization a directory
+    at depth d reached through k of them is scanned about C(d+k-1, k-1) times: the non-last
+    ``**`` branch both descends into each child directory at the same index and hands the same
+    directory to ``index + 1``, and those two spreads converge on the same ``(prefix, index)``
+    state from multiple call paths lower in the tree. Recording each state before it is scanned
+    bounds the whole walk to at most one scan per directory per segment index, and, as a direct
+    consequence, also removes the duplicate scan the non-last ``**`` branch used to perform on
+    its own directory when handing off to ``index + 1``. The bound does not change what is
+    found: revisiting a state a second time could only add matches the first visit already
+    added.
     """
+    key = (prefix, index)
+    if key in state.visited:
+        return
+    state.visited.add(key)
     segment = segments[index]
     last = index == len(segments) - 1
     entries = _scan(directory)
     if segment == RECURSIVE_SEGMENT:
         if not last:
-            _walk(directory, prefix, segments, index + 1, found)
+            _walk(directory, prefix, segments, index + 1, state)
         for entry in entries:
             if _is_directory(entry):
-                _walk(Path(entry.path), _join(prefix, entry.name), segments, index, found)
+                _walk(Path(entry.path), _join(prefix, entry.name), segments, index, state)
             elif last:
-                found.add(_join(prefix, entry.name))
+                state.found.add(_join(prefix, entry.name))
         return
     for entry in entries:
         if not segment_matches(entry.name, segment):
             continue
         if last:
             if not _is_directory(entry):
-                found.add(_join(prefix, entry.name))
+                state.found.add(_join(prefix, entry.name))
         elif _is_directory(entry):
-            _walk(Path(entry.path), _join(prefix, entry.name), segments, index + 1, found)
+            _walk(Path(entry.path), _join(prefix, entry.name), segments, index + 1, state)
