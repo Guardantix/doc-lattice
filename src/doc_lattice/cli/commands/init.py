@@ -15,6 +15,7 @@ from ...config import DEFAULT_CONFIG_NAME, declares_lattice_format
 from ...constants import LATTICE_FORMAT_VERSION
 from ...error_types import InitPersistenceError, ValidationError, copy_exception_notes
 from ...linear_query import is_valid_team_key
+from ...link_selectors import validate_link_selector
 from ...path_utils import format_path_for_display, safe_resolve
 from ...persistence import DestinationExistsError, atomic_create_bytes
 from ...scaffold import (
@@ -214,6 +215,13 @@ def _link_selectors(docs_roots: tuple[str, ...], cwd: Path) -> tuple[str, ...]:
     directory, so a selector written over the link would fail on every run. A root that does not
     exist yet takes the directory form of its literal spelling.
 
+    Every derived selector is then put through the same validator the config loader runs, and a
+    rejection is reported here rather than written. ``_validate_init_flags`` refuses the flag
+    spellings a reader can see are wrong, but it is not the whole grammar: a drive prefix is not
+    absolute on POSIX, and a resolved symlink target contributes path segments the flag never
+    carried. Writing such a selector would produce a config that every lattice-loading command
+    refuses at load, so ``init`` would exit 0 and leave the project unable to run.
+
     Args:
         docs_roots: The validated ``--docs-root`` values.
         cwd: The invocation directory the config is written into.
@@ -222,7 +230,8 @@ def _link_selectors(docs_roots: tuple[str, ...], cwd: Path) -> tuple[str, ...]:
         One selector per root, in root order.
 
     Raises:
-        ValidationError: If an existing root resolves outside the invocation directory.
+        ValidationError: If an existing root resolves outside the invocation directory, or if a
+            root's derived selector is one the ``link_sources`` grammar cannot express.
         InitPersistenceError: If a root can be neither confirmed nor ruled out.
     """
     project_root = cwd.resolve()
@@ -231,19 +240,28 @@ def _link_selectors(docs_roots: tuple[str, ...], cwd: Path) -> tuple[str, ...]:
         candidate = cwd / root
         mode = _walk_entry_mode(candidate)
         if mode is None:
-            selectors.append(selector_for_root(root, "directory"))
-            continue
+            selector = selector_for_root(root, "directory")
+        else:
+            try:
+                resolved = safe_resolve(candidate, project_root)
+            except ValueError as exc:
+                msg = (
+                    f"--docs-root {format_path_for_display(root)} resolves outside the project "
+                    f"directory {format_path_for_display(cwd)}; a link_sources selector cannot "
+                    "reach it"
+                )
+                raise ValidationError(msg) from exc
+            kind: RootKind = "file" if stat.S_ISREG(mode) else "directory"
+            selector = selector_for_root(resolved.relative_to(project_root).as_posix(), kind)
         try:
-            resolved = safe_resolve(candidate, project_root)
+            validate_link_selector(selector)
         except ValueError as exc:
             msg = (
-                f"--docs-root {format_path_for_display(root)} resolves outside the project "
-                f"directory {format_path_for_display(cwd)}; a link_sources selector cannot "
-                "reach it"
+                f"--docs-root {format_path_for_display(root)} becomes the link_sources selector "
+                f"{format_path_for_display(selector)}, which {exc}"
             )
             raise ValidationError(msg) from exc
-        kind: RootKind = "file" if stat.S_ISREG(mode) else "directory"
-        selectors.append(selector_for_root(resolved.relative_to(project_root).as_posix(), kind))
+        selectors.append(selector)
     return tuple(selectors)
 
 

@@ -1297,3 +1297,31 @@ def test_init_rejects_a_root_with_a_backslash(tmp_path: Path, monkeypatch):
     result = runner.invoke(app, ["init", "--docs-root", "docs\\guides"])
     _assert_rejected_before_any_write(result, tmp_path)
     assert "backslash" in result.stderr
+
+
+def test_init_rejects_a_root_whose_derived_selector_the_grammar_rejects(
+    tmp_path: Path, monkeypatch
+):
+    # A drive prefix is not absolute on POSIX, so the flag-level relative-path check passes it
+    # through. The derived selector is one the config loader refuses, so writing it would leave
+    # a project whose every lattice-loading command exits 2 after an init that exited 0.
+    monkeypatch.chdir(tmp_path)
+    result = runner.invoke(app, ["init", "--docs-root", "C:foo"])
+    _assert_rejected_before_any_write(result, tmp_path)
+    assert "C:foo" in result.stderr
+    assert "is absolute" in result.stderr
+
+
+def test_init_rejects_an_existing_directory_whose_selector_the_grammar_rejects(
+    tmp_path: Path, monkeypatch
+):
+    # The same defect reached through the resolved-path branch rather than the literal one.
+    (tmp_path / "C:foo").mkdir()
+    monkeypatch.chdir(tmp_path)
+    result = runner.invoke(app, ["init", "--docs-root", "C:foo"])
+    # Not `_assert_rejected_before_any_write`: the root has to exist for this branch to run, so
+    # the directory holds more than `.git`. The write is still what is ruled out.
+    assert result.exit_code == 2
+    assert not (tmp_path / ".doc-lattice.yml").exists()
+    assert "C:foo" in result.stderr
+    assert "is absolute" in result.stderr
