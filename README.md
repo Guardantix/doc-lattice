@@ -868,14 +868,17 @@ ordinary branch names and are accepted.
 
 Having no Git requirement is a fact about running `init`, not about following its output. `init`
 and every lattice-loading command work outside a worktree, and outside one `init` still writes
-`.doc-lattice.yml` and prints the same complete recipe, because the three blocks are fixed text
-rather than anything it discovers there. What the recipe installs is Git and GitHub artifacts
-throughout: the `.gitignore` block needs a repository to be ignored in, the workflow needs a
-GitHub repository to run in, and [enabling the gates](#enabling-the-gates) needs a clone for
+`.doc-lattice.yml` and prints the recipe in full, because the blocks are rendered rather than read
+out of the directory. The one thing any of them takes from local Git state is the workflow's
+trigger branch, and outside a worktree the probe finds nothing and falls back exactly as it does
+in a checkout with no remote. What the recipe installs is Git and GitHub artifacts throughout:
+the `.gitignore` block needs a repository to be ignored in, the workflow needs a GitHub
+repository to run in, and [enabling the gates](#enabling-the-gates) needs a clone for
 `pre-commit` to write its hook into, so `pre-commit install` exits 1 outside one. Every run
-therefore names that precondition on stderr, once, ahead of the blocks. The line is unconditional
-and byte-identical under `--print-only`, because the precondition is on the repository you install
-the blocks into rather than on the directory the run happened in, and
+therefore names that precondition on stderr, once, and on a terminal it precedes the blocks; the
+blocks themselves stay on stdout, so a redirected run preserves no such ordering. The line is
+unconditional and byte-identical under `--print-only`, because the precondition is on the
+repository you install the blocks into rather than on the directory the run happened in, and
 [`--print-only`](#the-pre-commit-snippet-every-install) deliberately carries no directory
 precondition of its own.
 
