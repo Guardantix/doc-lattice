@@ -1,0 +1,5 @@
+# doc-lattice configuration. See https://github.com/Guardantix/doc-lattice
+lattice_format: 2
+docs_roots: []
+link_sources:
+  - "*.md"

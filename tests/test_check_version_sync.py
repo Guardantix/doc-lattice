@@ -399,17 +399,3 @@ def test_every_policy_document_is_a_maintained_document():
     names = set(_repository_documents())
     assert set(PIN_POLICY.manifest) <= names
     assert set(PIN_POLICY.historical) <= names
-
-
-def test_maintained_documents_matches_the_doc_links_definition(tmp_path):
-    """One definition of "maintained document", asserted rather than assumed.
-
-    The two guards cannot import each other -- neither script is on the other's path -- so the
-    selection is spelled twice and pinned here instead.
-    """
-    doc_links = run_path(str(_ROOT / "scripts" / "check_doc_links.py"))
-    assert maintained_documents(_ROOT) == doc_links["maintained_documents"](_ROOT)
-    # The real tree carries no staged directory and no ``.md`` directory, so agreeing on it
-    # alone would leave the parts of the selection that differ untested.
-    _write_selection_fixture(tmp_path)
-    assert maintained_documents(tmp_path) == doc_links["maintained_documents"](tmp_path)

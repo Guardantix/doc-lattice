@@ -27,7 +27,7 @@ jobs:
       - run: uv run --no-sync ty check src/ scripts/
       - run: uv run --no-sync python scripts/check_typing_boundaries.py src/
       - run: uv run --no-sync python scripts/check_version_sync.py
-      - run: uv run --no-sync python scripts/check_doc_links.py
+      - run: uv run --no-sync doc-lattice links --format github
       # On a pull request the guard also compares the committed baseline against the base branch,
       # which is the half that catches a renderer and its baseline updated in the same commit. The
       # base ref is fetched shallowly because `actions/checkout` leaves only the merge commit.

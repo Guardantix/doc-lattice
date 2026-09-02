@@ -73,13 +73,10 @@ PIN_POLICY = PinPolicy(manifest=PIN_MANIFEST, historical=HISTORICAL_PIN_DOCS)
 def maintained_documents(repo_root: Path) -> list[Path]:
     """Return the maintained documents: the sorted root Markdown files.
 
-    This is the same mechanical stand-in for the CLAUDE.md ownership list that
-    ``scripts/check_doc_links.py`` takes as its link sources. It is spelled here rather than
-    imported from there for two reasons: the suites load both scripts with ``runpy.run_path``,
-    which leaves ``sys.path`` untouched, so an import that resolves under
-    ``python scripts/<name>.py`` would not resolve under test; and importing that module would
-    pull ``markdown_it`` and a constructed parser into a gate that only reads install pins.
-    ``test_check_version_sync.py`` asserts the two selections stay identical.
+    Spelled here rather than imported, on purpose: this gate reads install pins and nothing
+    else, and importing the link gate's selection would pull the Markdown parser into it. The
+    repository's link sources are declared in ``.doc-lattice.yml`` and checked by
+    ``doc-lattice links``; this selection is this script's own and is held only by its test.
 
     Args:
         repo_root: The repository root.

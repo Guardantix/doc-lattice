@@ -338,8 +338,9 @@ def github_ids_for_texts(texts: Iterable[str]) -> list[str]:
 
     The one owner of the pinned document-order collision rule, shared by both heading
     inventories rather than reimplemented per caller. ``github_heading_ids`` delegates here
-    for section identity; ``scripts/check_doc_links.py`` feeds it the heading texts of its
-    own link-target inventory, whose grammar is deliberately wider than ``Heading`` describes.
+    for section identity, and ``full_heading_inventory`` allocates through the same slugger for
+    the link gate in ``link_check``, whose inventory is deliberately wider than ``Heading``
+    describes.
     Sharing the primitive is what keeps a fragment resolving to the same id the engine would
     assign wherever both inventories see the same heading.
 
