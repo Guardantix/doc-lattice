@@ -592,20 +592,22 @@ def check_links(project_root: Path, sources: Sequence[Path]) -> list[LinkFinding
     """Return one finding per unresolvable link, raw anchor, or unreadable source.
 
     The sources are normally what ``select_link_sources`` returned, but this upholds its own
-    contract whatever the caller passed: the list is sorted (a copy, the input is untouched) and
-    every source is containment-checked immediately before it is read.
+    contract whatever the caller passed: the list is sorted by project-relative POSIX spelling
+    (a copy, the input is untouched) and every source is containment-checked immediately before
+    it is read.
 
     Args:
         project_root: The project root every source and target must stay inside.
         sources: Unresolved paths under ``project_root``, one per document to check.
 
     Returns:
-        Findings in document order, sources sorted by path. Within a document, link findings
-        come first, then raw HTML anchors, and the two are stable-sorted by line, so a link and an
-        anchor on one line keep that relative order. A source that leaves the project root, or
-        that will not decode or parse, carries no line, since all of those are refused before
-        their destinations are read. An empty list means every relative destination and heading
-        fragment resolves.
+        Findings in document order, sources sorted by the project-relative POSIX spelling each
+        finding is reported under, which is the order ``select_link_sources`` returns. Within a
+        document, link findings come first, then raw HTML anchors, and the two are stable-sorted
+        by line, so a link and an anchor on one line keep that relative order. A source that
+        leaves the project root, or that will not decode or parse, carries no line, since all of
+        those are refused before their destinations are read. An empty list means every relative
+        destination and heading fragment resolves.
 
     Raises:
         UnreadableDocError: If the filesystem refused to resolve, inspect, or read a source or a
@@ -616,8 +618,14 @@ def check_links(project_root: Path, sources: Sequence[Path]) -> list[LinkFinding
     root = project_root.resolve()
     cache: dict[Path, frozenset[str]] = {}
     findings: list[LinkFinding] = []
-    for document in sorted(sources):
-        relative = document.relative_to(root).as_posix()
+    # Ordered by the spelling each finding is reported under, which is what a reader scans and
+    # what select_link_sources already sorted by. Sorting the paths themselves would order by
+    # their parts instead: `a/b.md` compares below `a.md`, because the comparison never reaches
+    # the `.md` and `/` that separate them as strings, so the findings for a nested document
+    # would print above a sibling the selector listed first. A case-folding platform loses
+    # code-point order outright, since Path comparison normalizes case there.
+    ordered = sorted((document.relative_to(root).as_posix(), document) for document in sources)
+    for relative, document in ordered:
         if _escapes_by_symlink(document, root):
             # Refused before the read, so an outside file is neither decoded nor quoted back
             # through a diagnostic. Reported rather than skipped, because a configured source
@@ -688,7 +696,7 @@ def select_link_sources(project_root: Path, selectors: Sequence[str]) -> list[Pa
             msg = f"link_sources entry {format_path_for_display(entry)} {exc}"
             raise ConfigError(msg) from exc
         state = _WalkState(found=set(), visited=set())
-        _walk(root, "", segments, 0, state)
+        _walk(root, segments, state)
         if not state.found:
             msg = (
                 f"link_sources entry {format_path_for_display(entry)} matches no file under "
@@ -750,7 +758,7 @@ def _join(prefix: str, name: str) -> str:
 
 @dataclass(slots=True)
 class _WalkState:
-    """The mutable state one ``select_link_sources`` walk threads through ``_walk``.
+    """The mutable state one ``select_link_sources`` selector accumulates in ``_walk``.
 
     ``found`` collects matched project-relative spellings. ``visited`` memoizes ``(prefix,
     index)`` states already scanned, as the ``_walk`` docstring explains; it is created fresh
@@ -761,59 +769,110 @@ class _WalkState:
     visited: set[tuple[str, int]]
 
 
-def _walk(  # noqa: PLR0913
-    directory: Path,
-    prefix: str,
-    segments: tuple[str, ...],
-    index: int,
-    state: _WalkState,
-    entries: list[os.DirEntry[str]] | None = None,
-) -> None:
-    """Match ``segments[index:]`` beneath one directory, collecting project-relative spellings.
+@dataclass(frozen=True, slots=True)
+class _Frame:
+    """One pending ``_walk`` step: match ``segments[index]`` against ``directory``.
+
+    ``prefix`` is the project-relative spelling ``directory`` was reached by, and is what the
+    memo is keyed on rather than the path, since a spelling is what the walk returns.
+    ``entries`` is a listing carried from the frame that already scanned this directory, and is
+    None for every step that descends into a directory nothing has read yet.
+    """
+
+    directory: Path
+    prefix: str
+    index: int
+    entries: list[os.DirEntry[str]] | None = None
+
+
+def _recursive_frames(
+    frame: _Frame, entries: list[os.DirEntry[str]], last: bool, state: _WalkState
+) -> list[_Frame]:
+    """Expand one ``**`` frame: collect its file matches and return the steps it spawns.
+
+    ``**`` matches zero or more directories, so the frame both takes each child directory with
+    itself still current and hands its own directory to ``index + 1``. The handoff is the one
+    step that stays in the same directory, so it is the one that can reuse the listing its frame
+    already scanned, and reusing it is what keeps the common ``docs/**/*.md`` shape at one
+    ``scandir`` per directory instead of two. It is returned last precisely so the caller's stack
+    pops it first and it claims its state before any child of this directory can.
+
+    Args:
+        frame: The frame being expanded, whose segment is ``**``.
+        entries: That directory's listing.
+        last: Whether ``**`` is the selector's final segment.
+        state: The per-selector matches, mutated in place.
+
+    Returns:
+        The frames to push, children first and the ``index + 1`` handoff last.
+
+    Raises:
+        ConfigError: If the filesystem refuses to inspect an entry.
+    """
+    frames: list[_Frame] = []
+    for entry in entries:
+        if _is_directory(entry):
+            frames.append(_Frame(Path(entry.path), _join(frame.prefix, entry.name), frame.index))
+        elif last:
+            state.found.add(_join(frame.prefix, entry.name))
+    if not last:
+        frames.append(_Frame(frame.directory, frame.prefix, frame.index + 1, entries))
+    return frames
+
+
+def _walk(root: Path, segments: tuple[str, ...], state: _WalkState) -> None:
+    """Match ``segments`` beneath ``root``, collecting project-relative spellings into ``state``.
 
     A directory is a traversal node and never a match; only a non-directory entry can satisfy
-    the last segment. ``**`` matches zero or more directories, so it is tried against the
-    remaining segments here before descending with itself still current.
+    the last segment.
 
-    ``state.visited`` memoizes ``(prefix, index)`` states for the one selector this walk is
-    expanding. Adjacent ``**`` segments are valid grammar, and without memoization a directory
-    at depth d reached through k of them is scanned about C(d+k-1, k-1) times: the non-last
-    ``**`` branch both descends into each child directory at the same index and hands the same
+    The walk keeps its own stack rather than the interpreter's, because its depth is the
+    repository's and not the selector's: a ``**`` over a tree about a thousand directories deep
+    would otherwise exhaust the recursion limit and end this mandatory gate in a traceback rather
+    than a diagnostic or a clean run. Nothing else in the engine has that ceiling, since
+    ``discovery`` walks with ``rglob`` and ``reconcile_transaction`` with ``os.walk``, both of
+    which iterate. Popping from the end keeps the traversal depth-first, which is what lets a
+    ``**`` handoff claim its state ahead of the children pushed beneath it.
+
+    ``state.visited`` memoizes ``(prefix, index)`` states already scanned, for the one selector
+    this walk is expanding. Adjacent ``**`` segments are valid grammar, and without memoization a
+    directory at depth d reached through k of them is scanned about C(d+k-1, k-1) times: the
+    non-last ``**`` branch both takes each child directory at the same index and hands the same
     directory to ``index + 1``, and those two spreads converge on the same ``(prefix, index)``
-    state from multiple call paths lower in the tree. Recording each state before it is scanned
-    bounds the whole walk to at most one scan per directory per segment index. What it removes
-    is a state being re-entered from several call paths, not the handoff to ``index + 1``
-    itself: that lands on a different key, so the bound stays directories times segments rather
-    than directories alone. The bound does not change what is found: revisiting a state a second
-    time could only add matches the first visit already added.
+    state from many paths lower in the tree. Claiming each state as it is popped bounds the whole
+    walk to at most one scan per directory per segment index. What it removes is a state being
+    reached from several paths, not the handoff to ``index + 1`` itself: that lands on a
+    different key, so the bound stays directories times segments rather than directories alone.
+    The bound does not change what is found: reaching a state a second time could only add
+    matches the first arrival already added, and ``found`` is a set the caller sorts.
 
-    ``entries`` is that handoff's own listing, passed rather than re-read. The handoff is the one
-    recursion that stays in the same directory, so it is the one that can reuse what this frame
-    already scanned, and reusing it is what keeps the common ``docs/**/*.md`` shape at one
-    ``scandir`` per directory instead of two. Every other recursion descends and passes None.
+    Args:
+        root: The resolved project root the selector is anchored to.
+        segments: The validated selector segments.
+        state: The per-selector matches and memo, mutated in place.
+
+    Raises:
+        ConfigError: If the filesystem refuses to scan a directory or inspect an entry.
     """
-    key = (prefix, index)
-    if key in state.visited:
-        return
-    state.visited.add(key)
-    segment = segments[index]
-    last = index == len(segments) - 1
-    if entries is None:
-        entries = _scan(directory)
-    if segment == RECURSIVE_SEGMENT:
-        if not last:
-            _walk(directory, prefix, segments, index + 1, state, entries)
-        for entry in entries:
-            if _is_directory(entry):
-                _walk(Path(entry.path), _join(prefix, entry.name), segments, index, state)
-            elif last:
-                state.found.add(_join(prefix, entry.name))
-        return
-    for entry in entries:
-        if not segment_matches(entry.name, segment):
+    pending = [_Frame(root, "", 0)]
+    while pending:
+        frame = pending.pop()
+        key = (frame.prefix, frame.index)
+        if key in state.visited:
             continue
-        if last:
-            if not _is_directory(entry):
-                state.found.add(_join(prefix, entry.name))
-        elif _is_directory(entry):
-            _walk(Path(entry.path), _join(prefix, entry.name), segments, index + 1, state)
+        state.visited.add(key)
+        segment = segments[frame.index]
+        last = frame.index == len(segments) - 1
+        entries = _scan(frame.directory) if frame.entries is None else frame.entries
+        if segment == RECURSIVE_SEGMENT:
+            pending.extend(_recursive_frames(frame, entries, last, state))
+            continue
+        for entry in entries:
+            if not segment_matches(entry.name, segment):
+                continue
+            if last:
+                if not _is_directory(entry):
+                    state.found.add(_join(frame.prefix, entry.name))
+            elif _is_directory(entry):
+                spelling = _join(frame.prefix, entry.name)
+                pending.append(_Frame(Path(entry.path), spelling, frame.index + 1))

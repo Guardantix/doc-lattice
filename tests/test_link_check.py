@@ -1,6 +1,8 @@
 """Tests for the Markdown link gate engine."""
 
+import errno
 import os
+import sys
 from pathlib import Path
 
 import pytest
@@ -777,6 +779,33 @@ def test_messages_are_ordered_by_document_then_by_link(tmp_path):
     assert messages[2].startswith("'ZULU.md'")
 
 
+def test_document_order_is_the_spelling_order_not_the_path_order(tmp_path):
+    # Path ordering compares parts, so sorting the paths themselves puts `a/b.md` above `a.md`:
+    # the comparison decides on `a` against `a.md` and never reaches the `/` and `.` that order
+    # the spellings. The findings have to arrive in the order select_link_sources promises and
+    # a reader scans, so the sort is keyed on the project-relative spelling.
+    _write(tmp_path, "a.md", "# a\n\n[x](MISSING-A.md)\n")
+    _write(tmp_path, "a/b.md", "# b\n\n[x](MISSING-B.md)\n")
+
+    selected = select_link_sources(tmp_path, ["**/*.md"])
+    findings = check_links(tmp_path, selected)
+
+    assert _relative(tmp_path, selected) == ["a.md", "a/b.md"]
+    assert [finding.path for finding in findings] == ["a.md", "a/b.md"]
+
+
+def test_findings_keep_spelling_order_whatever_order_the_caller_passed(tmp_path):
+    # check_links upholds the order on its own, so a caller that hands it an arbitrary list
+    # gets the same document order the selector would have produced.
+    _write(tmp_path, "a.md", "# a\n\n[x](MISSING-A.md)\n")
+    _write(tmp_path, "a/b.md", "# b\n\n[x](MISSING-B.md)\n")
+    reversed_sources = [tmp_path.resolve() / "a" / "b.md", tmp_path.resolve() / "a.md"]
+
+    findings = check_links(tmp_path, reversed_sources)
+
+    assert [finding.path for finding in findings] == ["a.md", "a/b.md"]
+
+
 def test_uppercase_markdown_suffix_is_still_fragment_checked(tmp_path):
     # GitHub renders any case of the suffix as Markdown, so a case-sensitive suffix test would
     # accept a dead anchor on GUIDE.MD -- the silent skip this gate exists to prevent.
@@ -1072,6 +1101,28 @@ def test_a_trailing_recursive_segment_matches_every_file_beneath(tmp_path):
         "docs/a.md",
         "docs/deep/b.txt",
     ]
+
+
+def test_a_tree_deeper_than_the_recursion_limit_is_walked(tmp_path):
+    # The walk's depth is the repository's, not the selector's, so a `**` over a deep tree must
+    # not spend the interpreter's stack. `discovery` walks with rglob and `reconcile_transaction`
+    # with os.walk, both iterative; before this walk kept its own stack it was the one place in
+    # the engine where a deep checkout ended a mandatory gate in a traceback.
+    depth = sys.getrecursionlimit() + 50
+    directory = tmp_path
+    for _ in range(depth):
+        directory = directory / "d"
+        try:
+            directory.mkdir()
+        except OSError as exc:
+            if exc.errno != errno.ENAMETOOLONG:
+                raise
+            pytest.skip("the filesystem refuses a path this deep")
+    (directory / "deep.md").write_text("# deep\n", encoding="utf-8")
+
+    selected = select_link_sources(tmp_path, ["**/*.md"])
+
+    assert _relative(tmp_path, selected) == ["/".join(["d"] * depth) + "/deep.md"]
 
 
 def test_contained_aliases_are_deduplicated_by_resolved_target_keeping_the_first_sorted(tmp_path):
