@@ -995,10 +995,10 @@ baseline depends on. The order is:
    its entire run while any edge is ambiguous, so skipping this step makes step 3 exit 2 without
    writing anything.
 3. Run `doc-lattice reconcile --all`.
-4. Run `check` and `lint`, and resolve whatever they still report. The baseline clears STALE and
-   UNRECONCILED edges and nothing else: `reconcile` skips BROKEN edges by design, `check` exits 1
-   on them all the same, and neither command touches a lint finding. Anything left standing here
-   is what the gate refuses in step 6.
+4. Run `check`, `lint`, and `links`, and resolve whatever they still report. The baseline clears
+   STALE and UNRECONCILED edges and nothing else: `reconcile` skips BROKEN edges by design,
+   `check` exits 1 on them all the same, and neither command touches a lint finding or a dead
+   link. Anything left standing here is what the gates refuse in step 6.
 5. Enable the gates with the two commands above.
 6. Stage and commit the reconcile-only diff. All three hooks run on it and pass, which is also
    how you confirm activation worked.

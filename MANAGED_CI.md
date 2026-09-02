@@ -25,9 +25,9 @@ installation.
 - The reconcile-artifact `.gitignore` lines and the pre-commit hooks that plain `init` prints
   alongside the workflow. [README.md](README.md#ordinary-offline-setup) owns what those blocks are
   and where each one goes; this recipe assumes you install them as it describes.
-- `.github/workflows/doc-lattice.yml`, the offline check and lint gate that plain `init` prints.
-  You own it, and it runs only `check` and `lint`, so it neither requires nor receives
-  `LINEAR_API_KEY`.
+- `.github/workflows/doc-lattice.yml`, the offline drift, ladder, and link gate that plain `init`
+  prints. You own it, and it runs only `check`, `lint`, and `links`, so it neither requires nor
+  receives `LINEAR_API_KEY`.
 - `.github/workflows/doc-lattice-linear.yml`, the trusted Linear gate. Plain `init` does not print
   this one, so this document supplies it in full below.
 - A `doc-lattice-linear` GitHub environment whose deployment allow list is exactly the `main`
@@ -312,19 +312,19 @@ precondition buys you and what the step does not promise are owned by
 [RECONCILE.md](RECONCILE.md).
 
 Enabling the gates is not initial-adoption-only, and it belongs here rather than in step 1. Step 1
-left the pasted pre-commit block inert. Activate it once the baseline is in hand and `check` and
-`lint` both come back clean, and before you commit the reconcile diff. A BROKEN edge survives the
-baseline and still exits 1, so activating with one outstanding blocks that commit:
+left the pasted pre-commit block inert. Activate it once the baseline is in hand and `check`,
+`lint`, and `links` all come back clean, and before you commit the reconcile diff. A BROKEN edge
+survives the baseline and still exits 1, so activating with one outstanding blocks that commit:
 
 ```bash
 uv tool install pre-commit
 uv tool run pre-commit install
 ```
 
-Committing that diff is then the first gated commit, and both hooks running on it is what shows
-the activation took. [README.md](README.md#enabling-the-gates) owns why this pair rather than
-`uvx pre-commit install`, what an established installation does instead, and why a commit that
-stages no Markdown does not confirm anything.
+Committing that diff is then the first gated commit, and all three hooks running on it is what
+shows the activation took. [README.md](README.md#enabling-the-gates) owns why this pair rather
+than `uvx pre-commit install`, what an established installation does instead, and why any commit
+confirms activation even though the `check` and `lint` hooks may report `Skipped`.
 
 ### 6. Verify by hand
 
