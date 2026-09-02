@@ -45,9 +45,14 @@ Existing installations keep working untouched: `link_sources` is optional for ev
 1. Upgrade first. Bump the pinned version in your hook entries and workflow, or upgrade the
    installed tool, before touching the config: the config parser is strict, and a `link_sources`
    key is a schema error to every release before this one.
-2. Add `link_sources` to `.doc-lattice.yml`, for example `link_sources: ['docs/**/*.md']`, or
-   run `init --print-only` from the new release and copy the key the generated config shows.
-   Every selector must match at least one file, or `links` exits 2.
+2. Add `link_sources` to `.doc-lattice.yml` by hand, one selector per `docs_roots` entry, which
+   is what `init` derives for a new project: a directory root becomes `root/**/*.md` and a file
+   root becomes the path itself, so the default single `docs` root gives
+   `link_sources: ['docs/**/*.md']`. No command will print it for you. `init` renders the config
+   only in the course of writing one, so `--print-only` prints the three blocks and no config at
+   all, and a plain `init` next to an existing `.doc-lattice.yml` reports the file and leaves it
+   untouched. Every selector must match at least one file, or `links` exits 2; the grammar is in
+   [Configuration](README.md#configuration).
 3. Then replace the pre-commit block and the workflow with the ones `init --print-only` prints.
    Copying the blocks before adding the key would make every gated commit exit 2.
 
