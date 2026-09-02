@@ -755,11 +755,12 @@ def _walk(
     ``**`` branch both descends into each child directory at the same index and hands the same
     directory to ``index + 1``, and those two spreads converge on the same ``(prefix, index)``
     state from multiple call paths lower in the tree. Recording each state before it is scanned
-    bounds the whole walk to at most one scan per directory per segment index, and, as a direct
-    consequence, also removes the duplicate scan the non-last ``**`` branch used to perform on
-    its own directory when handing off to ``index + 1``. The bound does not change what is
-    found: revisiting a state a second time could only add matches the first visit already
-    added.
+    bounds the whole walk to at most one scan per directory per segment index. What it removes
+    is a state being re-entered from several call paths, not the handoff to ``index + 1``
+    itself: that lands on a different key, so the directory is still scanned once there too,
+    which is why the bound is directories times segments rather than directories alone. The
+    bound does not change what is found: revisiting a state a second time could only add matches
+    the first visit already added.
     """
     key = (prefix, index)
     if key in state.visited:
