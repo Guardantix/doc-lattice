@@ -45,8 +45,12 @@ Reasons, recorded in AD-45:
 Selectors are project-relative, POSIX, and platform-independent:
 
 - `/` is the only separator. A backslash anywhere in a selector is a config error.
-- `*`, `?`, and `[seq]` match within one segment, case-sensitively by code point, and never
-  match `/`.
+- `*`, `?`, and bracket classes match within one segment, case-sensitively by code point, and
+  never match `/`. Bracket classes carry `fnmatch` semantics: ranges such as `[a-z]` and
+  negation as `[!seq]` are supported, and a `]` first in a class is literal. Each segment is
+  matched with `fnmatch.fnmatchcase`, which is what makes the grammar executable without a
+  parser of its own.
+- A `[` with no closing `]` is a config error, not a literal as `fnmatch` would treat it.
 - `**` is accepted only as a whole segment and matches zero or more directories.
 - Empty segments, `.` and `..` segments, an absolute or drive prefix, and a trailing slash are
   config errors naming the entry.
@@ -68,6 +72,17 @@ which suppresses scanning `OSError`s.
 - A directory the walk cannot scan is a config error carrying the directory and the OS error
   text. A gate that cannot see its inputs must not pass.
 - Hidden entries receive no special treatment.
+
+Which filesystem objects can become a source:
+
+- Ordinary directories are traversal nodes and never satisfy a selector by themselves. A selector
+  whose last segment matches only directories has matched nothing.
+- Regular files and leaf symlinks are candidate matches.
+- A contained symlink must ultimately identify a regular file. A dangling symlink, or one whose
+  target is a directory or a special file, is `UnreadableDocError`, exit 2.
+- A special file (FIFO, socket, device) matched directly is `UnreadableDocError`, exit 2. The
+  classification is made by `stat` without opening, because opening a special file can block
+  indefinitely.
 
 Ordering and deduplication: union the lexical matches across all selectors, sort by
 project-relative POSIX string, then walk that order checking containment. Every escaping spelling
@@ -113,8 +128,9 @@ are. Only the `path[:line]: ` envelope moves to the renderer; messages stay disp
 already neutralizing embedded paths, fragments, and destinations through
 `format_path_for_display`.
 
-Findings are ordered by source path, then line, with same-line findings in discovery order (links
-and raw anchors interleaved as today), never sorted by message.
+Findings are ordered by source path, then line. Same-line order is exactly the script's: link
+findings are collected first, then raw-anchor findings, and the list is stable-sorted by line, so
+a link and an anchor on one line keep that relative order. Nothing is sorted by message.
 
 ### 3.3 Heading inventory
 
@@ -129,8 +145,10 @@ is out of scope. The stale reference to `scripts/check_doc_links.py` in the
 - Content failures (undecodable bytes, a parser-rejected character reference): an exit-1 finding
   for that document, and the run continues. A target that cannot be decoded is a finding on the
   link.
-- `OSError` while opening a source or target: `UnreadableDocError`, exit 2. The gate could not
-  inspect its input.
+- Operational filesystem errors (`OSError`) during resolve, stat, or open of a source or a link
+  target: `UnreadableDocError`, exit 2. The gate could not inspect its input. A link target that
+  simply does not exist remains an exit-1 finding, and a scan failure during selection remains a
+  config error (2.3).
 - `RuntimeError` from `full_heading_inventory`: not caught. It signals a parser invariant
   failure, not bad content.
 
@@ -169,10 +187,12 @@ printed on success.
 
 ### 4.4 GitHub output
 
-Annotations go to stdout through the shared writer, one per finding, severity `error`, a fixed
-title. `Annotation` gains `line: int | None = None`, and `github_annotation` emits `line=N` only
-when present, so existing callers are byte-identical. A document-level finding omits the line;
-GitHub then attaches it at line 1, which is the closest representation workflow commands allow.
+Annotations go to stdout through the shared writer, one per finding, severity `error`, title
+`doc-lattice links`. `Annotation` gains `line: int | None = None` declared after `severity`, so
+the existing positional `severity` call sites keep working, and `github_annotation` emits
+`line=N` only when present, so existing callers are byte-identical. A document-level finding
+omits the line; GitHub then attaches it at line 1, which is the closest representation workflow
+commands allow.
 The renderer rejoins `LinkFinding.path` to the project root because the writer takes a `Path`.
 The writer's warning about paths GitHub will not attach applies unchanged.
 
@@ -180,14 +200,20 @@ The writer's warning about paths GitHub will not attach applies unchanged.
 
 ### 5.1 Selector derivation for `init`
 
-A pure scaffold helper turns a literal `--docs-root` value and its classification into a
-selector: it strips a leading `./` and trailing slashes, normalizes interior `//` and `/./`, maps
-`.` to the project root, escapes `*`, `?`, and `[` so a literal never becomes a pattern, then
+A pure scaffold helper turns a project-relative root path and its classification into a
+selector: it strips a leading `./` and trailing slashes, normalizes interior `//` and `/./`,
+encodes `*` as `[*]`, `?` as `[?]`, and `[` as `[[]` so a literal never becomes a pattern, then
 emits the literal itself for a file root and `root/**/*.md` for a directory root or a nonexistent
-root. The nonexistent case takes the directory form because the default root is created after
-`init`. A root the grammar cannot express, such as one containing a backslash, is an `init`
-validation error naming it. The `init` adapter classifies each root by stat and passes finished
-selectors to `render_config`; the scaffold module stays filesystem-free.
+root. Root `.` generates `**/*.md`. The nonexistent case takes the directory form because the
+default root is created after `init`. A root the grammar cannot express, such as one containing
+a backslash, is an `init` validation error naming it.
+
+The `init` adapter supplies the path the helper sees. For an existing root it is the resolved,
+contained project-relative path, not the literal flag value, because the checker never enters a
+symlinked directory (2.3) and a selector written over a symlinked root would fail on every run. A
+root that resolves outside the project is an `init` validation error. For a nonexistent root the
+lexical path is used. The adapter classifies each root by stat and passes finished selectors to
+`render_config`; the scaffold module stays filesystem-free.
 
 ### 5.2 `render_config`
 
@@ -293,7 +319,12 @@ RELEASING.md step 4 lists the config block among the surfaces the guard covers. 
 SECURITY.md, and ROADMAP.md need no edits. Historical CHANGELOG references stay untouched.
 `PIN_MANIFEST` stays at its current README count; no pinned snippet is added.
 
-## 9. Verification at handoff
+## 9. Plan notes
+
+- `tests/test_readme_contract.py` holds the mirrored generated config block and changes with it.
+- `ProjectConfig.config_path` defaults to `None` so existing construction sites keep working.
+
+## 10. Verification at handoff
 
 pytest, Ruff check and format check, `ty`, typing boundaries, version sync, `doc-lattice links`,
 migration rule, and `git diff --check`, with the coverage floor held.
