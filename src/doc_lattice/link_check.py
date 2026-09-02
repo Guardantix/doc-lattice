@@ -335,18 +335,22 @@ def _heading_ids(document: Path, cache: dict[Path, frozenset[str]]) -> frozenset
     the one inventory rather than a parallel copy of it. The module docstring records why it is
     wider than the addressable subset.
 
-    A target is read here rather than where the sources are, so it needs the same refusal the
-    sources have: a document that will not decode as UTF-8, or that carries a character reference
-    wider than the interpreter's integer-conversion limit, raises ``ValueError`` instead of
-    answering. That is a finding on the link, not a tool error, and it is not memoized because
-    nothing was learned. A read the filesystem refuses is the other class, and propagates.
+    A target is read here rather than where the sources are, so it needs a refusal of its own,
+    and bytes that will not decode as UTF-8 are the whole of it: the inventory parses blocks
+    only, so no character reference reaches an entity decoder and the parse itself has no content
+    failure to report. An undecodable target is a finding on the link rather than a tool error,
+    and it is not memoized, because nothing was learned to memoize.
+
+    That is the narrower half of the source refusal, deliberately: a source is parsed inline as
+    well, which is where a character reference wider than the interpreter's integer-conversion
+    limit makes the parser raise, and ``check_links`` owns that case for sources.
 
     Args:
         document: The Markdown target whose heading ids are wanted.
         cache: Heading ids already read, keyed by target path.
 
     Returns:
-        The target's link-target heading ids, or None when its content could not be read.
+        The target's link-target heading ids, or None when the file would not decode.
 
     Raises:
         UnreadableDocError: If the filesystem refused the read.
@@ -361,11 +365,7 @@ def _heading_ids(document: Path, cache: dict[Path, frozenset[str]]) -> frozenset
         except OSError as exc:
             msg = f"link target {format_path_for_display(document)} could not be read: {exc}"
             raise UnreadableDocError(msg, source=document) from exc
-        try:
-            records = full_heading_inventory(text)
-        except ValueError:
-            return None
-        cache[document] = frozenset(record.github_id for record in records)
+        cache[document] = frozenset(record.github_id for record in full_heading_inventory(text))
     return cache[document]
 
 
