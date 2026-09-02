@@ -10,6 +10,7 @@ from .commands.graph import register_graph
 from .commands.impact import register_impact
 from .commands.init import register_init
 from .commands.linear import register_linear
+from .commands.links import register_links
 from .commands.lint import register_lint
 from .commands.reconcile import register_reconcile
 from .runtime import RuntimeFactory, default_runtime
@@ -65,6 +66,7 @@ def create_app(*, runtime_factory: RuntimeFactory = default_runtime) -> typer.Ty
     register_graph(application)
     register_linear(application)
     register_init(application)
+    register_links(application)
     return application
 
 

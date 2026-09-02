@@ -486,6 +486,23 @@ def test_basic_commands_reject_unknown_format(lattice_dir: Path, monkeypatch, ar
     assert "json" in result.stderr
 
 
+def test_the_link_command_rejects_an_unknown_format_without_offering_json(
+    tmp_path: Path, monkeypatch
+):
+    # `links` joins the unknown-format family with the one domain that excludes json: nothing
+    # asked for a JSON schema of link findings, so the rejection must not offer one the command
+    # would then refuse. Run from an empty directory, which also pins that the format check
+    # happens before any project is loaded.
+    monkeypatch.chdir(tmp_path)
+    result = runner.invoke(app, ["links", "--format", "nonsense"])
+
+    assert result.exit_code == 2
+    assert "nonsense" in result.stderr
+    assert "human" in result.stderr
+    assert "github" in result.stderr
+    assert "json" not in result.stderr
+
+
 @pytest.mark.parametrize(
     "args",
     [
