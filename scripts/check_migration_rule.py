@@ -8,12 +8,12 @@ under time pressure -- is the moment nothing was checking it.
 
 What is covered
 ---------------
-Two groups of generated output, read where each one actually lives. The ``init`` blocks come from
-the renderers in ``doc_lattice.scaffold``, called here rather than copied, so the guard sees the
-same text an adopter is handed. The MANAGED_CI.md blocks are extracted from the document, because
-AD-32 retired the managed commands: no init mode regenerates the trusted Linear workflow or the
-``gh`` procedure, and the document is their only source. Together they are the surfaces step 4
-names.
+Two groups of generated output, read where each one actually lives. The ``init`` config and
+blocks come from the renderers in ``doc_lattice.scaffold``, called here rather than copied, so
+the guard sees the same text an adopter is handed. The MANAGED_CI.md blocks are extracted from
+the document, because AD-32 retired the managed commands: no init mode regenerates the trusted
+Linear workflow or the ``gh`` procedure, and the document is their only source. Together they are
+the surfaces step 4 names.
 
 Normalization
 -------------
@@ -48,6 +48,13 @@ one slashed name (``release/2.x``), and one YAML-1.1 boolean-like name (``on``, 
 must quote) -- which covers the shapes the renderer treats differently. It is an approximation and
 not exhaustive: a change confined to some branch shape outside the matrix is not seen.
 
+Config coverage
+---------------
+``render_config`` takes the derived ``link_sources`` selectors, so its output is a family too.
+The snapshot holds one shape per derivation branch: the default root, a file root, a root
+carrying a selector metacharacter, and several roots. It is an approximation in the same sense
+the branch matrix is.
+
 Execution point
 ---------------
 The required ``Code quality`` CI context is the authority. It runs both halves on a pull request,
@@ -74,7 +81,14 @@ import sys
 from dataclasses import dataclass
 from pathlib import Path
 
-from doc_lattice.scaffold import render_ci, render_gitignore, render_precommit
+from doc_lattice.scaffold import (
+    RootKind,
+    render_ci,
+    render_config,
+    render_gitignore,
+    render_precommit,
+    selector_for_root,
+)
 
 _REPO_ROOT = Path(__file__).resolve().parent.parent
 _BASELINE_PATH = _REPO_ROOT / "scripts" / "migration_baseline.json"
@@ -88,6 +102,16 @@ SENTINEL_VERSION = "0.0.0"
 
 # The representative default-branch matrix. See "Branch coverage" above.
 CI_BRANCHES: tuple[str, ...] = ("main", "master", "develop", "release/2.x", "on")
+
+# The representative docs-root matrix for the generated config, named by shape. The selector
+# derivation has branches for a file root, a metacharacter in a root, and several roots, and one
+# snapshot per branch is what makes a change to any of them visible.
+CONFIG_ROOTS: dict[str, tuple[tuple[str, RootKind], ...]] = {
+    "default": (("docs", "directory"),),
+    "file-root": (("SPEC.md", "file"),),
+    "metacharacter-root": (("notes [draft]", "directory"),),
+    "multiple-roots": (("design", "directory"), ("lore", "directory")),
+}
 
 _VERSION_HEADING = re.compile(r"^##\s*\[(?P<version>\d+\.\d+\.\d+)\]", re.MULTILINE)
 _PINNED_REF = re.compile(r"(?<![A-Za-z0-9._-])doc-lattice==\d+\.\d+\.\d+(?![A-Za-z0-9._+-])")
@@ -253,6 +277,10 @@ def compute_surfaces(managed_ci_text: str) -> dict[str, str]:
         "init.gitignore": render_gitignore(),
         "init.precommit": render_precommit(SENTINEL_VERSION),
     }
+    for name, roots in CONFIG_ROOTS.items():
+        docs_roots = tuple(root for root, _ in roots)
+        selectors = tuple(selector_for_root(root, kind) for root, kind in roots)
+        surfaces[f"init.config[{name}]"] = render_config(docs_roots, selectors, None)
     for branch in CI_BRANCHES:
         surfaces[f"init.ci[{branch}]"] = render_ci(SENTINEL_VERSION, default_branch=branch)
     surfaces["managed-ci.linear-workflow"] = normalize_pins(_published_workflow(managed_ci_text))
