@@ -103,9 +103,9 @@ Do pass `--default-branch main`, and read the branch back off stderr: the run pr
 triggers on branch main (--default-branch)`. Without the flag `init` takes the trigger branch from
 the local `origin/HEAD`, which is cached state, and a target that is stale but still exists in the
 clone cannot be told from a current one without the network. The offline workflow would then gate
-a branch this repository has moved off, leaving `check` and `lint` absent from `main` while every
-readback in step 3 and step 6, which look only at the Linear gate, still comes back exactly as
-documented. Naming the branch costs nothing here, because this recipe is pinned to `main`
+a branch this repository has moved off, leaving `check`, `lint`, and `links` absent from `main`
+while every readback in step 3 and step 6, which look only at the Linear gate, still comes back
+exactly as documented. Naming the branch costs nothing here, because this recipe is pinned to `main`
 throughout and step 3 stops outright on a repository whose default branch is anything else.
 
 `--default-branch` reached `init` in 5.0 alongside this recipe, and the pin above carries it. If

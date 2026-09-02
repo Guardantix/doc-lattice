@@ -420,20 +420,20 @@ counts always reflect every edge, so `check --only OK` on a drifting lattice sti
 still reports the drift in its verdict. One consequence is deliberate: under `--only`, the
 `summary` counts do not sum to the number of records in `edges`.
 
-### links
+### `links`
 
 `links` is the Markdown link gate, and it is deliberately not part of `check`. `check` is the
 lattice edge gate and its green is honest precisely because it makes no claim about Markdown
 links; folding link coverage into it would make that green a lie the first time it was wrong.
 
 Over every file `link_sources` selects, `links` reads each Markdown link destination and resolves
-the relative ones against the project root: the target must exist inside the project, and a
-`#fragment` on a Markdown target must name a heading GitHub assigns that id to. That inventory is
-wider than the addressable subset the lattice tracks, on purpose: setext headings, ATX headings
-indented one to three spaces, and headings nested in a list item or a block quote all render and
-resolve on GitHub, so failing a link to one would fail a correct link. Absolute and external
-destinations, image destinations, and the `?plain=1` source view's line fragments are out of
-scope and skipped.
+the relative ones against the document they are written in: the target must stay inside the
+project root, and a `#fragment` on a Markdown target must name a heading GitHub assigns that id
+to. That inventory is wider than the addressable subset the lattice tracks, on purpose: setext
+headings, ATX headings indented one to three spaces, and headings nested in a list item or a
+block quote all render and resolve on GitHub, so failing a link to one would fail a correct link.
+Absolute and external destinations, image destinations, and the `?plain=1` source view's line
+fragments are out of scope and skipped.
 
 Two gaps are declared rather than closed. A destination written as a raw HTML anchor is reported,
 not resolved, because an attribute value arrives without the normalization markdown-it applies to
@@ -1250,10 +1250,11 @@ advisory as before. A dependency's own category can appear here as well as doc-l
 `UserWarning`, because the escalation applies to every warning a run raises.
 
 **`duplicate id ...` exits 2.** A duplicate id makes the index incoherent, so loading the lattice
-fails with exit 2 (a tool error, distinct from the exit 1 that `check` and `lint` use for drift).
-The message names both registration sites so you can find the clash: either two files share an
-`id`, or two headings in one file resolve to the same anchor through equal markers or a marker/slug
-collision. Equal anchors in different files do not collide.
+fails with exit 2 (a tool error, distinct from the exit 1 that `check`, `lint`, and `links` use for
+drift, an authority inversion, or a dead link). The message names both registration sites so you
+can find the clash: either two files share an `id`, or two headings in one file resolve to the
+same anchor through equal markers or a marker/slug collision. Equal anchors in different files do
+not collide.
 
 ## Documentation
 
