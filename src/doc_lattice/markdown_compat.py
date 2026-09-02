@@ -152,6 +152,23 @@ _BLOCK_PARSER = MarkdownIt("commonmark")
 _BLOCK_PARSER.core.ruler.disable(["inline", "text_join"])
 
 
+def _normalize_for_parse(body: str) -> str:
+    """Put document text into the exact form every parse in this module is fed.
+
+    Line endings are normalized so source line numbers agree with the hashing model, and NUL is
+    replaced with U+FFFD as CommonMark requires. Both steps belong to feeding the pinned parser,
+    not to any one consumer, so every whole-document entry point here shares this one spelling:
+    a scan that skipped either would disagree with its siblings about what the document says.
+
+    Args:
+        body: Markdown document text.
+
+    Returns:
+        The normalized text to hand to a parser or a line scan.
+    """
+    return normalize_newlines(body).replace("\0", "\ufffd")
+
+
 def extract_headings(body: str) -> list[Heading]:
     """Extract the supported top-level ATX headings from Markdown.
 
@@ -165,7 +182,7 @@ def extract_headings(body: str) -> list[Heading]:
     Raises:
         RuntimeError: If the pinned parser returns a malformed heading token pair.
     """
-    normalized = normalize_newlines(body).replace("\0", "\ufffd")
+    normalized = _normalize_for_parse(body)
     tokens: list[Token] = []
     state = _SourceMapState(normalized, _PARSER, {}, tokens)
     headings: list[Heading] = []
@@ -224,7 +241,7 @@ def code_block_line_spans(body: str) -> list[tuple[int, int]]:
     Returns:
         ``(start, end)`` line ranges in document order, both bounds inclusive.
     """
-    normalized = normalize_newlines(body).replace("\0", "�")
+    normalized = _normalize_for_parse(body)
     spans: list[tuple[int, int]] = []
     for token in _BLOCK_PARSER.parse(normalized):
         if token.type in ("fence", "code_block") and token.map is not None:
@@ -276,18 +293,36 @@ def github_slug(text: str) -> str:
 
 
 class _Slugger:
-    """Document-order slug deduplicator matching github-slugger 2.0.0."""
+    """Document-order slug deduplicator matching github-slugger 2.0.0.
 
-    def __init__(self) -> None:
+    ``base_cache`` is an optional memo of the pure ``text -> base slug`` function, shared
+    between the sluggers a single document builds. The two inventories see the same heading
+    texts on any document written entirely in the addressable subset, which is the ordinary
+    case, so without it every such heading is slugged twice. The dedup state is deliberately
+    not shared: each inventory allocates ids over its own heading sequence.
+    """
+
+    def __init__(self, base_cache: dict[str, str] | None = None) -> None:
         self._seen: dict[str, int] = {}
+        self._base_cache = base_cache
 
     def slug(self, text: str) -> str:
         """Return the next unique slug for heading content."""
         return self.slug_with_probes(text)[0]
 
+    def _base(self, text: str) -> str:
+        """Return the base slug for heading content, reusing the shared memo when there is one."""
+        if self._base_cache is None:
+            return github_slug(text)
+        cached = self._base_cache.get(text)
+        if cached is None:
+            cached = github_slug(text)
+            self._base_cache[text] = cached
+        return cached
+
     def slug_with_probes(self, text: str) -> tuple[str, tuple[str, ...]]:
         """Return the next unique slug for heading content and every candidate it examined."""
-        base = github_slug(text)
+        base = self._base(text)
         result = base
         probes = [base]
         while result in self._seen:
@@ -355,7 +390,9 @@ def github_heading_ids(headings: list[Heading]) -> list[str]:
     return github_ids_for_texts(heading.text for heading in headings)
 
 
-def full_heading_inventory(body: str) -> list[SluggedHeading]:
+def full_heading_inventory(
+    body: str, base_cache: dict[str, str] | None = None
+) -> list[SluggedHeading]:
     """Return every heading a GitHub render assigns an id to, with its allocation trace.
 
     Wider than ``extract_headings`` on purpose: this reads the pinned parser's unrestricted
@@ -368,6 +405,8 @@ def full_heading_inventory(body: str) -> list[SluggedHeading]:
 
     Args:
         body: Markdown document text.
+        base_cache: Optional per-document memo of ``text -> base slug``, shared with the
+            addressable inventory so a heading both see is slugged once rather than twice.
 
     Returns:
         One record per heading in document order, ids deduplicated by the pinned
@@ -376,9 +415,9 @@ def full_heading_inventory(body: str) -> list[SluggedHeading]:
     Raises:
         RuntimeError: If the pinned parser returns a malformed heading token pair.
     """
-    normalized = normalize_newlines(body).replace("\0", "�")
+    normalized = _normalize_for_parse(body)
     tokens = _BLOCK_PARSER.parse(normalized)
-    slugger = _Slugger()
+    slugger = _Slugger(base_cache)
     inventory: list[SluggedHeading] = []
     for index, token in enumerate(tokens):
         if token.type != "heading_open":
@@ -446,7 +485,9 @@ def collision_components(
     return [tuple(members) for _root, members in sorted(grouped.items()) if len(members) > 1]
 
 
-def addressable_heading_inventory(headings: list[Heading]) -> list[SluggedHeading]:
+def addressable_heading_inventory(
+    headings: list[Heading], base_cache: dict[str, str] | None = None
+) -> list[SluggedHeading]:
     """Return the addressable TOC's own slug-allocation trace, one record per heading.
 
     ``full_heading_inventory`` traces allocation over the full CommonMark parse, which misses a
@@ -463,12 +504,14 @@ def addressable_heading_inventory(headings: list[Heading]) -> list[SluggedHeadin
 
     Args:
         headings: The addressable ATX subset from ``build_toc``, in document order.
+        base_cache: Optional per-document memo of ``text -> base slug``, shared with the full
+            inventory so a heading both see is slugged once rather than twice.
 
     Returns:
         One record per heading in document order, ids deduplicated by the pinned
         github-slugger collision rule.
     """
-    slugger = _Slugger()
+    slugger = _Slugger(base_cache)
     inventory: list[SluggedHeading] = []
     for heading in headings:
         github_id, probes = slugger.slug_with_probes(heading.text)

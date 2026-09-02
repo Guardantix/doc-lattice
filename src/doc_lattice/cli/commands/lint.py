@@ -2,10 +2,9 @@
 
 import typer
 
-from ...check import collision_file
+from ...check import ambiguity_annotation_message
 from ...constants import VALID_REPORT_FORMATS
 from ...lint import lint_json, lint_lattice
-from ...model import format_collision
 from ...report_render import render_lint
 from ..errors import EXIT_FINDING, exit_on_project_error
 from ..github import Annotation, write_annotations
@@ -68,9 +67,7 @@ def register_lint(app: typer.Typer) -> None:
                         Annotation(
                             lattice.nodes_by_id[status.source_id].path,
                             "doc-lattice AMBIGUOUS",
-                            f"{status.source_id} -> {status.target_ref} is AMBIGUOUS in "
-                            f"{collision_file(lattice, status)} "
-                            f"({format_collision(status.collision)})",
+                            ambiguity_annotation_message(lattice, status),
                             "warning",
                         )
                         for status in result.ambiguous

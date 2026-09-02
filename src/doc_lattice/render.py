@@ -1,7 +1,5 @@
 """Render the lattice as Mermaid, DOT, or JSON."""
 
-from collections.abc import Set as AbstractSet
-
 from .model import (
     CollisionMember,
     Lattice,
@@ -95,7 +93,6 @@ def _ambiguous_lines(lattice: Lattice, prefix: str) -> list[str]:
 def _graph_edges(
     lattice: Lattice,
     stale_edges: set[tuple[str, TargetId]],
-    ambiguous_edges: AbstractSet[tuple[str, TargetId]] = frozenset(),
 ) -> list[tuple[str, str, bool, bool]]:
     """Collapse resolved edges onto tracked file nodes.
 
@@ -104,11 +101,15 @@ def _graph_edges(
     tracked nodes appear. Multiple section edges between the same two files
     collapse to one edge, marked stale or ambiguous if any contributing edge is.
 
+    Ambiguity is read from ``lattice.collisions`` rather than taken as a parameter, because
+    that map is the definition: ``check._classify`` marks an edge AMBIGUOUS exactly when its
+    resolved target sits in the map. Deriving it here keeps the arrow styling and the
+    ``_ambiguous_components`` naming block reading one source. Staleness cannot follow suit,
+    since it requires the target hashes a caller has already paid for.
+
     Args:
         lattice: The built lattice.
         stale_edges: ``(source_id, target_id)`` pairs that are stale.
-        ambiguous_edges: ``(source_id, target_id)`` pairs whose resolved target sits in a
-            collision component.
 
     Returns:
         Sorted ``(upstream_file_id, source_id, is_stale, is_ambiguous)`` tuples, broken edges
@@ -125,7 +126,7 @@ def _graph_edges(
             # Every index location path belongs to a tracked node, so this lookup always hits.
             upstream = lattice.file_id_by_path[location.path]
             is_stale = (source_id, edge.target_id) in stale_edges
-            is_ambiguous = (source_id, edge.target_id) in ambiguous_edges
+            is_ambiguous = edge.target_id in lattice.collisions
             key = (upstream, source_id)
             prior_stale, prior_ambiguous = collapsed.get(key, (False, False))
             collapsed[key] = (prior_stale or is_stale, prior_ambiguous or is_ambiguous)
@@ -138,15 +139,15 @@ def _graph_edges(
 def to_mermaid(
     lattice: Lattice,
     stale_edges: set[tuple[str, TargetId]],
-    ambiguous_edges: AbstractSet[tuple[str, TargetId]] = frozenset(),
 ) -> str:
     """Render a Mermaid ``graph TD``.
+
+    An edge into a collision component is drawn with a dotted arrow and each component is
+    named in a leading comment; both are derived from ``lattice.collisions``.
 
     Args:
         lattice: The built lattice.
         stale_edges: ``(source_id, target_id)`` pairs to draw with a dashed arrow.
-        ambiguous_edges: ``(source_id, target_id)`` pairs to draw with a dotted arrow, naming
-            each collision component in a leading comment.
 
     Returns:
         Mermaid source. Edges run upstream (target) to downstream (source).
@@ -159,9 +160,7 @@ def to_mermaid(
     for node_id, mermaid_id in mermaid_ids.items():
         label = _mermaid_escape(_label(lattice, node_id))
         lines.append(f'    {mermaid_id}["{label}"]')
-    for upstream, source_id, is_stale, is_ambiguous in _graph_edges(
-        lattice, stale_edges, ambiguous_edges
-    ):
+    for upstream, source_id, is_stale, is_ambiguous in _graph_edges(lattice, stale_edges):
         # Ambiguity beats staleness, for the reason spelled out in to_dot: _graph_edges collapses
         # several section edges onto one graph edge, so both flags are routinely true at once.
         arrow = "-. ambiguous .->" if is_ambiguous else "-.->" if is_stale else "-->"
@@ -172,15 +171,15 @@ def to_mermaid(
 def to_dot(
     lattice: Lattice,
     stale_edges: set[tuple[str, TargetId]],
-    ambiguous_edges: AbstractSet[tuple[str, TargetId]] = frozenset(),
 ) -> str:
     """Render a Graphviz DOT digraph.
+
+    An edge into a collision component is drawn dotted red and each component is named in a
+    leading comment; both are derived from ``lattice.collisions``.
 
     Args:
         lattice: The built lattice.
         stale_edges: ``(source_id, target_id)`` pairs to draw dashed.
-        ambiguous_edges: ``(source_id, target_id)`` pairs to draw dotted red, naming each
-            collision component in a leading comment.
 
     Returns:
         DOT source. Edges run upstream (target) to downstream (source).
@@ -190,9 +189,7 @@ def to_dot(
     for node_id in sorted(lattice.nodes_by_id):
         label = _dot_escape(_label(lattice, node_id))
         lines.append(f'    "{_dot_escape(node_id)}" [label="{label}"];')
-    for upstream, source_id, is_stale, is_ambiguous in _graph_edges(
-        lattice, stale_edges, ambiguous_edges
-    ):
+    for upstream, source_id, is_stale, is_ambiguous in _graph_edges(lattice, stale_edges):
         # An edge that is both stale and ambiguous takes the ambiguous style. This is ordinary
         # CLI output, not a defensive branch: check_lattice gives each *edge* exactly one state,
         # but _graph_edges collapses every section edge between two files onto one graph edge and
@@ -210,15 +207,12 @@ def to_dot(
 def to_json(
     lattice: Lattice,
     stale_edges: set[tuple[str, TargetId]],
-    ambiguous_edges: AbstractSet[tuple[str, TargetId]] = frozenset(),
 ) -> dict:
     """Render the lattice as a JSON-serializable node/edge dump.
 
     Args:
         lattice: The built lattice.
         stale_edges: ``(source_id, target_id)`` pairs that are stale.
-        ambiguous_edges: ``(source_id, target_id)`` pairs whose resolved target sits in a
-            collision component.
 
     Returns:
         A dict with a ``nodes`` list (one entry per tracked node, sorted by id), an ``edges``
@@ -244,9 +238,7 @@ def to_json(
             "stale": is_stale,
             "ambiguous": is_ambiguous,
         }
-        for upstream, source_id, is_stale, is_ambiguous in _graph_edges(
-            lattice, stale_edges, ambiguous_edges
-        )
+        for upstream, source_id, is_stale, is_ambiguous in _graph_edges(lattice, stale_edges)
     ]
     ambiguous_targets = [
         {

@@ -3,6 +3,7 @@
 import os
 import warnings
 from pathlib import Path
+from typing import Protocol
 
 from .cache import CacheHit, LookupPolicy, RunState, cache_path, lookup, make_entry, store
 from .config import ProjectConfig
@@ -175,6 +176,45 @@ def _report_shadowed_envelope(shadowed: bool, path: Path) -> None:
     )
 
 
+class _Reportable(Protocol):
+    """The diagnostic triple every load tier carries, however it reached the tier.
+
+    ``model.ParsedMeta`` (a fresh parse) and ``cache.lookup.CacheHit`` (a replayed one) both
+    satisfy this structurally, which is what lets the cold and warm paths share one reporting
+    site rather than agreeing by hand.
+    """
+
+    @property
+    def disposition(self) -> FrontmatterDisposition: ...
+
+    @property
+    def reused_anchors(self) -> bool: ...
+
+    @property
+    def shadowed_envelope(self) -> bool: ...
+
+
+def _report_load_diagnostics(outcome: _Reportable, path: Path) -> None:
+    """Report everything one loaded file has to say, from the single site AD-29 requires.
+
+    Every load path (cache-free, cache-miss, and cache-hit) funnels through here, so a warm run
+    reproduces exactly what the cold run it replays said. A new diagnostic is added here once
+    rather than at each tier, which is what stops the warm path from silently going quiet.
+
+    The individual reporters stay separate functions so each keeps its own ``warnings.warn``
+    call site: the per-location dedup their docstrings depend on is unaffected by this extra
+    frame, since each warn passes ``stacklevel=1`` and is attributed to its own line.
+
+    Args:
+        outcome: The parse result or cache hit for the file.
+        path: The discovered path as this checkout sees it.
+    """
+    _report_skip(outcome.disposition, path)
+    _report_reused_anchors(outcome.reused_anchors, path)
+    _report_misplaced_envelope(outcome.disposition, path)
+    _report_shadowed_envelope(outcome.shadowed_envelope, path)
+
+
 def _body_first_line(text: str, body: str) -> int:
     """Return the 1-based file line that the body's first line occupies.
 
@@ -201,10 +241,7 @@ def _load_uncached(project: ProjectConfig) -> Lattice:
     ):
         text = read_doc(path)
         outcome, body = parse_document(text, path)
-        _report_skip(outcome.disposition, path)
-        _report_reused_anchors(outcome.reused_anchors, path)
-        _report_misplaced_envelope(outcome.disposition, path)
-        _report_shadowed_envelope(outcome.shadowed_envelope, path)
+        _report_load_diagnostics(outcome, path)
         if outcome.meta is None:
             continue
         sections = derive_file_sections(body, first_line=_body_first_line(text, body))
@@ -238,19 +275,13 @@ def _load_cached(
         result = lookup.resolve(state.entry(rel_key), doc_path, policy)
         if isinstance(result, CacheHit):
             state.claim(rel_key, result.refreshed_stat)
-            _report_skip(result.disposition, doc_path)
-            _report_reused_anchors(result.reused_anchors, doc_path)
-            _report_misplaced_envelope(result.disposition, doc_path)
-            _report_shadowed_envelope(result.shadowed_envelope, doc_path)
+            _report_load_diagnostics(result, doc_path)
             if result.doc is not None:
                 parsed.append(result.doc)
             continue
         text = decode_doc(doc_path, result.data)
         outcome, body = parse_document(text, doc_path)
-        _report_skip(outcome.disposition, doc_path)
-        _report_reused_anchors(outcome.reused_anchors, doc_path)
-        _report_misplaced_envelope(outcome.disposition, doc_path)
-        _report_shadowed_envelope(outcome.shadowed_envelope, doc_path)
+        _report_load_diagnostics(outcome, doc_path)
         meta = outcome.meta
         sections = (
             derive_file_sections(body, first_line=_body_first_line(text, body))
