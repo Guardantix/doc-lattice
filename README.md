@@ -250,20 +250,23 @@ Contributor commands, gates, and the full verification set live in
 |---------|--------------|----------------|
 | `check [--only STATE ...] [--format human\|json\|github]` | Classify every `derives_from` edge as OK / STALE / UNRECONCILED / BROKEN / AMBIGUOUS. | 1 on drift, 2 on tool error |
 | `lint [--format human\|json\|github]` | Validate the authority ladder (binding > derived > exploratory) over the edges. | 1 on a violation, 2 on tool error |
+| `links [--format human\|github]` | Validate every relative link destination and heading fragment in the `link_sources` files. | 1 on a finding, 2 on tool error |
 | `impact TOKEN [--depth N] [--format human\|json]` | List every downstream doc affected by a change to TOKEN; `--depth N` bounds the walk to N hops. | 2 on tool error |
 | `reconcile [ID] [--ref REF] [--all] [--dry-run] [--recover] [--format human\|json]` | Durably set `seen` for selected edges as one transaction, preview read-only with `--dry-run`, or recover an interrupted transaction with `--recover`. | 2 on tool error, conflict, lock contention, or persistence/recovery failure |
 | `graph [--format mermaid\|dot\|json]` | Emit the edge graph as Mermaid, DOT, or JSON. | 2 on tool error (including an unrecognized `--format`) |
 | `linear [TARGET] [--from ID] [--exit-code] [--warn-exit] [--format human\|json]` | Report tickets shipped against a spec that has since drifted (needs `LINEAR_API_KEY`). | 1 with `--exit-code` on DANGER/BLOCKED (or WARNING too under `--warn-exit`), 2 on tool error |
 | `init [--docs-root ...] [--linear-team KEY] [--default-branch NAME] [--print-only]` | Scaffold `.doc-lattice.yml` and print the `.gitignore`, pre-commit, and GitHub Actions blocks to install by hand. With `--print-only`, print the same three blocks and write nothing. | 2 on tool error |
 
-`check` and `lint` gate by default, exiting 1 when they find drift or an authority inversion.
+`check`, `lint`, and `links` gate by default, exiting 1 when they find drift, an authority
+inversion, or a dead link.
 `impact`, `reconcile`, `graph`, and `init` are informational and exit 0 on success, so wiring
 `impact` into a CI gate never turns the build red. `linear` also exits 0 by default; pass
 `--exit-code` to gate on any DANGER or BLOCKED finding, and add `--warn-exit` to gate on WARNING
 as well.
 
-The lattice-loading commands `check`, `lint`, `impact`, `reconcile`, `graph`, and `linear` accept
-`--config PATH` (path to `.doc-lattice.yml`; defaults to the file in the current directory).
+The lattice-loading commands `check`, `lint`, `impact`, `reconcile`, `graph`, and `linear`, and
+the link gate `links`, accept `--config PATH` (path to `.doc-lattice.yml`; defaults to the
+file in the current directory).
 `init` deliberately does not accept config or load the lattice. It keeps its current-directory
 behavior and does not require Git: it reads local Git state only to guess the workflow's default
 branch, and falls back when that read finds nothing.
@@ -416,6 +419,39 @@ and JSON narrows `edges` to them. Filtering is display-only: the exit code and t
 counts always reflect every edge, so `check --only OK` on a drifting lattice still exits 1 and
 still reports the drift in its verdict. One consequence is deliberate: under `--only`, the
 `summary` counts do not sum to the number of records in `edges`.
+
+### links
+
+`links` is the Markdown link gate, and it is deliberately not part of `check`. `check` is the
+lattice edge gate and its green is honest precisely because it makes no claim about Markdown
+links; folding link coverage into it would make that green a lie the first time it was wrong.
+
+Over every file `link_sources` selects, `links` reads each Markdown link destination and resolves
+the relative ones against the project root: the target must exist inside the project, and a
+`#fragment` on a Markdown target must name a heading GitHub assigns that id to. That inventory is
+wider than the addressable subset the lattice tracks, on purpose: setext headings, ATX headings
+indented one to three spaces, and headings nested in a list item or a block quote all render and
+resolve on GitHub, so failing a link to one would fail a correct link. Absolute and external
+destinations, image destinations, and the `?plain=1` source view's line fragments are out of
+scope and skipped.
+
+Two gaps are declared rather than closed. A destination written as a raw HTML anchor is reported,
+not resolved, because an attribute value arrives without the normalization markdown-it applies to
+a Markdown destination; write it as a Markdown link. And a heading whose text is itself an inline
+link slugs from raw source on both sides, so `## [Guide](target.md)` answers to `#guidetargetmd`
+here where GitHub renders `#guide`.
+
+Containment binds both ends. A selected file that leaves the project root through a symlink is
+reported rather than read, and a file that will not decode as UTF-8 or that the parser refuses is
+reported and stepped over, so one document cannot end the run. A filesystem the gate cannot
+inspect, resolve, scan, or open is a tool error: a gate that cannot see its inputs must not pass.
+
+Human findings go to stderr, one `'path':line: message` per finding in document order with no
+line for a finding about the document itself, and nothing is printed on success. `--format
+github` writes one annotation per finding to stdout instead, at the finding's line, so a dead link
+shows on the pull-request diff. The generated workflow runs that form. Exit 1 on any finding, 2
+when `link_sources` is missing or empty, a selector matches nothing, or the filesystem refuses the
+gate, and 0 otherwise.
 
 ### `reconcile`
 
@@ -744,6 +780,24 @@ multiple roots or symlink aliases resolve to the same document, it is loaded onc
 unresolved path discovered. Reconcile re-resolves that identity path before writing so a retargeted
 symlink cannot escape the project root.
 
+`link_sources` is the file set `links` gates, and it is independent of `docs_roots`: the lattice
+corpus is the files you track, and the link gate may cover files you do not, or fewer. It is a
+list of project-relative selectors in a POSIX grammar that reads the same on every platform. `/`
+is the only separator and a backslash is a config error; `*`, `?`, and `[...]` classes match
+within one segment, case-sensitively, and never cross `/`; `**` is accepted only as a whole
+segment and matches zero or more directories. `docs/**/*.md`, `ARCHITECTURE.md`, and `*.md` are
+all selectors. Expansion never enters a symlinked directory, whether `**` reaches it or a segment
+names it, and a symlinked file is selected by its spelling and judged for containment afterward.
+Matches are unioned across selectors, sorted by their project-relative spelling, and deduplicated
+by resolved target, so YAML order and overlapping selectors cannot change the output.
+
+The key fails closed. It has no default and is not derived from `docs_roots`; `ignore_globs` does
+not apply to it, since that key is anchored to each docs root and a selector already says what it
+wants. With the key omitted or empty, or with any selector that matches no file, `links` exits 2
+rather than reporting a clean run over nothing. The generated config writes a selector per docs
+root, `docs/**/*.md` for the default, which therefore fails closed until that directory holds at
+least one Markdown file.
+
 For 2.0, `binding_layers` is unsupported. Delete it from 1.x configs; there is no replacement.
 `lint`'s fixed binding > derived > exploratory authority ladder is unchanged.
 
@@ -824,15 +878,15 @@ uvx --python 3.13 --from doc-lattice==7.0.0 doc-lattice init
 
 This writes `.doc-lattice.yml` (only if absent) and always prints the reconcile-artifact
 `.gitignore` block (see [RECONCILE.md](https://github.com/Guardantix/doc-lattice/blob/main/RECONCILE.md)),
-pre-commit hooks, and a GitHub Actions workflow that run `doc-lattice check` (drift) and
-`doc-lattice lint` (authority ladder) as your gates. Paste each
-where the output says. Pasting the pre-commit block installs no Git hook, so those two hooks stay
-inert until you [enable the gates](#enabling-the-gates), which is a separate step with an ordering
-constraint on a first adoption. `init` only prints `.gitignore` guidance and never modifies that
-file. Pass
-`--docs-root` (repeatable) or `--linear-team` to bake those values into the generated config.
-The generated gates remain fully offline: they run only `check` and `lint` and do not require or
-receive `LINEAR_API_KEY`.
+pre-commit hooks, and a GitHub Actions workflow that run `doc-lattice check` (drift),
+`doc-lattice lint` (authority ladder), and `doc-lattice links` (dead links) as your gates.
+Paste each where the output says. Pasting the pre-commit block installs no Git hook, so those
+three hooks stay inert until you [enable the gates](#enabling-the-gates), which is a separate
+step with an ordering constraint on a first adoption. `init` only prints `.gitignore` guidance
+and never modifies that file. Pass `--docs-root` (repeatable) or `--linear-team` to bake those
+values into the generated config.
+The generated gates remain fully offline: they run only `check`, `lint`, and `links` and do not
+require or receive `LINEAR_API_KEY`.
 
 Branch resolution reached `init` in 5.0, the same release boundary
 [MANAGED_CI.md](https://github.com/Guardantix/doc-lattice/blob/main/MANAGED_CI.md) records for
@@ -894,7 +948,7 @@ keep the exact PyPI version pin.
 
 ### Enabling the gates
 
-Pasting the pre-commit block installs no Git hook. It adds two hook definitions to
+Pasting the pre-commit block installs no Git hook. It adds three hook definitions to
 `.pre-commit-config.yaml`, and nothing reads that file on commit until pre-commit has written
 `.git/hooks/pre-commit` in your clone. Until it has, the gates exist in CI only, and every
 local commit succeeds regardless of drift, including the one that introduces it. Enabling them is
@@ -946,16 +1000,18 @@ baseline depends on. The order is:
    on them all the same, and neither command touches a lint finding. Anything left standing here
    is what the gate refuses in step 6.
 5. Enable the gates with the two commands above.
-6. Stage and commit the reconcile-only diff. Both hooks run on it and pass, which is also how you
-   confirm activation worked.
+6. Stage and commit the reconcile-only diff. All three hooks run on it and pass, which is also
+   how you confirm activation worked.
 
 **An established installation enables them immediately.** A conversion, or any repository that
 already has a baseline, skips the reconcile step and with it the ordering constraint, so run the
 two commands as soon as you find the gates off.
 
-Confirm activation with a commit that stages at least one Markdown file. Both generated hook
-entries carry `files: \.md$`, so an empty or non-Markdown commit runs pre-commit and reports both
-doc-lattice hooks as `Skipped`. That looks like a working gate and proves nothing about it.
+Confirm activation with any commit. The `links` hook carries `always_run: true`, because the break
+it catches is cross-document and the file that changed is not the file that ends up wrong, so it
+runs on every commit and reports itself as passed or failed either way. The `check` and `lint`
+entries carry `files: \.md$`, so a commit staging no Markdown file reports those two as
+`Skipped`; that is still a working gate, and the `links` line beside them is the proof.
 
 The hook entries run `uvx --python 3.13 --from doc-lattice==7.0.0`, so the pinned release has to
 resolve on every gated commit, out of uv's cache once it is warm and from PyPI when it is not.
@@ -1005,8 +1061,8 @@ uvx --python 3.13 --from doc-lattice==NEW_VERSION doc-lattice init --print-only
 ```
 
 Replace your whole block with the printed one instead of hand-editing the pinned version in its
-two `entry:` lines. The block carries generated structure beyond those two commands, so bumping
-only the pins silently keeps an outdated hook shape.
+three `entry:` lines. The block carries generated structure beyond those three commands, so
+bumping only the pins silently keeps an outdated hook shape.
 
 Replacing the block does not need reactivation, because the installed hook reads
 `.pre-commit-config.yaml` on every commit rather than baking it in. An installation that never
@@ -1085,7 +1141,7 @@ scope is applied. Set the team the query targets with `linear_team` in `.doc-lat
 | Code | Meaning |
 |------|---------|
 | `0` | Success; no coherent policy or gate finding. |
-| `1` | Coherent finding: lattice drift, an authority inversion, or a Linear gate failure. |
+| `1` | Coherent finding: lattice drift, an authority inversion, a dead link or fragment, or a Linear gate failure. |
 | `2` | Invalid, unreadable, unsafe, ambiguous, or unreliable tool state, including confirmation refusal, persistence or recovery failure, and an advisory a warning filter escalated to an error. |
 | `141` | Standard output could not be written because its reader departed. Nothing is printed. Only stdout produces this; a dead stderr leaves the code the run had otherwise earned. |
 
@@ -1216,8 +1272,9 @@ collision. Equal anchors in different files do not collide.
 
 ```
 doc-lattice/
-├── src/doc_lattice/         # the engine: a pure graph/report core behind a thin impure shell
+├── src/doc_lattice/         # the engine: a pure graph/report core, the link gate, behind a thin impure shell
 │   ├── markdown_compat.py      # pinned heading and GitHub-slug compatibility adapter
+│   ├── link_check.py           # the links gate: selector expansion and link resolution (read-only I/O)
 │   ├── _github_slugger_data.py # generated slug and Unicode compatibility data
 │   ├── persistence.py          # shared durable single-path filesystem primitives
 │   ├── reconcile_transaction.py # reconcile lock, journal, commit, rollback, and recovery
