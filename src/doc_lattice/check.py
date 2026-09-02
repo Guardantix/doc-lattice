@@ -89,7 +89,7 @@ def ambiguous_json(statuses: Sequence[EdgeStatus]) -> list[dict]:
     ]
 
 
-def collision_file(lattice: Lattice, status: EdgeStatus) -> str:
+def _collision_file(lattice: Lattice, status: EdgeStatus) -> str:
     """Return the display path of the file an AMBIGUOUS status's collision lines belong to.
 
     ``CollisionMember.line`` is a line in the *upstream* file, the one that owns the colliding
@@ -117,7 +117,7 @@ def ambiguity_annotation_message(lattice: Lattice, status: EdgeStatus) -> str:
     Owned here rather than spelled out at each annotating adapter, because ``check`` and ``lint``
     are the two surfaces a reviewer compares side by side in a pull request and are specified to
     say the same thing about the same finding. Only the annotation's title and severity are
-    per-command; the sentence is not. This sits beside ``collision_file`` because that helper
+    per-command; the sentence is not. This sits beside ``_collision_file`` because that helper
     already owns the upstream-file half of it, and its docstring the reason that half exists.
 
     Args:
@@ -129,7 +129,7 @@ def ambiguity_annotation_message(lattice: Lattice, status: EdgeStatus) -> str:
     """
     return (
         f"{status.source_id} -> {status.target_ref} is AMBIGUOUS in "
-        f"{collision_file(lattice, status)} ({format_collision(status.collision)})"
+        f"{_collision_file(lattice, status)} ({format_collision(status.collision)})"
     )
 
 
