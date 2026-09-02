@@ -113,6 +113,12 @@ VALID_BASIC_OUTPUT_FORMATS: frozenset[str] = frozenset(get_args(BasicOutputForma
 ReportFormat = Literal["human", "json", "github"]
 VALID_REPORT_FORMATS: frozenset[str] = frozenset(get_args(ReportFormat))
 
+# The link gate's output formats: the report formats minus json. Nothing asked for a JSON
+# schema of link findings, and declaring one is a contract to own, so the command takes the
+# annotating format its generated workflow runs and the human one its hook runs.
+LinkReportFormat = Literal["human", "github"]
+VALID_LINK_REPORT_FORMATS: frozenset[str] = frozenset(get_args(LinkReportFormat))
+
 # Control-range boundaries for text sanitization. C0 (below 0x20) and DEL (0x7F) are the
 # ASCII controls; C1 (0x80 to 0x9F) are 8-bit controls that still drive terminals (for
 # example 0x9B is a single-byte CSI introducer, 0x85 is NEL), so they are stripped too.

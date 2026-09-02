@@ -7,8 +7,10 @@ exact number it must carry, ``HISTORICAL_PIN_DOCS`` names the documents whose su
 preserved on purpose, and a recognized pin in any other maintained document fails as an
 unclassified release surface. The two classifications are exclusive: a document named by both is
 reported, since the exemption is applied first and would otherwise silence the declared count.
-"Maintained documents" means the sorted root ``*.md`` files, the same mechanical set
-``scripts/check_doc_links.py`` takes as its link sources.
+"Maintained documents" means the sorted root ``*.md`` files, a selection this script owns
+and spells for itself: it reads install pins and nothing else, and stays free of the
+Markdown parser. The repository's link sources are declared separately in
+``.doc-lattice.yml`` and checked by ``doc-lattice links``.
 
 Counts are exact rather than minimums because a minimum lets a newly added pin mask the deletion
 of a required occurrence. What an exact count closes is any change that alters the number of
@@ -73,13 +75,10 @@ PIN_POLICY = PinPolicy(manifest=PIN_MANIFEST, historical=HISTORICAL_PIN_DOCS)
 def maintained_documents(repo_root: Path) -> list[Path]:
     """Return the maintained documents: the sorted root Markdown files.
 
-    This is the same mechanical stand-in for the CLAUDE.md ownership list that
-    ``scripts/check_doc_links.py`` takes as its link sources. It is spelled here rather than
-    imported from there for two reasons: the suites load both scripts with ``runpy.run_path``,
-    which leaves ``sys.path`` untouched, so an import that resolves under
-    ``python scripts/<name>.py`` would not resolve under test; and importing that module would
-    pull ``markdown_it`` and a constructed parser into a gate that only reads install pins.
-    ``test_check_version_sync.py`` asserts the two selections stay identical.
+    Spelled here rather than imported, on purpose: this gate reads install pins and nothing
+    else, and importing the link gate's selection would pull the Markdown parser into it. The
+    repository's link sources are declared in ``.doc-lattice.yml`` and checked by
+    ``doc-lattice links``; this selection is this script's own and is held only by its test.
 
     Args:
         repo_root: The repository root.

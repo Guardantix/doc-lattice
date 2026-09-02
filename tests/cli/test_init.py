@@ -38,8 +38,8 @@ _EXPECTED_BASELINE_GUIDANCE = (
 # reason: a wording change has to fail this test rather than be followed silently.
 _EXPECTED_ACTIVATION_GUIDANCE = (
     "Enabling the gates is that separate step, and adding the pre-commit block does not perform "
-    "it: both hooks stay inert until pre-commit writes `.git/hooks/pre-commit` in this clone. If "
-    "this clone is not already gated, run `uv tool install pre-commit` and then "
+    "it: all three hooks stay inert until pre-commit writes `.git/hooks/pre-commit` in this "
+    "clone. If this clone is not already gated, run `uv tool install pre-commit` and then "
     "`uv tool run pre-commit install`, or plain `pre-commit install` when a durable runner is "
     "already available. On an initial adoption do that only after the baseline above, and after "
     "`doc-lattice check` and `doc-lattice lint` are clean; an established installation enables "
@@ -83,6 +83,16 @@ def _shared_guidance(version: str) -> str:
         "doc-lattice lint\n"
         "        language: system\n"
         "        files: \\.md$\n"
+        "        pass_filenames: false\n"
+        "      # always_run rather than files: \\.md$, because the break links catches is\n"
+        "      # cross-document: renaming a heading in one file invalidates a link written in\n"
+        "      # another, and the file that changed is not the file that ends up wrong.\n"
+        "      - id: doc-lattice-links\n"
+        "        name: doc-lattice links\n"
+        f"        entry: uvx --python 3.13 --from doc-lattice=={version} "
+        "doc-lattice links\n"
+        "        language: system\n"
+        "        always_run: true\n"
         "        pass_filenames: false\n"
         "\n"
     )
@@ -134,7 +144,10 @@ def _legacy_stdout(version: str) -> str:
         "          rc_check=$?\n"
         f"          uvx --python 3.13 --from doc-lattice=={version} doc-lattice lint\n"
         "          rc_lint=$?\n"
-        '          [ "$rc_check" -eq 0 ] && [ "$rc_lint" -eq 0 ]\n'
+        f"          uvx --python 3.13 --from doc-lattice=={version} doc-lattice links "
+        "--format github\n"
+        "          rc_links=$?\n"
+        '          [ "$rc_check" -eq 0 ] && [ "$rc_lint" -eq 0 ] && [ "$rc_links" -eq 0 ]\n'
         "\n"
     )
 
@@ -158,6 +171,8 @@ def test_init_delegates_create_only_write_to_shared_persistence(tmp_path: Path, 
         b"lattice_format: 2\n"
         b"docs_roots:\n"
         b"  - docs\n"
+        b"link_sources:\n"
+        b"  - docs/**/*.md\n"
         b"# ignore_globs:\n"
         b'#   - "**/archive/**"\n'
         b"# cache_key: my-project-docs   # opt-in load cache slot under your cache home\n"
@@ -1217,3 +1232,269 @@ def test_init_print_only_prints_over_an_existing_config_without_touching_it(
     assert config.read_text(encoding="utf-8") == "SENTINEL\n"
     assert "already exists" not in result.stderr
     assert "wrote" not in result.stderr
+
+
+def _written_config(tmp_path: Path) -> str:
+    return (tmp_path / ".doc-lattice.yml").read_text(encoding="utf-8")
+
+
+def test_init_derives_link_sources_from_the_default_docs_root(tmp_path: Path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    assert runner.invoke(app, ["init"]).exit_code == 0
+    assert "link_sources:\n  - docs/**/*.md\n" in _written_config(tmp_path)
+
+
+def test_init_spells_an_existing_file_root_as_itself(tmp_path: Path, monkeypatch):
+    (tmp_path / "SPEC.md").write_text("# Spec\n", encoding="utf-8")
+    monkeypatch.chdir(tmp_path)
+    assert runner.invoke(app, ["init", "--docs-root", "SPEC.md"]).exit_code == 0
+    assert "link_sources:\n  - SPEC.md\n" in _written_config(tmp_path)
+
+
+def test_init_uses_the_directory_form_for_a_root_that_does_not_exist_yet(
+    tmp_path: Path, monkeypatch
+):
+    monkeypatch.chdir(tmp_path)
+    assert runner.invoke(app, ["init", "--docs-root", "./design/"]).exit_code == 0
+    assert "link_sources:\n  - design/**/*.md\n" in _written_config(tmp_path)
+
+
+def test_init_escapes_a_metacharacter_in_a_root(tmp_path: Path, monkeypatch):
+    (tmp_path / "notes [draft]").mkdir()
+    monkeypatch.chdir(tmp_path)
+    assert runner.invoke(app, ["init", "--docs-root", "notes [draft]"]).exit_code == 0
+    assert "link_sources:\n  - notes [[]draft]/**/*.md\n" in _written_config(tmp_path)
+
+
+def test_init_derives_the_selector_from_a_nested_root_nobody_has_created(
+    tmp_path: Path, monkeypatch
+):
+    # The ordinary absence the literal selector is written for, spelled deeply enough that the
+    # component walk has to stop at the first missing name rather than read a refusal into it.
+    monkeypatch.chdir(tmp_path)
+    assert runner.invoke(app, ["init", "--docs-root", "docs/guides"]).exit_code == 0
+    assert "link_sources:\n  - docs/guides/**/*.md\n" in _written_config(tmp_path)
+
+
+def test_init_derives_the_selector_from_a_symlinked_roots_resolved_path(
+    tmp_path: Path, monkeypatch
+):
+    # The checker never enters a symlinked directory, so a selector written over the link
+    # would fail on every run; the resolved, contained path is what is written.
+    (tmp_path / "real").mkdir()
+    (tmp_path / "linked").symlink_to(tmp_path / "real", target_is_directory=True)
+    monkeypatch.chdir(tmp_path)
+    assert runner.invoke(app, ["init", "--docs-root", "linked"]).exit_code == 0
+    assert "link_sources:\n  - real/**/*.md\n" in _written_config(tmp_path)
+
+
+def _assert_rejected_linked_root(result, tmp_path: Path, subject: str) -> None:
+    # Not `_assert_rejected_before_any_write`: that helper asserts the directory holds only
+    # `.git`, and each of these cases has to create the symlink it is rejecting.
+    assert result.exit_code == 2
+    assert result.stdout == ""
+    assert result.stderr.startswith("error (VALIDATION_ERROR): ")
+    assert subject in result.stderr
+    assert "which the link gate never enters" in result.stderr
+    assert not (tmp_path / ".doc-lattice.yml").exists()
+
+
+def test_init_rejects_a_docs_root_that_is_a_symlink_loop(tmp_path: Path, monkeypatch):
+    # A loop stats as absent, and the absent branch writes the literal directory selector. That
+    # selector could never match: the walk does not enter a symlink, so every later `links` run
+    # would exit 2 over a config init exited 0 on. Absence and unfollowability are not the same
+    # answer, and only the first one has a selector.
+    (tmp_path / "a").symlink_to(tmp_path / "b")
+    (tmp_path / "b").symlink_to(tmp_path / "a")
+    monkeypatch.chdir(tmp_path)
+
+    result = runner.invoke(app, ["init", "--docs-root", "a"])
+
+    _assert_rejected_linked_root(result, tmp_path, "--docs-root 'a' is a symlink")
+
+
+def test_init_rejects_a_dangling_symlink_docs_root(tmp_path: Path, monkeypatch):
+    # The same refusal through the errno a root that is simply not there raises: `stat` follows
+    # the link and reports ENOENT for both, and `lstat` is what tells them apart.
+    (tmp_path / "docs").symlink_to(tmp_path / "no-such-directory", target_is_directory=True)
+    monkeypatch.chdir(tmp_path)
+
+    result = runner.invoke(app, ["init"])
+
+    _assert_rejected_linked_root(result, tmp_path, "--docs-root 'docs' is a symlink")
+
+
+def test_init_rejects_a_docs_root_under_a_dangling_symlink(tmp_path: Path, monkeypatch):
+    # The link need not be the last component. Statting the whole path cannot see this one: both
+    # `stat` and `lstat` report ENOENT for `linked/child` exactly as they would for a root nobody
+    # has created, so the components are tested one at a time from the invocation directory down.
+    (tmp_path / "linked").symlink_to(tmp_path / "no-such-directory", target_is_directory=True)
+    monkeypatch.chdir(tmp_path)
+
+    result = runner.invoke(app, ["init", "--docs-root", "linked/child"])
+
+    _assert_rejected_linked_root(
+        result, tmp_path, "--docs-root 'linked/child' sits under the symlink 'linked'"
+    )
+
+
+def test_init_rejects_a_docs_root_under_a_working_symlink(tmp_path: Path, monkeypatch):
+    # The same refusal where the link resolves perfectly well: `real/child` is simply not there
+    # yet, and repairing nothing would help, because the walk still would not enter `linked`.
+    (tmp_path / "real").mkdir()
+    (tmp_path / "linked").symlink_to(tmp_path / "real", target_is_directory=True)
+    monkeypatch.chdir(tmp_path)
+
+    result = runner.invoke(app, ["init", "--docs-root", "linked/child"])
+
+    _assert_rejected_linked_root(
+        result, tmp_path, "--docs-root 'linked/child' sits under the symlink 'linked'"
+    )
+
+
+def test_init_rejects_a_docs_root_reached_through_a_looping_parent(tmp_path: Path, monkeypatch):
+    # A loop reached through a parent component, where statting the whole path raises ELOOP
+    # rather than ENOENT. The component walk answers it the same way, at the link itself.
+    (tmp_path / "a").symlink_to(tmp_path / "b")
+    (tmp_path / "b").symlink_to(tmp_path / "a")
+    monkeypatch.chdir(tmp_path)
+
+    result = runner.invoke(app, ["init", "--docs-root", "a/docs"])
+
+    _assert_rejected_linked_root(
+        result, tmp_path, "--docs-root 'a/docs' sits under the symlink 'a'"
+    )
+
+
+def _assert_rejected_blocked_root(result, tmp_path: Path, subject: str) -> None:
+    # The file half of `_assert_rejected_linked_root`: same refusal, different clause, and the
+    # same reason for not using `_assert_rejected_before_any_write`, since each case has to
+    # create the file it is rejecting.
+    assert result.exit_code == 2
+    assert result.stdout == ""
+    assert result.stderr.startswith("error (VALIDATION_ERROR): ")
+    assert subject in result.stderr
+    assert "which is not a directory the link gate can descend into" in result.stderr
+    assert not (tmp_path / ".doc-lattice.yml").exists()
+
+
+def test_init_rejects_a_docs_root_under_a_regular_file(tmp_path: Path, monkeypatch):
+    # Statting the whole path raises ENOTDIR, which is the same absence a root nobody has
+    # created gives. It is not the same answer: the selector walk descends only into an entry
+    # confirmed to be a directory, so `README.md/notes/**/*.md` could never match however the
+    # project grows, and every generated hook and CI run would exit 2 after an init that
+    # exited 0.
+    (tmp_path / "README.md").write_text("# R\n", encoding="utf-8")
+    monkeypatch.chdir(tmp_path)
+
+    result = runner.invoke(app, ["init", "--docs-root", "README.md/notes"])
+
+    _assert_rejected_blocked_root(
+        result, tmp_path, "--docs-root 'README.md/notes' sits under the file 'README.md'"
+    )
+
+
+def test_init_rejects_a_docs_root_under_a_regular_file_deeper_in_the_path(
+    tmp_path: Path, monkeypatch
+):
+    # The blocker need not be the first component, and the walk has to name the one that
+    # actually blocks rather than the root it started from.
+    (tmp_path / "docs").mkdir()
+    (tmp_path / "docs" / "notes.md").write_text("# N\n", encoding="utf-8")
+    monkeypatch.chdir(tmp_path)
+
+    result = runner.invoke(app, ["init", "--docs-root", "docs/notes.md/deep/more"])
+
+    _assert_rejected_blocked_root(
+        result,
+        tmp_path,
+        "--docs-root 'docs/notes.md/deep/more' sits under the file 'docs/notes.md'",
+    )
+
+
+def test_a_component_the_filesystem_will_not_answer_for_is_not_read_as_absent(
+    tmp_path: Path, monkeypatch
+):
+    # `_docs_root_mode` has already refused every errno that is not an absence for the whole
+    # path, so the component walk should never meet one. The guard is what keeps that an
+    # invariant rather than an assumption: were it to swallow the error, an unreadable
+    # component would be classified as an ordinary absence and take the literal selector.
+    real_stat = Path.stat
+
+    def refuse(self, *args, **kwargs):
+        if self.name == "docs":
+            raise PermissionError(errno.EACCES, "Permission denied")
+        return real_stat(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "stat", refuse)
+
+    with pytest.raises(PermissionError):
+        init_command._first_blocking_component("docs/guides", tmp_path)
+
+
+def test_init_rejects_a_root_that_resolves_outside_the_project(tmp_path: Path, monkeypatch):
+    outside = tmp_path.parent / "elsewhere"
+    outside.mkdir(exist_ok=True)
+    (tmp_path / "away").symlink_to(outside, target_is_directory=True)
+    monkeypatch.chdir(tmp_path)
+    result = runner.invoke(app, ["init", "--docs-root", "away"])
+    # Not `_assert_rejected_before_any_write`: that helper asserts the directory holds only
+    # `.git`, and this case has to create the escaping symlink to have something to reject.
+    # The write is still what is being ruled out, so the config's absence is asserted directly.
+    assert result.exit_code == 2
+    assert not (tmp_path / ".doc-lattice.yml").exists()
+    assert "resolves outside" in result.stderr
+
+
+def test_init_rejects_a_root_with_a_backslash(tmp_path: Path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    result = runner.invoke(app, ["init", "--docs-root", "docs\\guides"])
+    _assert_rejected_before_any_write(result, tmp_path)
+    assert "backslash" in result.stderr
+
+
+def test_init_rejects_a_root_whose_derived_selector_the_grammar_rejects(
+    tmp_path: Path, monkeypatch
+):
+    # A drive prefix is not absolute on POSIX, so the flag-level relative-path check passes it
+    # through. The derived selector is one the config loader refuses, so writing it would leave
+    # a project whose every lattice-loading command exits 2 after an init that exited 0.
+    monkeypatch.chdir(tmp_path)
+    result = runner.invoke(app, ["init", "--docs-root", "C:foo"])
+    _assert_rejected_before_any_write(result, tmp_path)
+    assert "C:foo" in result.stderr
+    assert "is absolute" in result.stderr
+
+
+def test_init_rejects_an_existing_directory_whose_selector_the_grammar_rejects(
+    tmp_path: Path, monkeypatch
+):
+    # The same defect reached through the resolved-path branch rather than the literal one.
+    (tmp_path / "C:foo").mkdir()
+    monkeypatch.chdir(tmp_path)
+    result = runner.invoke(app, ["init", "--docs-root", "C:foo"])
+    # Not `_assert_rejected_before_any_write`: the root has to exist for this branch to run, so
+    # the directory holds more than `.git`. The write is still what is ruled out.
+    assert result.exit_code == 2
+    assert not (tmp_path / ".doc-lattice.yml").exists()
+    assert "C:foo" in result.stderr
+    assert "is absolute" in result.stderr
+
+
+def test_init_refuses_a_docs_root_the_filesystem_will_not_classify(tmp_path: Path, monkeypatch):
+    # The selector derivation asks the same stat question the ancestor walk asks, and earns its
+    # own diagnostic: what it could not decide is which link_sources shape the root takes, not
+    # whether this directory already sits inside a configured lattice. Reusing that message here
+    # would send a reader after a file that has nothing to do with the failure.
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(Path, "stat", _stat_denying(tmp_path / "docs"))
+
+    result = runner.invoke(app, ["init"])
+
+    assert result.exit_code == 2
+    assert result.stdout == ""
+    assert result.stderr.startswith("error (INIT_PERSISTENCE): ")
+    assert f"--docs-root {format_path_for_display('docs')}" in result.stderr
+    assert "link_sources" in result.stderr
+    assert "configured lattice" not in result.stderr
+    assert not (tmp_path / ".doc-lattice.yml").exists()

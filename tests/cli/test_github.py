@@ -172,3 +172,25 @@ def test_warn_unattachable_annotations_reports_once_for_a_repeated_document(
 
     assert _contents(runtime.stderr).count(str(outside)) == 1
     assert "1 annotated document(s)" in _contents(runtime.stderr)
+
+
+def test_github_annotation_emits_a_line_only_when_given_one(tmp_path: Path):
+    without = github_annotation(tmp_path / "doc.md", tmp_path, "title", "message")
+    with_line = github_annotation(tmp_path / "doc.md", tmp_path, "title", "message", line=7)
+
+    assert without == "::error file=doc.md,title=title::message"
+    assert with_line == "::error file=doc.md,line=7,title=title::message"
+
+
+def test_write_annotations_forwards_each_items_line(runtime: CliRuntime, tmp_path: Path):
+    write_annotations(
+        runtime,
+        [
+            Annotation(tmp_path / "a.md", "t", "m", line=3),
+            Annotation(tmp_path / "b.md", "t", "m", "warning"),
+        ],
+    )
+
+    assert _contents(runtime.stdout) == (
+        "::error file=a.md,line=3,title=t::m\n::warning file=b.md,title=t::m\n"
+    )

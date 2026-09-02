@@ -157,6 +157,18 @@ def test_a_change_confined_to_the_boolean_like_branch_is_detected():
     assert "init.ci[main]" not in messages[0]
 
 
+# --- The config matrix ----------------------------------------------------------------------
+
+
+def test_compute_surfaces_snapshots_four_generated_config_shapes():
+    surfaces = compute_surfaces(_MANAGED_CI)
+
+    assert surfaces["init.config[default]"].count("link_sources:\n  - docs/**/*.md\n") == 1
+    assert "  - SPEC.md\n" in surfaces["init.config[file-root]"]
+    assert "  - notes [[]draft]/**/*.md\n" in surfaces["init.config[metacharacter-root]"]
+    assert "  - design/**/*.md\n  - lore/**/*.md\n" in surfaces["init.config[multiple-roots]"]
+
+
 # --- The base-ref half ---------------------------------------------------------------------
 
 
@@ -271,6 +283,7 @@ def test_the_real_document_yields_every_surface_nonempty():
         "managed-ci.gh-environment",
         "managed-ci.gh-secret",
         *(f"init.ci[{branch}]" for branch in CI_BRANCHES),
+        *(f"init.config[{name}]" for name in _SCRIPT["CONFIG_ROOTS"]),
     }
     assert set(surfaces) == expected
     for key, text in surfaces.items():

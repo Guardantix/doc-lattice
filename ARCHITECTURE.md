@@ -11,6 +11,7 @@ The engine is a pure pipeline behind the thin, impure `doc_lattice.cli` package:
 
     config -> discovery -> frontmatter parse -> loader.build_lattice
         -> { check, impact, reconcile, graph, lint, linear }
+    config -> link_check.select_link_sources -> link_check.check_links -> links
 
 `cli/application.py` constructs Typer and registers the commands, `cli/runtime.py`
 captures fresh invocation state, and focused adapters under `cli/commands/` connect
@@ -18,7 +19,9 @@ Typer to the engine. Shared output policy lives in `cli/output.py`;
 `cli/errors.py` supplies diagnostics and command-level error conversion, while
 `cli/__init__.py` owns entry-point exception mapping.
 `orchestrate.load_lattice(project)` is the single wiring point that runs the pipeline;
-`init` is separate and never loads the lattice. The central
+`init` is separate and never loads the lattice. `links` is the other lattice-independent
+command: it reads `link_sources` from the same config and runs the read-only link gate in
+`link_check.py`. The central
 structure is the `Lattice` (model.py), which every lattice-reading command reads.
 This file owns the durable module boundaries and load-bearing decisions. CLAUDE.md
 routes contributors and agents to those decisions and lists enforced repository rules.
@@ -46,7 +49,10 @@ edges.
 **Status:** Accepted
 **Context:** Graph and report logic must be testable against synthetic inputs.
 **Decision:** All graph and report logic is filesystem-free and pure. `config`,
-`discovery`, and `orchestrate` own load-path filesystem work. `persistence.py` owns
+`discovery`, and `orchestrate` own load-path filesystem work. `link_check.py` owns the
+read-only filesystem work of the `links` gate: selector expansion by a no-follow walk,
+containment of both ends of a link, and the source and target reads. It is the one boundary
+that never feeds the lattice. `persistence.py` owns
 shared low-level durable staging, replace, create-if-absent, fingerprint, sync, and
 cleanup primitives. `reconcile_transaction.py` owns the reconcile lock capability and
 mechanics, independent live destination preflight for commits, durable commit and
@@ -80,7 +86,9 @@ The exclusion cuts both ways. 'It is not hostile-safe' is not a reason to drop a
 since every one of them earns its place against the mistakes it does catch, and 'a co-tenant could
 defeat it' is not a reason to harden reconcile further, since the threat it would harden against is
 the one this decision deliberately places out of scope.
-**Consequences:** Every command's logic is unit-tested with no I/O; the network slice
+**Consequences:** Every lattice command's logic is unit-tested with no I/O, and the link
+gate's engine, which is a read-only boundary by its nature, is tested against temporary
+trees; the network slice
 is quarantined to one module. The reconcile lock is the package's only lock capability, so no
 nesting is possible.
 
@@ -2389,3 +2397,66 @@ the full heading inventory (GTX-277), a path-derived id for id-less files, and a
 manifest were all considered and are recorded as out of scope in the design this record replaces
 with a durable decision; none of the three is a gap this record leaves open by omission, each was
 weighed and declined on its own terms.
+
+### AD-45: The link gate is its own command over its own source set, reading the engine's inventory
+
+**Date:** 2026-09-02
+**Status:** Accepted
+**Context:** `scripts/check_doc_links.py` was a complete Markdown link gate that reached nobody:
+excluded from the wheel, hardcoded to this repository's root, and callable only by being this
+repository. colinear ran `check` and `lint` green over hundreds of dead fragment links, which is
+correct behavior for both and the whole problem. GTX-477 productizes it.
+**Decision:** Ship it as `doc-lattice links`, a command of its own over a `link_sources` config
+key, with the engine in `link_check.py` reading `markdown_compat.full_heading_inventory`.
+
+**Its own verb, never folded into `check`.** `check` is the lattice edge gate, and its green is
+honest precisely because it claims nothing about Markdown links. Folding link coverage in would
+make that green a lie the first time a link class the gate does not model went dead, and would
+put an exit-1 finding class under a command whose adopters gate a different thing.
+
+**An independent `link_sources` key, with no `docs_roots` fallback and no `ignore_globs`.**
+`docs_roots` is the tracked lattice corpus, and a consumer may gate links in files it does not
+track (colinear's root carries several) or in fewer; reusing it conflates two corpora and yields
+an honest-looking green over the wrong files. `ignore_globs` is anchored to each docs root, so
+applying it here would re-couple the corpora silently. A selector already says exactly what it
+wants. The key fails closed per selector: omitted, empty, or any selector matching nothing is
+exit 2, because the generated hook and workflow run the command unconditionally and a fallback
+would let a mandatory gate pass over zero files.
+
+**One heading inventory.** The script built its own link-target inventory, wider than the
+addressable subset because a link to a setext or nested heading resolves on GitHub. v7 shipped
+`full_heading_inventory`, the same width described in the same terms. The gate now collects that
+inventory's `github_id` values and its private walk is deleted, so there is one implementation of
+"the ids GitHub allocates" rather than two that agree by discipline. Addressability is unchanged:
+the wider inventory is read, never allocated from, so no cached derivation moves.
+
+**Selection is a no-follow walk of the module's own, not `Path.glob`.** `Path.glob` orders
+results unspecifiedly, matches case by platform, stops following symlinks only while expanding
+`**`, and suppresses scanning errors. The walk is POSIX on every platform, case-sensitive by code
+point, never enters a symlinked directory (a link to `/` would otherwise turn `**` into a
+filesystem walk), reports a directory it cannot scan as exit 2, and orders by sorting the union
+of lexical matches before judging them, so YAML order and filesystem order cannot change output.
+
+**Containment after selection, so an escaping source is a finding.** `docs_roots` resolution
+rejects an escaping entry at load and discovery skips one with a warning; both are wrong here,
+where the requirement is that a configured file nobody checks is reported. Selection keeps the
+unresolved spelling, and `check_links` rechecks containment immediately before each read. What
+the filesystem refuses to resolve, inspect, scan, or open is a tool error rather than a finding,
+because a gate that cannot see its inputs must not pass; what a document's content refuses
+(undecodable bytes, a parser-rejected reference) stays a finding and the run continues.
+
+**Human findings on stderr; annotations on stdout.** The script always wrote findings to stderr,
+and the hook contract is preserved through an exact stderr writer that bypasses Rich, so a
+filename shaped like markup stays a filename. A departed stderr reader is answered under the
+stderr half of AD-40 and the semantic exit code stands; only a truncated stdout result, the
+annotation stream, reaches the silent 141. `--format github` annotates each finding at its line,
+which is the form the generated workflow runs.
+
+**Consequences:** Both generated adopter surfaces run the command, the hook with `always_run`
+and the workflow with `--format github`, and the generated config writes `link_sources` derived
+from the docs roots by the `init` adapter, from the resolved path for a root that exists so a
+symlinked root cannot be written as a selector the walk would never enter. Those are
+migration-rule surfaces, and the generated config is now enrolled in the guard with them.
+This repository's own gate runs through the shipped command over `link_sources: ["*.md"]`, the
+first prerequisite of GTX-168. `scripts/check_doc_links.py` is deleted. JSON output was declined:
+nobody asked for a schema of link findings, and one is a contract to own.

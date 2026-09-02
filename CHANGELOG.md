@@ -6,8 +6,24 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added
+
+- `doc-lattice links`, the Markdown link gate, shipped as a command. It validates every relative
+  link destination and heading fragment in a configured source set, exits 1 on a finding with one
+  `'path':line: message` line per finding on stderr, and annotates the pull-request diff under
+  `--format github`. The source set is the new `link_sources` config key, a list of
+  project-relative POSIX selectors that fails closed: an omitted or empty key, or any selector
+  that matches nothing, is a config error rather than a green run. README.md owns the contract
+  and ARCHITECTURE.md's AD-45 owns the decisions behind it.
+
 ### Changed
 
+- The pre-commit block and the GitHub Actions workflow `init` prints now run `links` beside
+  `check` and `lint`: the hook with `always_run` because the break it catches is cross-document,
+  and the workflow with `--format github`. The generated config now writes `link_sources`, derived
+  from the docs roots.
+- The migration guard now snapshots the generated config, so a change to what `init` writes is
+  authorized the same way as a change to what it prints.
 - `init` now names the printed recipe's Git precondition on stderr, once, and on a terminal it
   precedes the three blocks: they install into a Git checkout of the docs repository and none of
   them is usable outside one. The blocks stay on stdout, so the ordering is what a terminal shows
@@ -20,6 +36,25 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   considered and rejected: it would break the parity `--print-only` owes the ordinary run, and
   the only available classifier is the `.git` filesystem marker that bounds the nested-config
   refusal, which deliberately approximates Git discovery and is left doing only that.
+
+### Migration
+
+Existing installations keep working untouched: `link_sources` is optional for every command but
+`links`, and nothing runs `links` until you install the new blocks. To adopt the link gate:
+
+1. Upgrade first. Bump the pinned version in your hook entries and workflow, or upgrade the
+   installed tool, before touching the config: the config parser is strict, and a `link_sources`
+   key is a schema error to every release before this one.
+2. Add `link_sources` to `.doc-lattice.yml` by hand, one selector per `docs_roots` entry, which
+   is what `init` derives for a new project: a directory root becomes `root/**/*.md` and a file
+   root becomes the path itself, so the default single `docs` root gives
+   `link_sources: ['docs/**/*.md']`. No command will print it for you. `init` renders the config
+   only in the course of writing one, so `--print-only` prints the three blocks and no config at
+   all, and a plain `init` next to an existing `.doc-lattice.yml` reports the file and leaves it
+   untouched. Every selector must match at least one file, or `links` exits 2; the grammar is in
+   [Configuration](README.md#configuration).
+3. Then replace the pre-commit block and the workflow with the ones `init --print-only` prints.
+   Copying the blocks before adding the key would make every gated commit exit 2.
 
 ## [7.0.0] - 2026-09-01
 

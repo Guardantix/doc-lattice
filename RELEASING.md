@@ -49,13 +49,13 @@ check its current state.
 3. Confirm the new changelog section is nonempty. The release job checks this too, before it
    pushes the tag, but failing there costs a release run.
 4. Add a `### Migration` subsection to that changelog section when the release changes output an
-   adopter installs, in shape or behavior: the `.gitignore`, pre-commit, and workflow blocks
-   `init` prints, or the trusted Linear workflow and `gh` procedure MANAGED_CI.md publishes. The
-   trigger is a semantic change, not the version-pin substitution every release performs, which
-   on its own would make the subsection mandatory every time. Name the adopter-visible steps,
-   separated by install kind. The generic upgrade procedure covering routine pin bumps is owned by
-   [README.md](README.md#upgrading); this checklist owns only the rule that a qualifying release
-   must carry the subsection.
+   adopter installs, in shape or behavior: the config `init` writes and the `.gitignore`,
+   pre-commit, and workflow blocks it prints, or the trusted Linear workflow and `gh` procedure
+   MANAGED_CI.md publishes. The trigger is a semantic change, not the version-pin substitution
+   every release performs, which on its own would make the subsection mandatory every time. Name
+   the adopter-visible steps, separated by install kind. The generic upgrade procedure covering
+   routine pin bumps is owned by [README.md](README.md#upgrading); this checklist owns only the
+   rule that a qualifying release must carry the subsection.
 
    That rule is enforced, not merely written down. `scripts/check_migration_rule.py` compares
    those blocks against a committed normalized baseline, `scripts/migration_baseline.json`, and

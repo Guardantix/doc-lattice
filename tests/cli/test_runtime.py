@@ -816,3 +816,24 @@ def test_write_stdout_still_propagates_an_ordinary_write_failure(tmp_path: Path)
         runtime.write_stdout("payload")
 
     assert not isinstance(info.value, BrokenPipeError)
+
+
+def test_write_stderr_writes_exact_bytes_without_rich(tmp_path: Path):
+    stderr = StringIO()
+    runtime = _runtime(StringIO(), stderr, tmp_path, no_color=True)
+
+    runtime.write_stderr("'[bold]x[/bold].md':3: message")
+
+    assert stderr.getvalue() == "'[bold]x[/bold].md':3: message\n"
+
+
+def test_write_stderr_answers_a_departed_reader_in_place(tmp_path: Path):
+    # The stderr half of AD-40: the console is silenced, nothing is raised, and the caller's
+    # own exit path continues, so a human finding still earns exit 1 with nobody reading it.
+    stream = _RefusingStream(BrokenPipeError(errno.EPIPE, "Broken pipe"))
+    console = CliConsole(file=stream, stderr=True, no_color=True, color_system=None)
+    runtime = replace(_runtime(StringIO(), StringIO(), tmp_path, no_color=True), stderr=console)
+
+    runtime.write_stderr("a finding nobody will read")
+
+    assert console.quiet is True

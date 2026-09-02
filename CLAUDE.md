@@ -44,7 +44,7 @@ uv run --group dev ruff format --check src tests scripts
 uv run --group dev ty check src scripts
 uv run --group dev python scripts/check_typing_boundaries.py src
 uv run --group dev python scripts/check_version_sync.py
-uv run --group dev python scripts/check_doc_links.py
+uv run --group dev doc-lattice links
 uv run --group dev python scripts/check_migration_rule.py
 uv run --group dev python scripts/generate_github_slugger_data.py --check
 uv run --group dev python scripts/bench_sections.py
@@ -103,31 +103,23 @@ it before committing.
   and are held to each other by a parsed correspondence test in `tests/test_conventions.py`.
   Change both or neither. Ruff's `target-version`, the CI matrix, and the slugger generator's
   default interpreter are further machine-consumed copies that no gate correlates yet.
-- `scripts/check_doc_links.py` resolves every relative Markdown link and `#anchor` in the
-  maintained documents, which it takes as the sorted root `*.md` files. A target may be any
-  repository-contained relative path, `docs/` staging included; absolute and external
-  destinations are out of scope. Write destinations as Markdown links: a raw HTML anchor is
-  reported rather than resolved, because markdown-it normalizes a Markdown destination and an
-  attribute value arrives with none of that done, so resolving one means owning URL and HTML
-  attribute semantics this gate does not take on. Fragments resolve against a link-target
-  heading inventory the gate builds for itself, so renaming a heading or moving a file fails the
-  hook and the CI code-quality job rather than breaking a deep link silently.
-- That link-target inventory is deliberately separate from doc-lattice's section identity. It
-  reads the gate's own full CommonMark parse, so it covers every heading form GitHub assigns an
-  id to -- setext, ATX indented one to three spaces, and headings nested in a list item or a
-  block quote -- while the addressable subset stays column-zero ATX only. Keep the separation:
-  accepting a valid deep link by widening `extract_headings` instead would change which sections
-  the engine sees, which is a cached-derivation change costing a `CACHE_VERSION` bump and an
-  edit to README.md's addressable-subset paragraph and AD-13. The engine now reads the full
-  inventory in two places of its own, collision tracing and the hash's ancestor context, so the
-  separation being maintained is between *addressing* and everything else, not between the two
-  parses: a non-addressable heading is a collision member and a hashing ancestor, and still owns
-  no lattice id. Both inventories share one slug and collision implementation,
-  `markdown_compat.github_ids_for_texts`, so a heading both see resolves to the same id. Use it
-  for GitHub heading ids: `github_slug` is a base slug with no deduplication, and `anchor_ids`
-  answers a different question, doc-lattice's explicit `{#anchor}` identity. Rendered inline
-  heading text is out of reach on both sides, since ids are slugged from raw inline source
-  rather than rendered text.
+- This repository's Markdown links are gated by the shipped command: `doc-lattice links` runs in
+  the pre-commit hook and the CI code-quality job over the `link_sources` in `.doc-lattice.yml`,
+  which selects the root `*.md` files. A target may be any repository-contained relative path,
+  `docs/` staging included; absolute and external destinations are out of scope. Write
+  destinations as Markdown links: a raw HTML anchor is reported rather than resolved, for the
+  reason `link_check.py` records. Fragments resolve against the engine's full heading
+  inventory, so renaming a heading or moving a file fails the hook and CI rather than breaking a
+  deep link silently. README.md owns the command contract and AD-45 owns the decisions.
+- That inventory is deliberately wider than the addressable subset: `link_check.py` reads
+  `markdown_compat.full_heading_inventory`, which covers every heading form GitHub assigns an id
+  to, while addressing stays column-zero ATX. Keep the separation: accepting a valid deep link by
+  widening `extract_headings` instead would change which sections the engine sees, which is a
+  cached-derivation change costing a `CACHE_VERSION` bump and an edit to README.md's
+  addressable-subset paragraph and AD-13. Use `github_ids_for_texts` or the inventory for GitHub
+  heading ids: `github_slug` is a base slug with no deduplication, and `anchor_ids` answers a
+  different question, doc-lattice's explicit `{#anchor}` identity. Rendered inline heading text
+  is out of reach on both sides, since ids are slugged from raw inline source.
 - Section identity is pinned to `markdown-it-py==4.2.0` and a `github-slugger@2.0.0` target.
   Never hand-edit `_github_slugger_data.py`. Node is a maintenance-only dependency for generator
   verification. Adapter, dependency, Unicode, or generated-data changes require the generator
@@ -153,7 +145,7 @@ it before committing.
   The full pytest suite enforces coverage of at least 80 percent.
 
 For Markdown-only changes, at minimum run `scripts/check_version_sync.py`,
-`scripts/check_doc_links.py`, `scripts/check_migration_rule.py`, and `git diff --check`. Run the
+`doc-lattice links`, `scripts/check_migration_rule.py`, and `git diff --check`. Run the
 full suite when commit hooks do not execute it. For production changes, the complete handoff verification is pytest, Ruff check and
 format check, `ty`, typing boundaries, version sync, doc links, and any generator or benchmark
 gate affected by the change.

@@ -55,8 +55,8 @@ def exit_on_project_error(runtime: CliRuntime, *, github: bool = False) -> Itera
     ``github`` is passed in by the caller rather than read back off the runtime, because the
     selected format belongs to one command invocation and the runtime is shared invocation
     state: parking a mutable format field on it would let one command's choice be observed by
-    every other consumer of the same object. Only ``check`` and ``lint`` offer the format, and
-    both have validated it before they enter this block.
+    every other consumer of the same object. The commands that offer the format (``check``,
+    ``lint``, and ``links``) validate it before they enter this block.
 
     When it is set and the failure names one document, the annotation is written to stdout
     before anything goes to stderr. That order is load-bearing under AD-40: a stdout that refuses

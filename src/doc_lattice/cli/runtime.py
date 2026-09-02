@@ -342,6 +342,28 @@ class CliRuntime:
         except BrokenPipeError as exc:
             raise PipeClosed from exc
 
+    def write_stderr(self, text: str, *, newline: bool = True) -> None:
+        """Write exact text to the captured stderr stream, bypassing Rich.
+
+        The stderr analogue of ``write_stdout``, for a diagnostic line that must reach the
+        reader byte for byte: a link finding carries a filename, and a filename shaped like Rich
+        markup must not become styling. The broken-pipe answer is the stderr half of AD-40,
+        applied here directly because no Rich hook governs a raw stream write: the console is
+        silenced and its descriptor neutralized, nothing is raised, and the caller's own exit
+        code stands. Only a stdout that refuses a write reaches the silent 141.
+
+        Args:
+            text: Text to write without Rich rendering.
+            newline: Whether to append one newline after ``text``.
+        """
+        try:
+            self.stderr.file.write(text)
+            if newline:
+                self.stderr.file.write("\n")
+            self.stderr.file.flush()
+        except BrokenPipeError:
+            apply_broken_pipe_policy(self.stderr)
+
 
 def _github_workspace() -> Path | None:
     """Read the GitHub Actions checkout root from the environment.

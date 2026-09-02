@@ -15,9 +15,17 @@ from ...config import DEFAULT_CONFIG_NAME, declares_lattice_format
 from ...constants import LATTICE_FORMAT_VERSION
 from ...error_types import InitPersistenceError, ValidationError, copy_exception_notes
 from ...linear_query import is_valid_team_key
-from ...path_utils import format_path_for_display
+from ...link_selectors import validate_link_selector
+from ...path_utils import format_path_for_display, safe_resolve
 from ...persistence import DestinationExistsError, atomic_create_bytes
-from ...scaffold import build_scaffold, render_ci, render_gitignore, render_precommit
+from ...scaffold import (
+    RootKind,
+    build_scaffold,
+    render_ci,
+    render_gitignore,
+    render_precommit,
+    selector_for_root,
+)
 from ...text_utils import strip_control_chars
 from ..errors import EXIT_TOOL_ERROR, exit_on_project_error
 from ..git_repository import (
@@ -66,8 +74,8 @@ _BASELINE_GUIDANCE = (
 # split a command across a real line break, which survives redirection and breaks it on copy.
 _ACTIVATION_GUIDANCE = (
     "Enabling the gates is that separate step, and adding the pre-commit block does not perform "
-    "it: both hooks stay inert until pre-commit writes `.git/hooks/pre-commit` in this clone. If "
-    "this clone is not already gated, run `uv tool install pre-commit` and then "
+    "it: all three hooks stay inert until pre-commit writes `.git/hooks/pre-commit` in this "
+    "clone. If this clone is not already gated, run `uv tool install pre-commit` and then "
     "`uv tool run pre-commit install`, or plain `pre-commit install` when a durable runner is "
     "already available. On an initial adoption do that only after the baseline above, and after "
     "`doc-lattice check` and `doc-lattice lint` are clean; an established installation enables "
@@ -172,6 +180,12 @@ def _validate_init_flags(docs_roots: tuple[str, ...], linear_team: str | None) -
             msg = f"flag value {value!r} is empty or contains a control character"
             raise ValidationError(msg)
     for root in docs_roots:
+        if "\\" in root:
+            msg = (
+                f"--docs-root {format_path_for_display(root)} contains a backslash, which the "
+                "link_sources selector grammar cannot express; spell the path with '/'"
+            )
+            raise ValidationError(msg)
         if Path(root).is_absolute() or ".." in Path(root).parts:
             # The recorded flag string is handed to the helper as text. Path(root) would
             # normalize away a doubled separator, a trailing separator, and a leading "./",
@@ -191,6 +205,201 @@ def _validate_init_flags(docs_roots: tuple[str, ...], linear_team: str | None) -
             "rejects any other value."
         )
         raise ValidationError(msg)
+
+
+def _docs_root_mode(root: str, candidate: Path) -> int | None:
+    """Read one docs root's mode, refusing to answer when the filesystem cannot.
+
+    The same stat decision ``_walk_entry_mode`` makes, and it shares that function's
+    ``_ABSENT_ERRNOS`` reasoning, but not its diagnostic: the ancestor walk's refusal explains
+    that it could not tell whether this directory sits inside a configured lattice, which is a
+    sentence about a question this caller is not asking. What is unanswerable here is which
+    ``link_sources`` selector shape the root takes, and the message has to say so or it sends a
+    reader after the wrong file.
+
+    Args:
+        root: The ``--docs-root`` value as written, for the diagnostic.
+        candidate: The root resolved against the invocation directory.
+
+    Returns:
+        The root's ``st_mode``, or None when ``stat`` found nothing to classify. That is not the
+        same as nothing being there, which is why ``_first_blocking_component`` asks the second
+        question.
+
+    Raises:
+        InitPersistenceError: If the root can be neither confirmed nor ruled out.
+    """
+    try:
+        return candidate.stat().st_mode
+    except OSError as exc:
+        if exc.errno in _ABSENT_ERRNOS:
+            return None
+        error = InitPersistenceError(
+            f"cannot determine what --docs-root {format_path_for_display(root)} is: {exc}. That "
+            "answer decides the link_sources selector written for it, so init refuses to "
+            "scaffold rather than guess. Pass --print-only to obtain the snippets without "
+            "writing anything."
+        )
+        copy_exception_notes(error, exc)
+        raise error from exc
+
+
+def _component_mode(component: Path) -> int | None:
+    """Read one intermediate component's mode, or None when it is simply not there.
+
+    Narrower than ``_docs_root_mode`` on purpose. This is only reached once that function has
+    already refused every errno that means the filesystem could not answer for the whole path,
+    and a component of a path stat could not classify can only be present or absent, so an
+    absence here is the ordinary one rather than a question left open.
+
+    Args:
+        component: One component of a docs root, resolved against the invocation directory.
+
+    Returns:
+        The component's ``st_mode``, or None when it does not exist.
+
+    Raises:
+        OSError: If the filesystem refused for any reason other than absence, which
+            ``_docs_root_mode`` has already ruled out for this path.
+    """
+    try:
+        return component.stat(follow_symlinks=False).st_mode
+    except OSError as exc:
+        if exc.errno in _ABSENT_ERRNOS:
+            return None
+        raise
+
+
+def _first_blocking_component(root: str, cwd: Path) -> tuple[str, str] | None:
+    """Return the first component of a docs root the link gate cannot descend through.
+
+    Only asked of a root ``stat`` reported as absent, and the question is whether that absence is
+    the kind the literal directory selector is written for. ``stat`` follows the whole path and
+    stops at the first thing it cannot enter, so it reports a root that is genuinely not there
+    yet, a root that is a link to nothing, a root behind a looping link, a root under a directory
+    reached through a link, and a root under a regular file all the same way. Only the first takes
+    a selector. For the rest something the selector walk will not descend through stands between
+    it and the root, so the literal spelling could not match however the project later grows;
+    repairing the link or removing the file would be needed first, which is what separates these
+    from an ordinary absence.
+
+    The two blockers are the two things ``select_link_sources`` declines to enter. It never
+    follows a symlink, by the containment decision the ``link_check`` module docstring records,
+    and it descends only into an entry that ``_is_directory`` confirms, so a regular file in the
+    middle of a root ends the walk exactly as a link does.
+
+    The components are tested from the invocation directory down rather than the whole path at
+    once, because the blocker need not be the last one: ``linked/child`` under a link named
+    ``linked`` is absent whether that link dangles or resolves, and ``README.md/notes`` is absent
+    because ``README.md`` is a file. The walk stops at the first component that is not there,
+    since nothing below an absent component exists to block anything. A component that exists and
+    is a directory is the only one it walks past, so falling out of the walk is the ordinary
+    absence: the last component cannot be there when ``stat`` reported the whole path was not.
+
+    Args:
+        root: The ``--docs-root`` value as written.
+        cwd: The invocation directory the root is relative to.
+
+    Returns:
+        The blocking component's spelling relative to ``cwd`` paired with what it is, ``symlink``
+        or ``file``, or None when nothing blocks and the absence is ordinary.
+    """
+    current = cwd
+    walked: list[str] = []
+    for part in Path(root).parts:
+        current = current / part
+        walked.append(part)
+        if current.is_symlink():
+            return "/".join(walked), "symlink"
+        mode = _component_mode(current)
+        if mode is None:
+            break
+        if not stat.S_ISDIR(mode):
+            return "/".join(walked), "file"
+    return None
+
+
+def _link_selectors(docs_roots: tuple[str, ...], cwd: Path) -> tuple[str, ...]:
+    """Derive the ``link_sources`` selector for each docs root, from what the root is.
+
+    A root that exists is classified by stat and spelled from its resolved, contained
+    project-relative path rather than from the flag: the link gate never enters a symlinked
+    directory, so a selector written over the link would fail on every run. A root that is not
+    there at all takes the directory form of its literal spelling. Between those two is the root
+    stat calls absent only because something the selector walk will not descend through, a
+    symlink or a regular file, stands somewhere in its path. That root gets no selector at all
+    rather than the literal one: ``_first_blocking_component`` records why the two absences are
+    not the same answer.
+
+    Every derived selector is then put through the same validator the config loader runs, and a
+    rejection is reported here rather than written. ``_validate_init_flags`` refuses the flag
+    spellings a reader can see are wrong, but it is not the whole grammar: a drive prefix is not
+    absolute on POSIX, and a resolved symlink target contributes path segments the flag never
+    carried. Writing such a selector would produce a config that every lattice-loading command
+    refuses at load, so ``init`` would exit 0 and leave the project unable to run.
+
+    Args:
+        docs_roots: The validated ``--docs-root`` values.
+        cwd: The invocation directory the config is written into.
+
+    Returns:
+        One selector per root, in root order.
+
+    Raises:
+        ValidationError: If an existing root resolves outside the invocation directory, if a root
+            sits behind a symlink or a regular file, or if a root's derived selector is one the
+            ``link_sources`` grammar cannot express.
+        InitPersistenceError: If a root can be neither confirmed nor ruled out.
+    """
+    project_root = cwd.resolve()
+    selectors: list[str] = []
+    for root in docs_roots:
+        candidate = cwd / root
+        mode = _docs_root_mode(root, candidate)
+        if mode is None:
+            blocker = _first_blocking_component(root, cwd)
+            if blocker is not None:
+                component, kind_found = blocker
+                displayed = format_path_for_display(root)
+                # A blocker that is the root itself can only be a symlink: a component the walk
+                # would reach through would have made `stat` answer, so this branch would not
+                # have been taken.
+                subject = (
+                    f"--docs-root {displayed} is a symlink"
+                    if component == root
+                    else f"--docs-root {displayed} sits under the {kind_found} "
+                    f"{format_path_for_display(component)}"
+                )
+                refusal = (
+                    "which the link gate never enters"
+                    if kind_found == "symlink"
+                    else "which is not a directory the link gate can descend into"
+                )
+                msg = f"{subject}, {refusal}, so a link_sources selector cannot reach it"
+                raise ValidationError(msg)
+            selector = selector_for_root(root, "directory")
+        else:
+            try:
+                resolved = safe_resolve(candidate, project_root)
+            except ValueError as exc:
+                msg = (
+                    f"--docs-root {format_path_for_display(root)} resolves outside the project "
+                    f"directory {format_path_for_display(cwd)}; a link_sources selector cannot "
+                    "reach it"
+                )
+                raise ValidationError(msg) from exc
+            kind: RootKind = "file" if stat.S_ISREG(mode) else "directory"
+            selector = selector_for_root(resolved.relative_to(project_root).as_posix(), kind)
+        try:
+            validate_link_selector(selector)
+        except ValueError as exc:
+            msg = (
+                f"--docs-root {format_path_for_display(root)} becomes the link_sources selector "
+                f"{format_path_for_display(selector)}, which {exc}"
+            )
+            raise ValidationError(msg) from exc
+        selectors.append(selector)
+    return tuple(selectors)
 
 
 def _init_persistence_error(target_name: str, cause: OSError) -> InitPersistenceError:
@@ -552,8 +761,11 @@ def register_init(app: typer.Typer) -> None:
             else:
                 roots = tuple(docs_root) if docs_root else ("docs",)
                 _validate_init_flags(roots, linear_team)
+                selectors = _link_selectors(roots, runtime.cwd)
                 branch, branch_source = _resolve_default_branch(default_branch, runtime.cwd)
-                scaffold = build_scaffold(roots, linear_team, __version__, default_branch=branch)
+                scaffold = build_scaffold(
+                    roots, selectors, linear_team, __version__, default_branch=branch
+                )
                 _scaffold_config(runtime, scaffold.config_text)
                 gitignore_text = scaffold.gitignore_text
                 precommit_text = scaffold.precommit_text

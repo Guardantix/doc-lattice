@@ -1,21 +1,47 @@
-"""Tests for the relative-link and heading-fragment guard script."""
+"""Tests for the Markdown link gate engine."""
 
+import errno
+import os
+import sys
 from pathlib import Path
-from runpy import run_path
 
 import pytest
-from workflow_helpers import _commands, _invocations, _invokes, _load_workflow
 
-_ROOT = Path(__file__).resolve().parents[1]
-_SCRIPT = run_path(str(_ROOT / "scripts" / "check_doc_links.py"))
-check_repository_links = _SCRIPT["check_repository_links"]
-maintained_documents = _SCRIPT["maintained_documents"]
-_links_in = _SCRIPT["_links_in"]
-_PARSER = _SCRIPT["_PARSER"]
-_anchor_hrefs = _SCRIPT["_anchor_hrefs"]
-_split_destination = _SCRIPT["_split_destination"]
+from doc_lattice import link_check as link_check_module
+from doc_lattice.error_types import ConfigError, UnreadableDocError
+from doc_lattice.link_check import (
+    _PARSER,
+    LinkFinding,
+    _anchor_hrefs,
+    _links_in,
+    _split_destination,
+    check_links,
+    select_link_sources,
+)
+from doc_lattice.path_utils import format_path_for_display
 
-_SCRIPT_PATH = "scripts/check_doc_links.py"
+
+# The old script's whole selection, spelled for the engine: the sorted root Markdown files.
+# Kept as the fixture for the moved cases so every one of them still reads as it did.
+def _root_sources(root: Path) -> list[Path]:
+    return sorted(path for path in root.resolve().glob("*.md") if path.is_file())
+
+
+def _line(finding: LinkFinding) -> str:
+    displayed = format_path_for_display(finding.path)
+    if finding.line is None:
+        return f"{displayed}: {finding.message}"
+    return f"{displayed}:{finding.line}: {finding.message}"
+
+
+def check_repository_links(root: Path) -> list[str]:
+    """The old string form of every finding, so the moved cases assert what they always did."""
+    return [_line(finding) for finding in check_links(root, _root_sources(root))]
+
+
+_requires_permission_enforcement = pytest.mark.skipif(
+    os.name != "posix" or os.geteuid() == 0, reason="needs a POSIX filesystem that enforces modes"
+)
 
 
 def _links(markdown: str) -> list:
@@ -312,6 +338,33 @@ def test_mixed_encoding_dot_segment_normalizes(tmp_path):
     assert check_repository_links(tmp_path) == []
 
 
+def test_a_trailing_slash_names_the_file_it_trails(tmp_path):
+    # GitHub's blob route serves the file at `.../GUIDE.md/` with a 200 rather than looking
+    # beneath it, so requiring a directory there would fail a link that renders and works.
+    # `GUIDE.md/.` normalizes to `GUIDE.md/` under WHATWG path state and is the same case.
+    _write(tmp_path, "README.md", "# Readme\n\n[a](GUIDE.md/)\n\n[b](GUIDE.md/.)\n")
+    _write(tmp_path, "GUIDE.md", "# Guide\n")
+
+    assert check_repository_links(tmp_path) == []
+
+
+def test_a_trailing_slash_does_not_excuse_a_missing_target(tmp_path):
+    # The slash is skipped, not the existence check the path it trails still owes.
+    _write(tmp_path, "README.md", "# Readme\n\n[x](MISSING.md/)\n")
+
+    message = _only_message(tmp_path)
+    assert "MISSING.md/" in message
+    assert "does not exist" in message
+
+
+def test_a_trailing_slash_still_carries_the_fragment_to_the_target(tmp_path):
+    _write(tmp_path, "README.md", "# Readme\n\n[x](GUIDE.md/#no-such-heading)\n")
+    _write(tmp_path, "GUIDE.md", "# Guide\n\n## Section\n")
+
+    message = _only_message(tmp_path)
+    assert "no-such-heading" in message
+
+
 def test_encoded_backslash_does_not_create_path_structure(tmp_path):
     # A decoded backslash is a separator on Windows and an ordinary character on POSIX. The
     # segment check is deterministic across platforms so one shared gate cannot pass here and
@@ -396,7 +449,7 @@ def test_source_leaving_the_repository_through_a_symlink_is_reported(tmp_path):
     messages = check_repository_links(repo)
 
     assert len(messages) == 2
-    assert messages[0] == "'EVIL.md': maintained document leaves the repository through a symlink"
+    assert messages[0] == "'EVIL.md': link source leaves the project root through a symlink"
     assert not any("CONFIDENTIAL.md" in message for message in messages)
     # The run continues, so a later document is still checked.
     assert messages[1].startswith("'README.md':3:")
@@ -412,12 +465,12 @@ def test_source_symlinked_to_an_undecodable_file_is_reported_rather_than_raised(
     (repo / "BIN.md").symlink_to(blob)
 
     message = _only_message(repo)
-    assert "leaves the repository through a symlink" in message
+    assert "leaves the project root through a symlink" in message
 
 
 def test_source_symlinked_inside_the_repository_is_still_checked(tmp_path):
     # Containment must refuse only the sources that leave: an in-repository alias renders on
-    # GitHub and its links are the maintained document's links.
+    # GitHub and its links are the link source's links.
     repo = tmp_path / "repo"
     repo.mkdir()
     _write(repo, "docs/staged.md", "# Staged\n\n[gone](MISSING.md)\n")
@@ -522,7 +575,7 @@ def test_markdown_link_still_reports_its_containing_block(tmp_path):
 
 
 # _split_destination is the URL-normalizing boundary. Neither behaviour below is reachable
-# through a maintained document now that a raw anchor's href is reported rather than resolved:
+# through a link source now that a raw anchor's href is reported rather than resolved:
 # markdown-it hands over a destination it has already trimmed and percent-encoded. They are
 # kept and tested directly, because a boundary that claims to split a URL the way a parser
 # does should do so whatever reaches it.
@@ -576,7 +629,7 @@ def test_an_unparseable_document_does_not_end_the_run(tmp_path):
     messages = check_repository_links(tmp_path)
 
     assert len(messages) == 2
-    assert messages[0] == "'AAA.md': maintained document could not be parsed for destinations"
+    assert messages[0] == "'AAA.md': link source could not be parsed for destinations"
     assert messages[1].startswith("'ZZZ.md':3:")
 
 
@@ -589,7 +642,7 @@ def test_an_undecodable_source_does_not_end_the_run(tmp_path):
     messages = check_repository_links(tmp_path)
 
     assert len(messages) == 2
-    assert messages[0] == "'AAA.md': maintained document could not be parsed for destinations"
+    assert messages[0] == "'AAA.md': link source could not be parsed for destinations"
     assert messages[1].startswith("'ZZZ.md':3:")
 
 
@@ -753,6 +806,33 @@ def test_messages_are_ordered_by_document_then_by_link(tmp_path):
     assert messages[2].startswith("'ZULU.md'")
 
 
+def test_document_order_is_the_spelling_order_not_the_path_order(tmp_path):
+    # Path ordering compares parts, so sorting the paths themselves puts `a/b.md` above `a.md`:
+    # the comparison decides on `a` against `a.md` and never reaches the `/` and `.` that order
+    # the spellings. The findings have to arrive in the order select_link_sources promises and
+    # a reader scans, so the sort is keyed on the project-relative spelling.
+    _write(tmp_path, "a.md", "# a\n\n[x](MISSING-A.md)\n")
+    _write(tmp_path, "a/b.md", "# b\n\n[x](MISSING-B.md)\n")
+
+    selected = select_link_sources(tmp_path, ["**/*.md"])
+    findings = check_links(tmp_path, selected)
+
+    assert _relative(tmp_path, selected) == ["a.md", "a/b.md"]
+    assert [finding.path for finding in findings] == ["a.md", "a/b.md"]
+
+
+def test_findings_keep_spelling_order_whatever_order_the_caller_passed(tmp_path):
+    # check_links upholds the order on its own, so a caller that hands it an arbitrary list
+    # gets the same document order the selector would have produced.
+    _write(tmp_path, "a.md", "# a\n\n[x](MISSING-A.md)\n")
+    _write(tmp_path, "a/b.md", "# b\n\n[x](MISSING-B.md)\n")
+    reversed_sources = [tmp_path.resolve() / "a" / "b.md", tmp_path.resolve() / "a.md"]
+
+    findings = check_links(tmp_path, reversed_sources)
+
+    assert [finding.path for finding in findings] == ["a.md", "a/b.md"]
+
+
 def test_uppercase_markdown_suffix_is_still_fragment_checked(tmp_path):
     # GitHub renders any case of the suffix as Markdown, so a case-sensitive suffix test would
     # accept a dead anchor on GUIDE.MD -- the silent skip this gate exists to prevent.
@@ -836,15 +916,6 @@ def test_first_href_attribute_wins(html, expected):
     assert [href for _, href in _anchor_hrefs(html)] == expected
 
 
-def test_maintained_documents_are_the_sorted_root_markdown_files(tmp_path):
-    _write(tmp_path, "README.md", "# Readme\n")
-    _write(tmp_path, "AGENTS.md", "# Agents\n")
-    _write(tmp_path, "notes.txt", "text\n")
-    _write(tmp_path, "docs/staging.md", "# Staged\n")
-
-    assert [path.name for path in maintained_documents(tmp_path)] == ["AGENTS.md", "README.md"]
-
-
 def test_staged_docs_are_not_link_sources_but_may_be_targets(tmp_path):
     _write(tmp_path, "docs/staging.md", "# Staged\n\n[gone](MISSING.md)\n")
     _write(tmp_path, "README.md", "# Readme\n\n[staged](docs/staging.md)\n")
@@ -862,28 +933,320 @@ def test_a_link_with_an_empty_destination_is_ignored():
     assert _links("[a]()\n") == []
 
 
-def test_repository_maintained_documents_have_no_broken_links():
-    assert check_repository_links(_ROOT) == []
+def test_findings_are_typed_records(tmp_path):
+    _write(tmp_path, "README.md", "# Readme\n\n[gone](MISSING.md)\n")
+
+    findings = check_links(tmp_path, _root_sources(tmp_path))
+
+    assert findings == [LinkFinding("README.md", 3, "link target 'MISSING.md' does not exist")]
 
 
-def test_pre_commit_runs_the_link_check():
-    config = _load_workflow(_ROOT / ".pre-commit-config.yaml")
-    entries = [
-        hook["entry"] for repo in config["repos"] for hook in repo["hooks"] if "entry" in hook
-    ]
+def test_check_links_sorts_a_copy_of_its_sources_without_mutating_them(tmp_path):
+    _write(tmp_path, "B.md", "# B\n\n[gone](MISSING.md)\n")
+    _write(tmp_path, "A.md", "# A\n\n[gone](MISSING.md)\n")
+    sources = [tmp_path / "B.md", tmp_path / "A.md"]
 
-    assert any(_invokes(argv, _SCRIPT_PATH) for entry in entries for argv in _invocations(entry)), (
-        f"no pre-commit hook runs {_SCRIPT_PATH}"
+    findings = check_links(tmp_path, sources)
+
+    assert [finding.path for finding in findings] == ["A.md", "B.md"]
+    assert sources == [tmp_path / "B.md", tmp_path / "A.md"]
+
+
+def test_check_links_rechecks_containment_before_reading_a_source(tmp_path):
+    outside = tmp_path.parent / "outside.md"
+    outside.write_text("# Outside\n\n[gone](MISSING.md)\n", encoding="utf-8")
+    (tmp_path / "escape.md").symlink_to(outside)
+
+    findings = check_links(tmp_path, [tmp_path / "escape.md"])
+
+    assert findings == [LinkFinding("escape.md", None, link_check_module.ESCAPING_SOURCE_MESSAGE)]
+
+
+def test_a_source_that_will_not_decode_is_reported_and_the_run_continues(tmp_path):
+    (tmp_path / "A.md").write_bytes(b"\xff\xfe# not utf-8\n")
+    _write(tmp_path, "B.md", "# B\n\n[gone](MISSING.md)\n")
+
+    findings = check_links(tmp_path, _root_sources(tmp_path))
+
+    assert [(finding.path, finding.line) for finding in findings] == [("A.md", None), ("B.md", 3)]
+    assert findings[0].message == link_check_module.UNPARSEABLE_SOURCE_MESSAGE
+
+
+@_requires_permission_enforcement
+def test_an_unreadable_source_is_a_tool_error_not_a_finding(tmp_path):
+    source = tmp_path / "README.md"
+    _write(tmp_path, "README.md", "# Readme\n")
+    source.chmod(0)
+    try:
+        with pytest.raises(UnreadableDocError) as info:
+            check_links(tmp_path, [source])
+    finally:
+        source.chmod(0o644)
+    assert info.value.source == source
+    assert "README.md" in str(info.value)
+
+
+@_requires_permission_enforcement
+def test_an_unreadable_target_is_a_tool_error_not_a_finding(tmp_path):
+    # Staged rather than root, so this stays a statement about targets: a root GUIDE.md is also
+    # a source here, and the source read would refuse it first and never reach the target read.
+    _write(tmp_path, "README.md", "# Readme\n\n[t](docs/GUIDE.md#intro)\n")
+    target = tmp_path / "docs" / "GUIDE.md"
+    _write(tmp_path, "docs/GUIDE.md", "# Intro\n")
+    target.chmod(0)
+    try:
+        with pytest.raises(UnreadableDocError) as info:
+            check_links(tmp_path, _root_sources(tmp_path))
+    finally:
+        target.chmod(0o644)
+    assert info.value.source == target
+
+
+@_requires_permission_enforcement
+def test_a_target_that_cannot_be_inspected_is_a_tool_error(tmp_path):
+    _write(tmp_path, "README.md", "# Readme\n\n[t](locked/GUIDE.md)\n")
+    _write(tmp_path, "locked/GUIDE.md", "# Guide\n")
+    locked = tmp_path / "locked"
+    locked.chmod(0)
+    try:
+        with pytest.raises(UnreadableDocError):
+            check_links(tmp_path, _root_sources(tmp_path))
+    finally:
+        locked.chmod(0o755)
+
+
+def test_a_parser_invariant_failure_propagates(tmp_path, monkeypatch):
+    _write(tmp_path, "README.md", "# Readme\n\n[t](GUIDE.md#intro)\n")
+    _write(tmp_path, "GUIDE.md", "# Intro\n")
+
+    def broken(_text: str):
+        msg = "malformed heading token pair"
+        raise RuntimeError(msg)
+
+    monkeypatch.setattr(link_check_module, "full_heading_inventory", broken)
+    with pytest.raises(RuntimeError, match="malformed"):
+        check_links(tmp_path, _root_sources(tmp_path))
+
+
+def test_same_line_findings_keep_links_before_raw_anchors(tmp_path):
+    _write(
+        tmp_path,
+        "README.md",
+        '# Readme\n\n<a href="X.md">a</a> and [b](MISSING.md) and <a href="Y.md">c</a>\n',
     )
 
+    findings = check_links(tmp_path, _root_sources(tmp_path))
 
-def test_ci_code_quality_job_runs_the_link_check():
-    # CI enumerates its checks directly and never invokes pre-commit, so the hook alone would
-    # leave a renamed heading green on a pull request.
-    job = _load_workflow(_ROOT / ".github/workflows/ci.yml")["jobs"]["code-quality"]
+    assert [finding.line for finding in findings] == [3, 3, 3]
+    assert "MISSING.md" in findings[0].message
+    assert findings[1].message == link_check_module.HTML_ANCHOR_MESSAGE
+    assert findings[2].message == link_check_module.HTML_ANCHOR_MESSAGE
 
-    assert any(
-        _invokes(argv, _SCRIPT_PATH)
-        for step in job["steps"]
-        for argv in _invocations(_commands(step))
-    ), f"the code-quality job does not run {_SCRIPT_PATH}"
+
+def test_the_target_inventory_is_the_engines_full_heading_inventory(tmp_path):
+    # Setext, an indented ATX, and a heading inside a list item all resolve, and the
+    # document-order dedup suffix is the one GitHub assigns.
+    _write(
+        tmp_path,
+        "README.md",
+        "# Readme\n\n[a](GUIDE.md#setext)\n[b](GUIDE.md#indented)\n[c](GUIDE.md#nested)\n"
+        "[d](GUIDE.md#twice-1)\n",
+    )
+    _write(
+        tmp_path,
+        "GUIDE.md",
+        "Setext\n======\n\n   ## Indented\n\n- ## Nested\n\n## Twice\n\n## Twice\n",
+    )
+
+    assert check_links(tmp_path, _root_sources(tmp_path)) == []
+
+
+def _relative(root: Path, sources: list[Path]) -> list[str]:
+    return [path.relative_to(root.resolve()).as_posix() for path in sources]
+
+
+def test_a_recursive_selector_matches_at_every_depth_and_a_root_one_only_at_the_root(tmp_path):
+    _write(tmp_path, "README.md", "# R\n")
+    _write(tmp_path, "docs/a.md", "# A\n")
+    _write(tmp_path, "docs/deep/b.md", "# B\n")
+    _write(tmp_path, "docs/notes.txt", "x\n")
+
+    assert _relative(tmp_path, select_link_sources(tmp_path, ["docs/**/*.md"])) == [
+        "docs/a.md",
+        "docs/deep/b.md",
+    ]
+    assert _relative(tmp_path, select_link_sources(tmp_path, ["*.md"])) == ["README.md"]
+
+
+def test_selection_is_sorted_and_lexically_deduplicated_across_selectors(tmp_path):
+    _write(tmp_path, "b.md", "# b\n")
+    _write(tmp_path, "a.md", "# a\n")
+    _write(tmp_path, "docs/c.md", "# c\n")
+
+    selected = select_link_sources(tmp_path, ["docs/**/*.md", "*.md", "b.md", "**/*.md"])
+
+    assert _relative(tmp_path, selected) == ["a.md", "b.md", "docs/c.md"]
+
+
+def test_every_selector_must_match_at_least_one_path(tmp_path):
+    _write(tmp_path, "ARCHITECTURE.md", "# A\n")
+
+    with pytest.raises(ConfigError, match=r"docs/\*\*/\*\.md"):
+        select_link_sources(tmp_path, ["ARCHITECTURE.md", "docs/**/*.md"])
+
+
+def test_a_directory_never_satisfies_a_selector(tmp_path):
+    (tmp_path / "docs").mkdir()
+
+    with pytest.raises(ConfigError, match="matches no file"):
+        select_link_sources(tmp_path, ["docs"])
+
+
+def test_a_malformed_selector_is_a_config_error(tmp_path):
+    with pytest.raises(ConfigError, match="backslash"):
+        select_link_sources(tmp_path, ["docs\\a.md"])
+
+
+def test_matching_is_case_sensitive(tmp_path):
+    _write(tmp_path, "README.MD", "# R\n")
+
+    with pytest.raises(ConfigError):
+        select_link_sources(tmp_path, ["*.md"])
+
+
+def test_hidden_directories_get_no_special_treatment(tmp_path):
+    _write(tmp_path, ".hidden/a.md", "# a\n")
+
+    assert _relative(tmp_path, select_link_sources(tmp_path, ["**/*.md"])) == [".hidden/a.md"]
+
+
+def test_a_trailing_recursive_segment_matches_every_file_beneath(tmp_path):
+    _write(tmp_path, "docs/a.md", "# a\n")
+    _write(tmp_path, "docs/deep/b.txt", "b\n")
+
+    assert _relative(tmp_path, select_link_sources(tmp_path, ["docs/**"])) == [
+        "docs/a.md",
+        "docs/deep/b.txt",
+    ]
+
+
+def test_a_tree_deeper_than_the_recursion_limit_is_walked(tmp_path):
+    # The walk's depth is the repository's, not the selector's, so a `**` over a deep tree must
+    # not spend the interpreter's stack. `discovery` walks with rglob and `reconcile_transaction`
+    # with os.walk, both iterative; before this walk kept its own stack it was the one place in
+    # the engine where a deep checkout ended a mandatory gate in a traceback.
+    depth = sys.getrecursionlimit() + 50
+    directory = tmp_path
+    for _ in range(depth):
+        directory = directory / "d"
+        try:
+            directory.mkdir()
+        except OSError as exc:
+            if exc.errno != errno.ENAMETOOLONG:
+                raise
+            pytest.skip("the filesystem refuses a path this deep")
+    (directory / "deep.md").write_text("# deep\n", encoding="utf-8")
+
+    selected = select_link_sources(tmp_path, ["**/*.md"])
+
+    assert _relative(tmp_path, selected) == ["/".join(["d"] * depth) + "/deep.md"]
+
+
+def test_contained_aliases_are_deduplicated_by_resolved_target_keeping_the_first_sorted(tmp_path):
+    _write(tmp_path, "real.md", "# r\n")
+    (tmp_path / "alias.md").symlink_to(tmp_path / "real.md")
+
+    assert _relative(tmp_path, select_link_sources(tmp_path, ["*.md"])) == ["alias.md"]
+
+
+def test_an_escaping_symlink_is_selected_and_then_reported_by_the_checker(tmp_path):
+    outside = tmp_path.parent / "outside.md"
+    outside.write_text("# o\n", encoding="utf-8")
+    (tmp_path / "escape.md").symlink_to(outside)
+    _write(tmp_path, "ok.md", "# ok\n")
+
+    selected = select_link_sources(tmp_path, ["*.md"])
+
+    assert _relative(tmp_path, selected) == ["escape.md", "ok.md"]
+    assert check_links(tmp_path, selected) == [
+        LinkFinding("escape.md", None, link_check_module.ESCAPING_SOURCE_MESSAGE)
+    ]
+
+
+def test_a_symlinked_directory_is_never_entered(tmp_path):
+    _write(tmp_path, "real/a.md", "# a\n")
+    (tmp_path / "linked").symlink_to(tmp_path / "real", target_is_directory=True)
+
+    assert _relative(tmp_path, select_link_sources(tmp_path, ["**/*.md"])) == ["real/a.md"]
+    with pytest.raises(ConfigError, match="matches no file"):
+        select_link_sources(tmp_path, ["linked/*.md"])
+
+
+def test_a_symlink_to_a_directory_matched_as_a_leaf_is_a_tool_error(tmp_path):
+    (tmp_path / "real").mkdir()
+    (tmp_path / "linked.md").symlink_to(tmp_path / "real", target_is_directory=True)
+
+    with pytest.raises(UnreadableDocError, match="not a regular file"):
+        select_link_sources(tmp_path, ["*.md"])
+
+
+def test_a_dangling_symlink_is_a_tool_error(tmp_path):
+    (tmp_path / "gone.md").symlink_to(tmp_path / "nowhere.md")
+
+    with pytest.raises(UnreadableDocError, match=r"gone\.md"):
+        select_link_sources(tmp_path, ["*.md"])
+
+
+@pytest.mark.skipif(os.name != "posix", reason="FIFOs are a POSIX shape")
+def test_a_special_file_is_a_tool_error_without_being_opened(tmp_path):
+    os.mkfifo(tmp_path / "pipe.md")
+
+    with pytest.raises(UnreadableDocError, match="not a regular file"):
+        select_link_sources(tmp_path, ["*.md"])
+
+
+@_requires_permission_enforcement
+def test_an_unscannable_directory_is_a_config_error(tmp_path):
+    _write(tmp_path, "docs/a.md", "# a\n")
+    locked = tmp_path / "docs"
+    locked.chmod(0)
+    try:
+        with pytest.raises(ConfigError, match="could not scan"):
+            select_link_sources(tmp_path, ["docs/**/*.md"])
+    finally:
+        locked.chmod(0o755)
+
+
+def test_adjacent_recursive_segments_match_the_same_set_as_one(tmp_path):
+    _write(tmp_path, "a/x/y/z/b.md", "# b\n")
+    _write(tmp_path, "a/b.md", "# b\n")
+    _write(tmp_path, "a/x/b.md", "# b\n")
+
+    stacked = select_link_sources(tmp_path, ["a/**/**/**/b.md"])
+    single = select_link_sources(tmp_path, ["a/**/b.md"])
+
+    assert _relative(tmp_path, stacked) == _relative(tmp_path, single)
+    assert _relative(tmp_path, single) == ["a/b.md", "a/x/b.md", "a/x/y/z/b.md"]
+
+
+def test_recursive_segments_scan_each_directory_a_bounded_number_of_times(tmp_path, monkeypatch):
+    depth = 12
+    parts = [f"d{n}" for n in range(1, depth + 1)]
+    _write(tmp_path, "/".join(parts) + "/leaf.md", "# leaf\n")
+
+    calls = 0
+    real_scan = link_check_module._scan
+
+    def counting_scan(directory):
+        nonlocal calls
+        calls += 1
+        return real_scan(directory)
+
+    monkeypatch.setattr(link_check_module, "_scan", counting_scan)
+
+    selected = select_link_sources(tmp_path, ["**/**/**/**/**/*.md"])
+
+    directories = depth + 1  # the chain plus the project root
+    segments = 6  # five recursive segments plus the trailing "*.md"
+    assert calls <= directories * segments
+    assert _relative(tmp_path, selected) == ["/".join(parts) + "/leaf.md"]
