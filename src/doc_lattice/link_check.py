@@ -304,6 +304,14 @@ def _contained_parts(base: PurePosixPath, raw_path: str) -> tuple[str, ...] | No
     to ``GUIDE.md`` rather than naming a directory called ``..``. Containment is unaffected --
     an encoded double-dot pops exactly like a bare one, and popping past the root refuses.
 
+    An empty segment is skipped along with the dot segments, so a trailing slash names the path
+    it trails rather than a directory the target must be. ``GUIDE.md/`` is deliberately accepted
+    against the file: GitHub's blob route serves the file at that URL with a 200 rather than
+    looking beneath it, so requiring a directory there would fail a link that renders and works,
+    which is the one outcome this gate must not produce. The slash is not thereby unchecked --
+    the path it trails still has to exist, and ``nope.md/`` is reported like any other dead
+    destination.
+
     This pass is lexical so that a destination which escapes on paper is refused before the
     filesystem is touched at all. It is not the whole containment story: a contained path can
     still be a symlink out of the repository, which ``_escapes_by_symlink`` covers.

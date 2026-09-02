@@ -338,6 +338,33 @@ def test_mixed_encoding_dot_segment_normalizes(tmp_path):
     assert check_repository_links(tmp_path) == []
 
 
+def test_a_trailing_slash_names_the_file_it_trails(tmp_path):
+    # GitHub's blob route serves the file at `.../GUIDE.md/` with a 200 rather than looking
+    # beneath it, so requiring a directory there would fail a link that renders and works.
+    # `GUIDE.md/.` normalizes to `GUIDE.md/` under WHATWG path state and is the same case.
+    _write(tmp_path, "README.md", "# Readme\n\n[a](GUIDE.md/)\n\n[b](GUIDE.md/.)\n")
+    _write(tmp_path, "GUIDE.md", "# Guide\n")
+
+    assert check_repository_links(tmp_path) == []
+
+
+def test_a_trailing_slash_does_not_excuse_a_missing_target(tmp_path):
+    # The slash is skipped, not the existence check the path it trails still owes.
+    _write(tmp_path, "README.md", "# Readme\n\n[x](MISSING.md/)\n")
+
+    message = _only_message(tmp_path)
+    assert "MISSING.md/" in message
+    assert "does not exist" in message
+
+
+def test_a_trailing_slash_still_carries_the_fragment_to_the_target(tmp_path):
+    _write(tmp_path, "README.md", "# Readme\n\n[x](GUIDE.md/#no-such-heading)\n")
+    _write(tmp_path, "GUIDE.md", "# Guide\n\n## Section\n")
+
+    message = _only_message(tmp_path)
+    assert "no-such-heading" in message
+
+
 def test_encoded_backslash_does_not_create_path_structure(tmp_path):
     # A decoded backslash is a separator on Windows and an ordinary character on POSIX. The
     # segment check is deterministic across platforms so one shared gate cannot pass here and
