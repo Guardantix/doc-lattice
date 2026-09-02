@@ -38,8 +38,8 @@ _EXPECTED_BASELINE_GUIDANCE = (
 # reason: a wording change has to fail this test rather than be followed silently.
 _EXPECTED_ACTIVATION_GUIDANCE = (
     "Enabling the gates is that separate step, and adding the pre-commit block does not perform "
-    "it: both hooks stay inert until pre-commit writes `.git/hooks/pre-commit` in this clone. If "
-    "this clone is not already gated, run `uv tool install pre-commit` and then "
+    "it: all three hooks stay inert until pre-commit writes `.git/hooks/pre-commit` in this "
+    "clone. If this clone is not already gated, run `uv tool install pre-commit` and then "
     "`uv tool run pre-commit install`, or plain `pre-commit install` when a durable runner is "
     "already available. On an initial adoption do that only after the baseline above, and after "
     "`doc-lattice check` and `doc-lattice lint` are clean; an established installation enables "
@@ -83,6 +83,16 @@ def _shared_guidance(version: str) -> str:
         "doc-lattice lint\n"
         "        language: system\n"
         "        files: \\.md$\n"
+        "        pass_filenames: false\n"
+        "      # always_run rather than files: \\.md$, because the break links catches is\n"
+        "      # cross-document: renaming a heading in one file invalidates a link written in\n"
+        "      # another, and the file that changed is not the file that ends up wrong.\n"
+        "      - id: doc-lattice-links\n"
+        "        name: doc-lattice links\n"
+        f"        entry: uvx --python 3.13 --from doc-lattice=={version} "
+        "doc-lattice links\n"
+        "        language: system\n"
+        "        always_run: true\n"
         "        pass_filenames: false\n"
         "\n"
     )
@@ -134,7 +144,10 @@ def _legacy_stdout(version: str) -> str:
         "          rc_check=$?\n"
         f"          uvx --python 3.13 --from doc-lattice=={version} doc-lattice lint\n"
         "          rc_lint=$?\n"
-        '          [ "$rc_check" -eq 0 ] && [ "$rc_lint" -eq 0 ]\n'
+        f"          uvx --python 3.13 --from doc-lattice=={version} doc-lattice links "
+        "--format github\n"
+        "          rc_links=$?\n"
+        '          [ "$rc_check" -eq 0 ] && [ "$rc_lint" -eq 0 ] && [ "$rc_links" -eq 0 ]\n'
         "\n"
     )
 
@@ -158,6 +171,8 @@ def test_init_delegates_create_only_write_to_shared_persistence(tmp_path: Path, 
         b"lattice_format: 2\n"
         b"docs_roots:\n"
         b"  - docs\n"
+        b"link_sources:\n"
+        b"  - docs/**/*.md\n"
         b"# ignore_globs:\n"
         b'#   - "**/archive/**"\n'
         b"# cache_key: my-project-docs   # opt-in load cache slot under your cache home\n"
@@ -1217,3 +1232,68 @@ def test_init_print_only_prints_over_an_existing_config_without_touching_it(
     assert config.read_text(encoding="utf-8") == "SENTINEL\n"
     assert "already exists" not in result.stderr
     assert "wrote" not in result.stderr
+
+
+def _written_config(tmp_path: Path) -> str:
+    return (tmp_path / ".doc-lattice.yml").read_text(encoding="utf-8")
+
+
+def test_init_derives_link_sources_from_the_default_docs_root(tmp_path: Path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    assert runner.invoke(app, ["init"]).exit_code == 0
+    assert "link_sources:\n  - docs/**/*.md\n" in _written_config(tmp_path)
+
+
+def test_init_spells_an_existing_file_root_as_itself(tmp_path: Path, monkeypatch):
+    (tmp_path / "SPEC.md").write_text("# Spec\n", encoding="utf-8")
+    monkeypatch.chdir(tmp_path)
+    assert runner.invoke(app, ["init", "--docs-root", "SPEC.md"]).exit_code == 0
+    assert "link_sources:\n  - SPEC.md\n" in _written_config(tmp_path)
+
+
+def test_init_uses_the_directory_form_for_a_root_that_does_not_exist_yet(
+    tmp_path: Path, monkeypatch
+):
+    monkeypatch.chdir(tmp_path)
+    assert runner.invoke(app, ["init", "--docs-root", "./design/"]).exit_code == 0
+    assert "link_sources:\n  - design/**/*.md\n" in _written_config(tmp_path)
+
+
+def test_init_escapes_a_metacharacter_in_a_root(tmp_path: Path, monkeypatch):
+    (tmp_path / "notes [draft]").mkdir()
+    monkeypatch.chdir(tmp_path)
+    assert runner.invoke(app, ["init", "--docs-root", "notes [draft]"]).exit_code == 0
+    assert "link_sources:\n  - notes [[]draft]/**/*.md\n" in _written_config(tmp_path)
+
+
+def test_init_derives_the_selector_from_a_symlinked_roots_resolved_path(
+    tmp_path: Path, monkeypatch
+):
+    # The checker never enters a symlinked directory, so a selector written over the link
+    # would fail on every run; the resolved, contained path is what is written.
+    (tmp_path / "real").mkdir()
+    (tmp_path / "linked").symlink_to(tmp_path / "real", target_is_directory=True)
+    monkeypatch.chdir(tmp_path)
+    assert runner.invoke(app, ["init", "--docs-root", "linked"]).exit_code == 0
+    assert "link_sources:\n  - real/**/*.md\n" in _written_config(tmp_path)
+
+
+def test_init_rejects_a_root_that_resolves_outside_the_project(tmp_path: Path, monkeypatch):
+    outside = tmp_path.parent / "elsewhere"
+    outside.mkdir(exist_ok=True)
+    (tmp_path / "away").symlink_to(outside, target_is_directory=True)
+    monkeypatch.chdir(tmp_path)
+    result = runner.invoke(app, ["init", "--docs-root", "away"])
+    # Not `_assert_rejected_before_any_write`: that helper asserts the directory holds only
+    # `.git`, and this case has to create the escaping symlink to have something to reject.
+    # The write is still what is being ruled out, so the config's absence is asserted directly.
+    assert result.exit_code == 2
+    assert not (tmp_path / ".doc-lattice.yml").exists()
+    assert "resolves outside" in result.stderr
+
+
+def test_init_rejects_a_root_with_a_backslash(tmp_path: Path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    result = runner.invoke(app, ["init", "--docs-root", "docs\\guides"])
+    _assert_rejected_before_any_write(result, tmp_path)
+    assert "backslash" in result.stderr

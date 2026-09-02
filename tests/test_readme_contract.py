@@ -24,7 +24,7 @@ import typer
 
 from doc_lattice.cli.application import create_app
 from doc_lattice.constants import ErrorCode
-from doc_lattice.scaffold import render_config
+from doc_lattice.scaffold import render_config, selector_for_root
 from doc_lattice.sections import build_toc, split_body_lines
 
 _ROOT = Path(__file__).resolve().parents[1]
@@ -152,4 +152,6 @@ def test_readme_config_sample_is_byte_for_byte_the_generated_default():
     """The Configuration fence is what a flagless ``init`` writes, not a hand-kept paraphrase."""
     fences = _YAML_FENCE.findall(_section(_readme(), 2, "Configuration"))
     assert len(fences) == 1, f"expected one yaml fence under Configuration, found {len(fences)}"
-    assert fences[0] == render_config(_DEFAULT_DOCS_ROOTS, None)
+    assert fences[0] == render_config(
+        _DEFAULT_DOCS_ROOTS, (selector_for_root("docs", "directory"),), None
+    )

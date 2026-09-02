@@ -7,6 +7,7 @@ package does the disk write and the printing.
 
 import io
 from dataclasses import dataclass
+from typing import Literal
 
 from ruamel.yaml import YAML
 from ruamel.yaml.scalarstring import DoubleQuotedScalarString
@@ -20,9 +21,16 @@ from .constants import (
     RECONCILE_JOURNAL_NAME,
     SETUP_UV_USES,
 )
+from .link_selectors import escape_selector_literal
 
 DOC_LATTICE_REPO_URL = "https://github.com/Guardantix/doc-lattice"
 PYTHON_PIN = "3.13"
+
+# What a docs root turned out to be when init looked, which decides the selector shape written
+# for it. A nonexistent root is classified as a directory, because the default root is created
+# after init and a directory is what a docs root usually is.
+RootKind = Literal["file", "directory"]
+_RECURSIVE_MARKDOWN = "**/*.md"
 
 # ruamel wraps flow sequences at 80 columns by default, which would split a long branch filter
 # across lines and corrupt the hand-assembled workflow text around it.
@@ -69,7 +77,32 @@ def _invocation(version: str, command: str) -> str:
     return f"uvx --python {PYTHON_PIN} --from doc-lattice=={version} doc-lattice {command}"
 
 
-def render_config(docs_roots: tuple[str, ...], linear_team: str | None) -> str:
+def selector_for_root(root: str, kind: RootKind) -> str:
+    """Spell one docs root as the ``link_sources`` selector that covers it.
+
+    The literal is normalized (a leading ``./``, trailing slashes, and interior ``//`` or
+    ``/./`` removed) and then escaped, so a root containing ``*``, ``?``, or ``[`` names itself
+    rather than becoming a pattern. The project root itself becomes every Markdown file beneath
+    it.
+
+    Args:
+        root: The root as a project-relative POSIX path. The init adapter passes the resolved,
+            contained path for a root that exists and the literal flag for one that does not.
+        kind: Whether the root is a file or a directory.
+
+    Returns:
+        The file itself for a file root, or ``root/**/*.md`` for a directory root.
+    """
+    normalized = "/".join(part for part in root.split("/") if part not in ("", "."))
+    if normalized == "":
+        return _RECURSIVE_MARKDOWN
+    literal = escape_selector_literal(normalized)
+    return literal if kind == "file" else f"{literal}/{_RECURSIVE_MARKDOWN}"
+
+
+def render_config(
+    docs_roots: tuple[str, ...], link_sources: tuple[str, ...], linear_team: str | None
+) -> str:
     """Render .doc-lattice.yml with active keys serialized and optionals commented.
 
     The active block is dumped through ruamel.yaml so hostile scalars are quoted
@@ -80,6 +113,8 @@ def render_config(docs_roots: tuple[str, ...], linear_team: str | None) -> str:
 
     Args:
         docs_roots: The docs roots to write as the active docs_roots list.
+        link_sources: The selectors to write as the active link_sources list, already derived
+            from the roots by the caller.
         linear_team: The team key to bake in, or None to leave it commented.
 
     Returns:
@@ -88,6 +123,7 @@ def render_config(docs_roots: tuple[str, ...], linear_team: str | None) -> str:
     data: dict[str, int | list[str] | str] = {
         "lattice_format": LATTICE_FORMAT_VERSION,
         "docs_roots": list(docs_roots),
+        "link_sources": list(link_sources),
     }
     if linear_team is not None:
         data["linear_team"] = linear_team
@@ -118,7 +154,7 @@ def render_gitignore() -> str:
 
 
 def render_precommit(version: str) -> str:
-    """Render the repo: local pre-commit hooks that run doc-lattice check and lint."""
+    """Render the repo: local pre-commit hooks that run doc-lattice check, lint, and links."""
     return (
         "  - repo: local\n"
         "    hooks:\n"
@@ -133,6 +169,15 @@ def render_precommit(version: str) -> str:
         f"        entry: {_invocation(version, 'lint')}\n"
         "        language: system\n"
         "        files: \\.md$\n"
+        "        pass_filenames: false\n"
+        "      # always_run rather than files: \\.md$, because the break links catches is\n"
+        "      # cross-document: renaming a heading in one file invalidates a link written in\n"
+        "      # another, and the file that changed is not the file that ends up wrong.\n"
+        "      - id: doc-lattice-links\n"
+        "        name: doc-lattice links\n"
+        f"        entry: {_invocation(version, 'links')}\n"
+        "        language: system\n"
+        "        always_run: true\n"
         "        pass_filenames: false\n"
     )
 
@@ -162,11 +207,13 @@ def _render_branch_filter(default_branch: str) -> str:
 
 
 def render_ci(version: str, *, default_branch: str) -> str:
-    """Render the GitHub Actions workflow that runs doc-lattice check and lint.
+    """Render the GitHub Actions workflow that runs doc-lattice check, lint, and links.
 
-    Both commands run in one shell step so a check failure does not skip lint. set +e
-    disables errexit so both exit codes are captured; the final test fails the step if
-    either command failed.
+    All three commands run in one shell step so a check failure does not skip the rest. set +e
+    disables errexit so every exit code is captured; the final test fails the step if any
+    command failed. ``links`` runs with ``--format github`` because annotations on the
+    pull-request diff are the surface a reviewer sees; ``check`` and ``lint`` keep their plain
+    invocations.
 
     ``default_branch`` is required and keyword-only so no caller can silently restore a
     hard-wired ``main``: an adopting repository whose default branch is ``master``, ``trunk``,
@@ -185,6 +232,7 @@ def render_ci(version: str, *, default_branch: str) -> str:
     """
     check_cmd = _invocation(version, "check")
     lint_cmd = _invocation(version, "lint")
+    links_cmd = _invocation(version, "links --format github")
     branch_filter = _render_branch_filter(default_branch)
     return (
         "name: doc-lattice\n"
@@ -212,12 +260,15 @@ def render_ci(version: str, *, default_branch: str) -> str:
         "          rc_check=$?\n"
         f"          {lint_cmd}\n"
         "          rc_lint=$?\n"
-        '          [ "$rc_check" -eq 0 ] && [ "$rc_lint" -eq 0 ]\n'
+        f"          {links_cmd}\n"
+        "          rc_links=$?\n"
+        '          [ "$rc_check" -eq 0 ] && [ "$rc_lint" -eq 0 ] && [ "$rc_links" -eq 0 ]\n'
     )
 
 
 def build_scaffold(
     docs_roots: tuple[str, ...],
+    link_sources: tuple[str, ...],
     linear_team: str | None,
     version: str,
     *,
@@ -227,6 +278,8 @@ def build_scaffold(
 
     Args:
         docs_roots: The docs roots for the config's docs_roots list.
+        link_sources: The selectors for the config's link_sources list, already derived from
+            the roots by the caller.
         linear_team: The team key to bake in, or None.
         version: The exact PyPI package version the snippets install, for example "1.0.0".
         default_branch: The already validated branch the workflow's triggers filter on.
@@ -236,7 +289,7 @@ def build_scaffold(
         A Scaffold holding the config text and the three guidance snippets.
     """
     return Scaffold(
-        config_text=render_config(docs_roots, linear_team),
+        config_text=render_config(docs_roots, link_sources, linear_team),
         gitignore_text=render_gitignore(),
         precommit_text=render_precommit(version),
         ci_text=render_ci(version, default_branch=default_branch),

@@ -691,6 +691,8 @@ from the current directory:
 lattice_format: 2
 docs_roots:
   - docs
+link_sources:
+  - docs/**/*.md
 # ignore_globs:
 #   - "**/archive/**"
 # cache_key: my-project-docs   # opt-in load cache slot under your cache home

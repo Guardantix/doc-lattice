@@ -25,6 +25,7 @@ from doc_lattice.scaffold import (
     render_ci,
     render_config,
     render_gitignore,
+    selector_for_root,
 )
 
 
@@ -34,7 +35,7 @@ def _load(text: str) -> Config:
 
 
 def test_render_config_includes_commented_cache_examples():
-    text = render_config(("docs",), None)
+    text = render_config(("docs",), ("docs/**/*.md",), None)
     assert "# cache_key: my-project-docs" in text
     # cache_trust_stat is scaffolded because it is the one option whose fast path trades a read
     # for trust, so a reader should meet it in the file rather than only in the docs. It is
@@ -74,13 +75,13 @@ def test_render_gitignore_derives_patterns_from_shared_naming_constants(monkeypa
 
 
 def test_build_scaffold_includes_exact_gitignore_text():
-    scaffold = build_scaffold(("docs",), None, "1.0.0", default_branch="main")
+    scaffold = build_scaffold(("docs",), ("docs/**/*.md",), None, "1.0.0", default_branch="main")
 
     assert scaffold.gitignore_text == render_gitignore()
 
 
 def test_render_config_default_has_docs_active_and_keys_commented():
-    text = render_config(("docs",), None)
+    text = render_config(("docs",), ("docs/**/*.md",), None)
     assert "docs_roots:" in text
     assert "- docs" in text
     assert "# ignore_globs:" in text
@@ -94,7 +95,7 @@ def test_render_config_default_has_docs_active_and_keys_commented():
 def test_commented_example_keys_stay_valid_against_config_schema():
     # The commented keys document the live schema; uncommenting them must still
     # produce a valid Config (strict + extra='forbid'), or the examples have rotted.
-    lines = render_config(("docs",), None).splitlines()
+    lines = render_config(("docs",), ("docs/**/*.md",), None).splitlines()
     body = [line for line in lines if "configuration. See" not in line]  # drop header
     cfg = _load("\n".join(re.sub(r"^#\s?", "", line) for line in body))
     # Pin the whole set, not a sample: a newly scaffolded commented key would otherwise be
@@ -102,6 +103,7 @@ def test_commented_example_keys_stay_valid_against_config_schema():
     assert cfg.model_fields_set == {
         "lattice_format",
         "docs_roots",
+        "link_sources",
         "ignore_globs",
         "cache_key",
         "cache_trust_stat",
@@ -117,12 +119,12 @@ def test_commented_example_keys_stay_valid_against_config_schema():
 
 
 def test_render_config_lists_multiple_roots():
-    text = render_config(("design", "lore"), None)
+    text = render_config(("design", "lore"), ("design/**/*.md", "lore/**/*.md"), None)
     assert _load(text).docs_roots == ["design", "lore"]
 
 
 def test_render_config_bakes_linear_team_and_drops_comment():
-    text = render_config(("docs",), "PC")
+    text = render_config(("docs",), ("docs/**/*.md",), "PC")
     assert "linear_team: PC" in text
     assert "# linear_team: ENG" not in text
     assert _load(text).linear_team == "PC"
@@ -130,13 +132,13 @@ def test_render_config_bakes_linear_team_and_drops_comment():
 
 @pytest.mark.parametrize("value", ["1.0", "#hash", "a: b", "*anchor", "true", "0755"])
 def test_render_config_quotes_hostile_linear_team(value):
-    cfg = _load(render_config(("docs",), value))
+    cfg = _load(render_config(("docs",), ("docs/**/*.md",), value))
     assert cfg.linear_team == value
 
 
 @pytest.mark.parametrize("root", ["1.0", "#hash", "weird:name"])
 def test_render_config_quotes_hostile_docs_root(root):
-    cfg = _load(render_config((root,), None))
+    cfg = _load(render_config((root,), (selector_for_root(root, "directory"),), None))
     assert cfg.docs_roots == [root]
 
 
@@ -147,23 +149,27 @@ _scalars = st.text(st.characters(blacklist_categories=("Cc", "Cs"))).filter(bool
 
 @given(team=_scalars)
 def test_render_config_round_trips_any_linear_team(team):
-    assert _load(render_config(("docs",), team)).linear_team == team
+    assert _load(render_config(("docs",), ("docs/**/*.md",), team)).linear_team == team
 
 
 @given(root=_scalars)
 def test_render_config_round_trips_any_docs_root(root):
-    assert _load(render_config((root,), None)).docs_roots == [root]
+    # A fixed, valid selector rather than one derived from the generated root: the property
+    # under test is that the emitter round-trips any docs_roots scalar, and link_sources is a
+    # validated domain that rejects spellings this strategy generates and init refuses before
+    # render_config sees them. Derivation is covered by the selector_for_root cases below.
+    assert _load(render_config((root,), ("docs/**/*.md",), None)).docs_roots == [root]
 
 
 def test_the_scaffolded_config_declares_the_lattice_format_first():
-    text = render_config(("docs",), None)
+    text = render_config(("docs",), ("docs/**/*.md",), None)
 
     assert "lattice_format: 2\n" in text
     assert text.index("lattice_format:") < text.index("docs_roots:")
 
 
 def test_snippets_pin_pypi_version_and_python():
-    scaffold = build_scaffold(("docs",), None, "0.2.0", default_branch="main")
+    scaffold = build_scaffold(("docs",), ("docs/**/*.md",), None, "0.2.0", default_branch="main")
     for text in (scaffold.precommit_text, scaffold.ci_text):
         assert "--from doc-lattice==0.2.0" in text
         assert "--python 3.13" in text
@@ -178,7 +184,7 @@ def test_snippets_pin_pypi_version_and_python():
 def test_ci_snippet_pins_actions_by_full_commit_sha_not_a_floating_tag():
     # A floating tag re-resolves on every run, which is exactly what a commit pin exists to
     # avoid; the printed snippet has to match that posture.
-    ci = build_scaffold(("docs",), None, "0.2.0", default_branch="main").ci_text
+    ci = build_scaffold(("docs",), ("docs/**/*.md",), None, "0.2.0", default_branch="main").ci_text
 
     assert "actions/checkout@v4" not in ci
     assert "astral-sh/setup-uv@v6" not in ci
@@ -193,7 +199,7 @@ def test_ci_snippet_carries_the_documented_least_privilege_posture():
     # checkout resolves and executes third-party packages. Without these settings the job's
     # token stays in .git/config and is writable while that happens, and a persistent cache any
     # other workflow on the repository can populate is restored into the gate job.
-    ci = build_scaffold(("docs",), None, "0.2.0", default_branch="main").ci_text
+    ci = build_scaffold(("docs",), ("docs/**/*.md",), None, "0.2.0", default_branch="main").ci_text
     workflow = YAML(typ="safe").load(ci)
     steps = workflow["jobs"]["check"]["steps"]
 
@@ -205,20 +211,22 @@ def test_ci_snippet_carries_the_documented_least_privilege_posture():
 
 
 def test_invocation_installs_from_exact_pypi_requirement():
-    scaffold = build_scaffold(("docs",), None, "0.2.0", default_branch="main")
+    scaffold = build_scaffold(("docs",), ("docs/**/*.md",), None, "0.2.0", default_branch="main")
     for text in (scaffold.precommit_text, scaffold.ci_text):
         assert "--from doc-lattice==0.2.0 doc-lattice check" in text
         assert "--from doc-lattice==0.2.0 doc-lattice lint" in text
 
 
 def test_generated_gates_run_check_and_lint():
-    scaffold = build_scaffold(("docs",), None, "0.3.0", default_branch="main")
+    scaffold = build_scaffold(("docs",), ("docs/**/*.md",), None, "0.3.0", default_branch="main")
     assert "id: doc-lattice-check" in scaffold.precommit_text
     assert "id: doc-lattice-lint" in scaffold.precommit_text
     assert "doc-lattice check" in scaffold.precommit_text
     assert "doc-lattice lint" in scaffold.precommit_text
     assert "doc-lattice check" in scaffold.ci_text
     assert "doc-lattice lint" in scaffold.ci_text
+    assert "doc-lattice links" in scaffold.precommit_text
+    assert "doc-lattice links" in scaffold.ci_text
 
 
 def test_ci_snippet_filters_both_triggers_on_the_requested_branch():
@@ -277,15 +285,68 @@ def test_ci_snippet_keeps_a_long_branch_filter_on_one_line():
 def test_build_scaffold_requires_the_branch_as_a_keyword():
     # Required and keyword-only so no future caller can silently restore a hard-wired main.
     with pytest.raises(TypeError):
-        build_scaffold(("docs",), None, "0.3.0")  # ty: ignore[missing-argument]
+        build_scaffold(("docs",), ("docs/**/*.md",), None, "0.3.0")  # ty: ignore[missing-argument]
 
 
 def test_ci_runs_both_commands_in_one_step():
     # A second GitHub Actions run step would be skipped after check exits nonzero,
     # so both commands share one step that captures each exit code and fails if
     # either failed.
-    ci = build_scaffold(("docs",), None, "0.3.0", default_branch="main").ci_text
+    ci = build_scaffold(("docs",), ("docs/**/*.md",), None, "0.3.0", default_branch="main").ci_text
     assert ci.count("- run:") == 1
     assert "rc_check=$?" in ci
     assert "rc_lint=$?" in ci
     assert '[ "$rc_check" -eq 0 ] && [ "$rc_lint" -eq 0 ]' in ci
+
+
+@pytest.mark.parametrize(
+    ("root", "kind", "selector"),
+    [
+        ("docs", "directory", "docs/**/*.md"),
+        ("./docs/", "directory", "docs/**/*.md"),
+        ("docs//sub/./x", "directory", "docs/sub/x/**/*.md"),
+        (".", "directory", "**/*.md"),
+        ("SPEC.md", "file", "SPEC.md"),
+        ("notes [draft]", "directory", "notes [[]draft]/**/*.md"),
+        ("what?.md", "file", "what[?].md"),
+        ("missing", "directory", "missing/**/*.md"),
+    ],
+)
+def test_selector_for_root_spells_a_literal_root_as_a_selector(root, kind, selector):
+    assert selector_for_root(root, kind) == selector
+
+
+def test_render_config_writes_link_sources_after_docs_roots():
+    text = render_config(("docs",), ("docs/**/*.md",), None)
+    assert "docs_roots:\n  - docs\nlink_sources:\n  - docs/**/*.md\n" in text
+    assert _load(text).link_sources == ["docs/**/*.md"]
+
+
+def test_render_config_quotes_a_selector_yaml_would_read_as_an_alias():
+    assert _load(render_config((".",), ("**/*.md",), None)).link_sources == ["**/*.md"]
+
+
+def test_generated_gates_run_links_as_an_always_run_hook_and_an_annotated_ci_step():
+    scaffold = build_scaffold(("docs",), ("docs/**/*.md",), None, "0.3.0", default_branch="main")
+    hooks = YAML(typ="safe").load(scaffold.precommit_text)[0]["hooks"]
+    links_hook = [hook for hook in hooks if hook["id"] == "doc-lattice-links"]
+
+    assert [hook["id"] for hook in hooks] == [
+        "doc-lattice-check",
+        "doc-lattice-lint",
+        "doc-lattice-links",
+    ]
+    assert links_hook == [
+        {
+            "id": "doc-lattice-links",
+            "name": "doc-lattice links",
+            "entry": "uvx --python 3.13 --from doc-lattice==0.3.0 doc-lattice links",
+            "language": "system",
+            "always_run": True,
+            "pass_filenames": False,
+        }
+    ]
+    assert "--from doc-lattice==0.3.0 doc-lattice links --format github\n" in scaffold.ci_text
+    assert "rc_links=$?" in scaffold.ci_text
+    conjunction = '[ "$rc_check" -eq 0 ] && [ "$rc_lint" -eq 0 ] && [ "$rc_links" -eq 0 ]'
+    assert conjunction in scaffold.ci_text

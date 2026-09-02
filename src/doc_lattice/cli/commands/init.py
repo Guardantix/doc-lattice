@@ -15,9 +15,16 @@ from ...config import DEFAULT_CONFIG_NAME, declares_lattice_format
 from ...constants import LATTICE_FORMAT_VERSION
 from ...error_types import InitPersistenceError, ValidationError, copy_exception_notes
 from ...linear_query import is_valid_team_key
-from ...path_utils import format_path_for_display
+from ...path_utils import format_path_for_display, safe_resolve
 from ...persistence import DestinationExistsError, atomic_create_bytes
-from ...scaffold import build_scaffold, render_ci, render_gitignore, render_precommit
+from ...scaffold import (
+    RootKind,
+    build_scaffold,
+    render_ci,
+    render_gitignore,
+    render_precommit,
+    selector_for_root,
+)
 from ...text_utils import strip_control_chars
 from ..errors import EXIT_TOOL_ERROR, exit_on_project_error
 from ..git_repository import (
@@ -66,8 +73,8 @@ _BASELINE_GUIDANCE = (
 # split a command across a real line break, which survives redirection and breaks it on copy.
 _ACTIVATION_GUIDANCE = (
     "Enabling the gates is that separate step, and adding the pre-commit block does not perform "
-    "it: both hooks stay inert until pre-commit writes `.git/hooks/pre-commit` in this clone. If "
-    "this clone is not already gated, run `uv tool install pre-commit` and then "
+    "it: all three hooks stay inert until pre-commit writes `.git/hooks/pre-commit` in this "
+    "clone. If this clone is not already gated, run `uv tool install pre-commit` and then "
     "`uv tool run pre-commit install`, or plain `pre-commit install` when a durable runner is "
     "already available. On an initial adoption do that only after the baseline above, and after "
     "`doc-lattice check` and `doc-lattice lint` are clean; an established installation enables "
@@ -172,6 +179,12 @@ def _validate_init_flags(docs_roots: tuple[str, ...], linear_team: str | None) -
             msg = f"flag value {value!r} is empty or contains a control character"
             raise ValidationError(msg)
     for root in docs_roots:
+        if "\\" in root:
+            msg = (
+                f"--docs-root {format_path_for_display(root)} contains a backslash, which the "
+                "link_sources selector grammar cannot express; spell the path with '/'"
+            )
+            raise ValidationError(msg)
         if Path(root).is_absolute() or ".." in Path(root).parts:
             # The recorded flag string is handed to the helper as text. Path(root) would
             # normalize away a doubled separator, a trailing separator, and a leading "./",
@@ -191,6 +204,47 @@ def _validate_init_flags(docs_roots: tuple[str, ...], linear_team: str | None) -
             "rejects any other value."
         )
         raise ValidationError(msg)
+
+
+def _link_selectors(docs_roots: tuple[str, ...], cwd: Path) -> tuple[str, ...]:
+    """Derive the ``link_sources`` selector for each docs root, from what the root is.
+
+    A root that exists is classified by stat and spelled from its resolved, contained
+    project-relative path rather than from the flag: the link gate never enters a symlinked
+    directory, so a selector written over the link would fail on every run. A root that does not
+    exist yet takes the directory form of its literal spelling.
+
+    Args:
+        docs_roots: The validated ``--docs-root`` values.
+        cwd: The invocation directory the config is written into.
+
+    Returns:
+        One selector per root, in root order.
+
+    Raises:
+        ValidationError: If an existing root resolves outside the invocation directory.
+        InitPersistenceError: If a root can be neither confirmed nor ruled out.
+    """
+    project_root = cwd.resolve()
+    selectors: list[str] = []
+    for root in docs_roots:
+        candidate = cwd / root
+        mode = _walk_entry_mode(candidate)
+        if mode is None:
+            selectors.append(selector_for_root(root, "directory"))
+            continue
+        try:
+            resolved = safe_resolve(candidate, project_root)
+        except ValueError as exc:
+            msg = (
+                f"--docs-root {format_path_for_display(root)} resolves outside the project "
+                f"directory {format_path_for_display(cwd)}; a link_sources selector cannot "
+                "reach it"
+            )
+            raise ValidationError(msg) from exc
+        kind: RootKind = "file" if stat.S_ISREG(mode) else "directory"
+        selectors.append(selector_for_root(resolved.relative_to(project_root).as_posix(), kind))
+    return tuple(selectors)
 
 
 def _init_persistence_error(target_name: str, cause: OSError) -> InitPersistenceError:
@@ -552,8 +606,11 @@ def register_init(app: typer.Typer) -> None:
             else:
                 roots = tuple(docs_root) if docs_root else ("docs",)
                 _validate_init_flags(roots, linear_team)
+                selectors = _link_selectors(roots, runtime.cwd)
                 branch, branch_source = _resolve_default_branch(default_branch, runtime.cwd)
-                scaffold = build_scaffold(roots, linear_team, __version__, default_branch=branch)
+                scaffold = build_scaffold(
+                    roots, selectors, linear_team, __version__, default_branch=branch
+                )
                 _scaffold_config(runtime, scaffold.config_text)
                 gitignore_text = scaffold.gitignore_text
                 precommit_text = scaffold.precommit_text
