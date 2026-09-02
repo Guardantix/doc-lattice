@@ -520,10 +520,10 @@ def test_derive_file_sections_runs_one_full_parse_for_both_consumers(
     calls = 0
     original = loader_module.full_heading_inventory
 
-    def counted(body: str):
+    def counted(body: str, base_cache: dict[str, str] | None = None):
         nonlocal calls
         calls += 1
-        return original(body)
+        return original(body, base_cache)
 
     monkeypatch.setattr(loader_module, "full_heading_inventory", counted)
     derive_file_sections("# Notes\n\n## Sub\n\n# Notes\n")

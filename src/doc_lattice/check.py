@@ -4,7 +4,14 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 
 from .constants import EDGE_STATES, EdgeState
-from .model import CollisionMember, Edge, Lattice, TargetId, collision_members_json
+from .model import (
+    CollisionMember,
+    Edge,
+    Lattice,
+    TargetId,
+    collision_members_json,
+    format_collision,
+)
 from .path_utils import format_path_for_display
 from .resolve import cached_target_hash
 
@@ -82,7 +89,7 @@ def ambiguous_json(statuses: Sequence[EdgeStatus]) -> list[dict]:
     ]
 
 
-def collision_file(lattice: Lattice, status: EdgeStatus) -> str:
+def _collision_file(lattice: Lattice, status: EdgeStatus) -> str:
     """Return the display path of the file an AMBIGUOUS status's collision lines belong to.
 
     ``CollisionMember.line`` is a line in the *upstream* file, the one that owns the colliding
@@ -102,6 +109,28 @@ def collision_file(lattice: Lattice, status: EdgeStatus) -> str:
     if status.target_id is None:
         return ""
     return format_path_for_display(lattice.index[status.target_id].path)
+
+
+def ambiguity_annotation_message(lattice: Lattice, status: EdgeStatus) -> str:
+    """Build the CI annotation sentence for one AMBIGUOUS edge.
+
+    Owned here rather than spelled out at each annotating adapter, because ``check`` and ``lint``
+    are the two surfaces a reviewer compares side by side in a pull request and are specified to
+    say the same thing about the same finding. Only the annotation's title and severity are
+    per-command; the sentence is not. This sits beside ``_collision_file`` because that helper
+    already owns the upstream-file half of it, and its docstring the reason that half exists.
+
+    Args:
+        lattice: The built lattice.
+        status: An ``AMBIGUOUS`` classification whose ``target_id`` resolved.
+
+    Returns:
+        The annotation message naming the edge, the upstream file, and the colliding headings.
+    """
+    return (
+        f"{status.source_id} -> {status.target_ref} is AMBIGUOUS in "
+        f"{_collision_file(lattice, status)} ({format_collision(status.collision)})"
+    )
 
 
 def summarize_statuses(statuses: list[EdgeStatus]) -> dict[EdgeState, int]:

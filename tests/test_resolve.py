@@ -8,7 +8,7 @@ from doc_lattice.error_types import BrokenRefError
 from doc_lattice.hashing import content_hash
 from doc_lattice.loader import build_lattice
 from doc_lattice.model import Lattice, Location, Node, NodeMeta, ParsedDoc, TargetId
-from doc_lattice.resolve import ancestor_headings, cached_target_hash, node_for_path, target_content
+from doc_lattice.resolve import cached_target_hash, node_for_path, target_content
 from doc_lattice.sections import section_text
 
 
@@ -127,7 +127,10 @@ def test_identical_sections_under_different_parents_hash_differently():
 def test_the_ancestor_chain_is_the_heading_lines_outermost_first():
     lattice = _two_products()
 
-    assert ancestor_headings(lattice, TargetId("p", "setup")) == ("# Products", "## Product A")
+    assert lattice.ancestor_context.get(TargetId("p", "setup"), ()) == (
+        "# Products",
+        "## Product A",
+    )
 
 
 def test_a_top_level_section_hashes_exactly_its_own_text():
@@ -150,19 +153,19 @@ def test_a_marker_removed_from_an_ancestor_heading_does_not_change_the_chain():
     body = "## Parent {#parent}\n\n### Child\nbody\n"
     lattice = build_lattice([ParsedDoc(path=Path("docs/a.md"), meta=NodeMeta(id="a"), body=body)])
 
-    assert ancestor_headings(lattice, TargetId("a", "child")) == ("## Parent",)
+    assert lattice.ancestor_context.get(TargetId("a", "child"), ()) == ("## Parent",)
 
 
-def test_a_non_addressable_parent_reaches_the_hash_through_ancestor_headings():
+def test_a_non_addressable_parent_reaches_the_hash_through_ancestor_context():
     body = "Product A\n---------\n\n### Setup\nrun it\n"
     lattice = build_lattice([ParsedDoc(path=Path("docs/a.md"), meta=NodeMeta(id="a"), body=body)])
     setup = TargetId("a", "setup")
 
     # The setext parent owns no lattice id, so it can never appear in lattice.ancestors.
     assert lattice.ancestors[setup] == ()
-    assert ancestor_headings(lattice, setup) == ("## Product A",)
+    assert lattice.ancestor_context.get(setup, ()) == ("## Product A",)
     assert target_content(lattice, setup) == "## Product A\n### Setup\nrun it"
 
 
-def test_ancestor_headings_of_an_unknown_target_is_empty():
-    assert ancestor_headings(_lattice(), TargetId("doc", "missing")) == ()
+def test_ancestor_context_of_an_unknown_target_is_empty():
+    assert _lattice().ancestor_context.get(TargetId("doc", "missing"), ()) == ()

@@ -57,23 +57,6 @@ def target_content(lattice: Lattice, target_id: TargetId) -> str:
     return "\n".join([*chain, section]) if chain else section
 
 
-def ancestor_headings(lattice: Lattice, target_id: TargetId) -> tuple[str, ...]:
-    """Return each enclosing heading rendered as normalized ATX, outermost first.
-
-    An accessor over ``lattice.ancestor_context``, kept as the named contract the tests assert
-    ``target_content``'s context prefix against. It has no production caller of its own.
-
-    Args:
-        lattice: The built lattice.
-        target_id: A resolved section TargetId present in ``lattice.index``.
-
-    Returns:
-        The ancestors as normalized ATX heading lines, outermost first, empty for a section
-        with no enclosing heading.
-    """
-    return lattice.ancestor_context.get(target_id, ())
-
-
 def cached_target_hash(lattice: Lattice, target_id: TargetId, cache: dict[TargetId, str]) -> str:
     """Return the content hash for ``target_id``, computing it once per cache.
 
