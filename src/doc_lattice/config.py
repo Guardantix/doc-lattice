@@ -1,4 +1,5 @@
-"""Load and validate .doc-lattice.yml, with project-root containment of docs_roots."""
+"""Load and validate .doc-lattice.yml, with project-root containment of docs_roots and
+lexical validation of link_sources."""
 
 import re
 from collections.abc import Mapping
@@ -9,6 +10,7 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_valida
 
 from .constants import LATTICE_FORMAT_VERSION
 from .error_types import ConfigError
+from .link_selectors import validate_link_selector
 from .path_utils import format_path_for_display, safe_resolve
 from .validation_render import format_validation_error
 from .yaml_boundary import YAML_LOAD_ERRORS, SafeYamlLoader
@@ -49,6 +51,7 @@ class Config(BaseModel):
     lattice_format: int | None = None
     docs_roots: list[str] = Field(default_factory=lambda: ["docs"])
     ignore_globs: list[str] = Field(default_factory=list)
+    link_sources: list[str] = Field(default_factory=list)
     linear_team: str | None = None
     cache_key: str | None = None
     cache_trust_stat: bool = False
@@ -78,6 +81,23 @@ class Config(BaseModel):
             raise ValueError(msg)
         return value
 
+    @field_validator("link_sources")
+    @classmethod
+    def _validate_link_sources(cls, value: list[str]) -> list[str]:
+        """Reject a link_sources entry the selector grammar cannot read.
+
+        Lexical only, deliberately: nothing here is resolved or checked for existence, so a
+        selector that names a symlink out of the project survives load and becomes an exit-1
+        finding when the links command selects it, which is the contract the gate documents.
+        """
+        for entry in value:
+            try:
+                validate_link_selector(entry)
+            except ValueError as exc:
+                msg = f"link_sources entry {format_path_for_display(entry)} {exc}"
+                raise ValueError(msg) from exc
+        return value
+
     @model_validator(mode="after")
     def _trust_stat_requires_cache_key(self) -> "Config":
         """Setting cache_trust_stat without cache_key is a configuration error."""
@@ -92,11 +112,17 @@ class Config(BaseModel):
 
 @dataclass(frozen=True, slots=True)
 class ProjectConfig:
-    """A loaded config plus the project root and the resolved, contained docs roots."""
+    """A loaded config plus the project root, the resolved docs roots, and the file it came from.
+
+    ``config_path`` is the file ``load_config`` read, or None for a zero-config run. A diagnostic
+    about a key the file lacks can then name the file, and one about an absent file can say so
+    instead of calling a file that does not exist invalid.
+    """
 
     config: Config
     project_root: Path
     resolved_roots: tuple[Path, ...]
+    config_path: Path | None = None
 
 
 def load_config(config_path: Path | None, cwd: Path) -> ProjectConfig:
@@ -156,7 +182,9 @@ def load_config(config_path: Path | None, cwd: Path) -> ProjectConfig:
         raise ConfigError(msg)
 
     roots = _resolve_roots(config.docs_roots, project_root)
-    return ProjectConfig(config=config, project_root=project_root, resolved_roots=roots)
+    return ProjectConfig(
+        config=config, project_root=project_root, resolved_roots=roots, config_path=source
+    )
 
 
 def declares_lattice_format(path: Path) -> bool | None:

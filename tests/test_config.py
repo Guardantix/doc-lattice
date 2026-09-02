@@ -613,3 +613,65 @@ def test_declares_lattice_format_reports_a_wrong_value_as_declared(tmp_path: Pat
 
 def test_declares_lattice_format_is_none_for_a_missing_file(tmp_path: Path):
     assert declares_lattice_format(tmp_path / "absent.yml") is None
+
+
+def test_link_sources_default_to_an_empty_list_with_no_config_file(tmp_path: Path):
+    project = load_config(None, tmp_path)
+    assert project.config.link_sources == []
+    assert project.config_path is None
+
+
+def test_link_sources_are_loaded_verbatim_and_the_config_path_is_recorded(tmp_path: Path):
+    (tmp_path / ".doc-lattice.yml").write_text(
+        "lattice_format: 2\nlink_sources:\n  - docs/**/*.md\n  - ARCHITECTURE.md\n",
+        encoding="utf-8",
+    )
+    project = load_config(None, tmp_path)
+    assert project.config.link_sources == ["docs/**/*.md", "ARCHITECTURE.md"]
+    assert project.config_path == tmp_path / ".doc-lattice.yml"
+
+
+def test_an_explicit_config_records_its_own_path(tmp_path: Path):
+    explicit = tmp_path / "custom.yml"
+    explicit.write_text("lattice_format: 2\n", encoding="utf-8")
+    assert load_config(explicit, tmp_path).config_path == explicit
+
+
+def test_link_sources_null_is_a_schema_error(tmp_path: Path):
+    (tmp_path / ".doc-lattice.yml").write_text(
+        "lattice_format: 2\nlink_sources:\n", encoding="utf-8"
+    )
+    with pytest.raises(ConfigError, match="link_sources"):
+        load_config(None, tmp_path)
+
+
+@pytest.mark.parametrize(
+    ("entry", "reason"),
+    [
+        ("docs\\\\guide.md", "backslash"),
+        ("/etc/passwd", "absolute"),
+        ("docs/", "separator"),
+        ("../up.md", "'..'"),
+        ("notes[1.md", "unclosed"),
+    ],
+)
+def test_a_malformed_link_source_is_a_config_error_naming_the_entry(tmp_path: Path, entry, reason):
+    (tmp_path / ".doc-lattice.yml").write_text(
+        f"lattice_format: 2\nlink_sources: ['{entry}']\n", encoding="utf-8"
+    )
+    with pytest.raises(ConfigError) as info:
+        load_config(None, tmp_path)
+    assert "link_sources" in str(info.value)
+    assert reason in str(info.value)
+
+
+def test_an_escaping_link_source_is_not_rejected_at_load(tmp_path: Path):
+    # Containment is judged after selection, where the escape becomes an exit-1 finding; a
+    # load-time rejection here would be the exit-2 config error the design refuses.
+    outside = tmp_path.parent / "outside.md"
+    outside.write_text("# Outside\n", encoding="utf-8")
+    (tmp_path / "escape.md").symlink_to(outside)
+    (tmp_path / ".doc-lattice.yml").write_text(
+        "lattice_format: 2\nlink_sources: [escape.md]\n", encoding="utf-8"
+    )
+    assert load_config(None, tmp_path).config.link_sources == ["escape.md"]
