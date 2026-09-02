@@ -223,7 +223,7 @@ def _docs_root_mode(root: str, candidate: Path) -> int | None:
 
     Returns:
         The root's ``st_mode``, or None when ``stat`` found nothing to classify. That is not the
-        same as nothing being there, which is why ``_first_link_component`` asks the second
+        same as nothing being there, which is why ``_first_blocking_component`` asks the second
         question.
 
     Raises:
@@ -244,31 +244,65 @@ def _docs_root_mode(root: str, candidate: Path) -> int | None:
         raise error from exc
 
 
-def _first_link_component(root: str, cwd: Path) -> str | None:
-    """Return the first component of a docs root that is a symlink, or None when none is.
+def _component_mode(component: Path) -> int | None:
+    """Read one intermediate component's mode, or None when it is simply not there.
+
+    Narrower than ``_docs_root_mode`` on purpose. This is only reached once that function has
+    already refused every errno that means the filesystem could not answer for the whole path,
+    and a component of a path stat could not classify can only be present or absent, so an
+    absence here is the ordinary one rather than a question left open.
+
+    Args:
+        component: One component of a docs root, resolved against the invocation directory.
+
+    Returns:
+        The component's ``st_mode``, or None when it does not exist.
+
+    Raises:
+        OSError: If the filesystem refused for any reason other than absence, which
+            ``_docs_root_mode`` has already ruled out for this path.
+    """
+    try:
+        return component.stat(follow_symlinks=False).st_mode
+    except OSError as exc:
+        if exc.errno in _ABSENT_ERRNOS:
+            return None
+        raise
+
+
+def _first_blocking_component(root: str, cwd: Path) -> tuple[str, str] | None:
+    """Return the first component of a docs root the link gate cannot descend through.
 
     Only asked of a root ``stat`` reported as absent, and the question is whether that absence is
-    the kind the literal directory selector is written for. ``stat`` follows the whole path, so it
-    reports a root that is genuinely not there yet, a root that is a link to nothing, a root
-    behind a looping link, and a root under a directory reached through a link all the same way.
-    Only the first takes a selector: for the others a symlink stands between the walk and the
-    root, the walk never enters one, and the literal spelling could not match however the project
-    later grows. Repairing the link would not help either, which is what separates this from an
-    ordinary absence.
+    the kind the literal directory selector is written for. ``stat`` follows the whole path and
+    stops at the first thing it cannot enter, so it reports a root that is genuinely not there
+    yet, a root that is a link to nothing, a root behind a looping link, a root under a directory
+    reached through a link, and a root under a regular file all the same way. Only the first takes
+    a selector. For the rest something the selector walk will not descend through stands between
+    it and the root, so the literal spelling could not match however the project later grows;
+    repairing the link or removing the file would be needed first, which is what separates these
+    from an ordinary absence.
+
+    The two blockers are the two things ``select_link_sources`` declines to enter. It never
+    follows a symlink, by the containment decision the ``link_check`` module docstring records,
+    and it descends only into an entry that ``_is_directory`` confirms, so a regular file in the
+    middle of a root ends the walk exactly as a link does.
 
     The components are tested from the invocation directory down rather than the whole path at
-    once, because the link need not be the last one: ``linked/child`` under a link named ``linked``
-    is absent whether that link dangles or resolves. The walk stops at the first component that is
-    not there, since nothing below an absent component can be a link. Anything ``is_symlink``
-    cannot answer, permission or a name the filesystem rejects, ``_docs_root_mode`` has already
-    refused for the whole path, so this sees only the errnos that mean absence.
+    once, because the blocker need not be the last one: ``linked/child`` under a link named
+    ``linked`` is absent whether that link dangles or resolves, and ``README.md/notes`` is absent
+    because ``README.md`` is a file. The walk stops at the first component that is not there,
+    since nothing below an absent component exists to block anything. A component that exists and
+    is a directory is the only one it walks past, so falling out of the walk is the ordinary
+    absence: the last component cannot be there when ``stat`` reported the whole path was not.
 
     Args:
         root: The ``--docs-root`` value as written.
         cwd: The invocation directory the root is relative to.
 
     Returns:
-        The offending component's spelling relative to ``cwd``, or None when nothing is linked.
+        The blocking component's spelling relative to ``cwd`` paired with what it is, ``symlink``
+        or ``file``, or None when nothing blocks and the absence is ordinary.
     """
     current = cwd
     walked: list[str] = []
@@ -276,7 +310,12 @@ def _first_link_component(root: str, cwd: Path) -> str | None:
         current = current / part
         walked.append(part)
         if current.is_symlink():
-            return "/".join(walked)
+            return "/".join(walked), "symlink"
+        mode = _component_mode(current)
+        if mode is None:
+            break
+        if not stat.S_ISDIR(mode):
+            return "/".join(walked), "file"
     return None
 
 
@@ -287,8 +326,9 @@ def _link_selectors(docs_roots: tuple[str, ...], cwd: Path) -> tuple[str, ...]:
     project-relative path rather than from the flag: the link gate never enters a symlinked
     directory, so a selector written over the link would fail on every run. A root that is not
     there at all takes the directory form of its literal spelling. Between those two is the root
-    stat calls absent only because a symlink stands somewhere in its path, which gets no selector
-    at all rather than the literal one: ``_first_link_component`` records why the two absences are
+    stat calls absent only because something the selector walk will not descend through, a
+    symlink or a regular file, stands somewhere in its path. That root gets no selector at all
+    rather than the literal one: ``_first_blocking_component`` records why the two absences are
     not the same answer.
 
     Every derived selector is then put through the same validator the config loader runs, and a
@@ -307,8 +347,8 @@ def _link_selectors(docs_roots: tuple[str, ...], cwd: Path) -> tuple[str, ...]:
 
     Raises:
         ValidationError: If an existing root resolves outside the invocation directory, if a root
-            sits behind a symlink, or if a root's derived selector is one the ``link_sources``
-            grammar cannot express.
+            sits behind a symlink or a regular file, or if a root's derived selector is one the
+            ``link_sources`` grammar cannot express.
         InitPersistenceError: If a root can be neither confirmed nor ruled out.
     """
     project_root = cwd.resolve()
@@ -317,19 +357,25 @@ def _link_selectors(docs_roots: tuple[str, ...], cwd: Path) -> tuple[str, ...]:
         candidate = cwd / root
         mode = _docs_root_mode(root, candidate)
         if mode is None:
-            link = _first_link_component(root, cwd)
-            if link is not None:
+            blocker = _first_blocking_component(root, cwd)
+            if blocker is not None:
+                component, kind_found = blocker
                 displayed = format_path_for_display(root)
+                # A blocker that is the root itself can only be a symlink: a component the walk
+                # would reach through would have made `stat` answer, so this branch would not
+                # have been taken.
                 subject = (
                     f"--docs-root {displayed} is a symlink"
-                    if link == root
-                    else f"--docs-root {displayed} sits under the symlink "
-                    f"{format_path_for_display(link)}"
+                    if component == root
+                    else f"--docs-root {displayed} sits under the {kind_found} "
+                    f"{format_path_for_display(component)}"
                 )
-                msg = (
-                    f"{subject}, which the link gate never enters, so a link_sources selector "
-                    "cannot reach it"
+                refusal = (
+                    "which the link gate never enters"
+                    if kind_found == "symlink"
+                    else "which is not a directory the link gate can descend into"
                 )
+                msg = f"{subject}, {refusal}, so a link_sources selector cannot reach it"
                 raise ValidationError(msg)
             selector = selector_for_root(root, "directory")
         else:

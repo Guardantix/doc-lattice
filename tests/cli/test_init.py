@@ -1366,6 +1366,72 @@ def test_init_rejects_a_docs_root_reached_through_a_looping_parent(tmp_path: Pat
     )
 
 
+def _assert_rejected_blocked_root(result, tmp_path: Path, subject: str) -> None:
+    # The file half of `_assert_rejected_linked_root`: same refusal, different clause, and the
+    # same reason for not using `_assert_rejected_before_any_write`, since each case has to
+    # create the file it is rejecting.
+    assert result.exit_code == 2
+    assert result.stdout == ""
+    assert result.stderr.startswith("error (VALIDATION_ERROR): ")
+    assert subject in result.stderr
+    assert "which is not a directory the link gate can descend into" in result.stderr
+    assert not (tmp_path / ".doc-lattice.yml").exists()
+
+
+def test_init_rejects_a_docs_root_under_a_regular_file(tmp_path: Path, monkeypatch):
+    # Statting the whole path raises ENOTDIR, which is the same absence a root nobody has
+    # created gives. It is not the same answer: the selector walk descends only into an entry
+    # confirmed to be a directory, so `README.md/notes/**/*.md` could never match however the
+    # project grows, and every generated hook and CI run would exit 2 after an init that
+    # exited 0.
+    (tmp_path / "README.md").write_text("# R\n", encoding="utf-8")
+    monkeypatch.chdir(tmp_path)
+
+    result = runner.invoke(app, ["init", "--docs-root", "README.md/notes"])
+
+    _assert_rejected_blocked_root(
+        result, tmp_path, "--docs-root 'README.md/notes' sits under the file 'README.md'"
+    )
+
+
+def test_init_rejects_a_docs_root_under_a_regular_file_deeper_in_the_path(
+    tmp_path: Path, monkeypatch
+):
+    # The blocker need not be the first component, and the walk has to name the one that
+    # actually blocks rather than the root it started from.
+    (tmp_path / "docs").mkdir()
+    (tmp_path / "docs" / "notes.md").write_text("# N\n", encoding="utf-8")
+    monkeypatch.chdir(tmp_path)
+
+    result = runner.invoke(app, ["init", "--docs-root", "docs/notes.md/deep/more"])
+
+    _assert_rejected_blocked_root(
+        result,
+        tmp_path,
+        "--docs-root 'docs/notes.md/deep/more' sits under the file 'docs/notes.md'",
+    )
+
+
+def test_a_component_the_filesystem_will_not_answer_for_is_not_read_as_absent(
+    tmp_path: Path, monkeypatch
+):
+    # `_docs_root_mode` has already refused every errno that is not an absence for the whole
+    # path, so the component walk should never meet one. The guard is what keeps that an
+    # invariant rather than an assumption: were it to swallow the error, an unreadable
+    # component would be classified as an ordinary absence and take the literal selector.
+    real_stat = Path.stat
+
+    def refuse(self, *args, **kwargs):
+        if self.name == "docs":
+            raise PermissionError(errno.EACCES, "Permission denied")
+        return real_stat(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "stat", refuse)
+
+    with pytest.raises(PermissionError):
+        init_command._first_blocking_component("docs/guides", tmp_path)
+
+
 def test_init_rejects_a_root_that_resolves_outside_the_project(tmp_path: Path, monkeypatch):
     outside = tmp_path.parent / "elsewhere"
     outside.mkdir(exist_ok=True)
