@@ -7,8 +7,10 @@ exact number it must carry, ``HISTORICAL_PIN_DOCS`` names the documents whose su
 preserved on purpose, and a recognized pin in any other maintained document fails as an
 unclassified release surface. The two classifications are exclusive: a document named by both is
 reported, since the exemption is applied first and would otherwise silence the declared count.
-"Maintained documents" means the sorted root ``*.md`` files, the same mechanical set
-``scripts/check_doc_links.py`` takes as its link sources.
+"Maintained documents" means the sorted root ``*.md`` files, a selection this script owns
+and spells for itself: it reads install pins and nothing else, and stays free of the
+Markdown parser. The repository's link sources are declared separately in
+``.doc-lattice.yml`` and checked by ``doc-lattice links``.
 
 Counts are exact rather than minimums because a minimum lets a newly added pin mask the deletion
 of a required occurrence. What an exact count closes is any change that alters the number of
