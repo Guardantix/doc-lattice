@@ -1278,6 +1278,55 @@ def test_init_derives_the_selector_from_a_symlinked_roots_resolved_path(
     assert "link_sources:\n  - real/**/*.md\n" in _written_config(tmp_path)
 
 
+def _assert_rejected_unfollowable_root(result, tmp_path: Path, root: str) -> None:
+    # Not `_assert_rejected_before_any_write`: that helper asserts the directory holds only
+    # `.git`, and each of these cases has to create the symlink it is rejecting.
+    assert result.exit_code == 2
+    assert result.stdout == ""
+    assert result.stderr.startswith("error (VALIDATION_ERROR): ")
+    assert format_path_for_display(root) in result.stderr
+    assert "is a symlink init cannot follow" in result.stderr
+    assert not (tmp_path / ".doc-lattice.yml").exists()
+
+
+def test_init_rejects_a_docs_root_that_is_a_symlink_loop(tmp_path: Path, monkeypatch):
+    # A loop stats as absent, and the absent branch writes the literal directory selector. That
+    # selector could never match: the walk does not enter a symlink, so every later `links` run
+    # would exit 2 over a config init exited 0 on. Absence and unfollowability are not the same
+    # answer, and only the first one has a selector.
+    (tmp_path / "a").symlink_to(tmp_path / "b")
+    (tmp_path / "b").symlink_to(tmp_path / "a")
+    monkeypatch.chdir(tmp_path)
+
+    result = runner.invoke(app, ["init", "--docs-root", "a"])
+
+    _assert_rejected_unfollowable_root(result, tmp_path, "a")
+
+
+def test_init_rejects_a_dangling_symlink_docs_root(tmp_path: Path, monkeypatch):
+    # The same refusal through the errno a root that is simply not there raises: `stat` follows
+    # the link and reports ENOENT for both, and `lstat` is what tells them apart.
+    (tmp_path / "docs").symlink_to(tmp_path / "no-such-directory", target_is_directory=True)
+    monkeypatch.chdir(tmp_path)
+
+    result = runner.invoke(app, ["init"])
+
+    _assert_rejected_unfollowable_root(result, tmp_path, "docs")
+
+
+def test_init_rejects_a_docs_root_reached_through_a_looping_parent(tmp_path: Path, monkeypatch):
+    # Here `lstat` cannot traverse the path either, so the link is not the final component but
+    # one further up. It is still a link standing between the walk and the root, so it is still
+    # not the absence the literal selector is written for.
+    (tmp_path / "a").symlink_to(tmp_path / "b")
+    (tmp_path / "b").symlink_to(tmp_path / "a")
+    monkeypatch.chdir(tmp_path)
+
+    result = runner.invoke(app, ["init", "--docs-root", "a/docs"])
+
+    _assert_rejected_unfollowable_root(result, tmp_path, "a/docs")
+
+
 def test_init_rejects_a_root_that_resolves_outside_the_project(tmp_path: Path, monkeypatch):
     outside = tmp_path.parent / "elsewhere"
     outside.mkdir(exist_ok=True)

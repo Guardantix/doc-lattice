@@ -139,6 +139,13 @@ _REPOSITORY_MARKER = ".git"
 # a case no real invocation reaches.
 _ABSENT_ERRNOS = frozenset({errno.ENOENT, errno.ENOTDIR, errno.ELOOP})
 
+# The errnos that answer "no entry is there at all", which is the `lstat` question rather than the
+# `stat` one above, and a different question: `stat` reports a dangling link, a looping link, and
+# an empty path alike, while `lstat` separates them. ELOOP is deliberately absent here for exactly
+# that reason: a loop `lstat` cannot resolve means a link stands somewhere in the path, not that
+# the path is empty. `_has_link_entry` records what turns on the difference.
+_NO_ENTRY_ERRNOS = frozenset({errno.ENOENT, errno.ENOTDIR})
+
 
 def _resolve_default_branch(default_branch: str | None, cwd: Path) -> tuple[str, str]:
     """Resolve the ordinary workflow's trigger branch and record where it came from.
@@ -222,7 +229,8 @@ def _docs_root_mode(root: str, candidate: Path) -> int | None:
         candidate: The root resolved against the invocation directory.
 
     Returns:
-        The root's ``st_mode``, or None when it is not there yet.
+        The root's ``st_mode``, or None when ``stat`` found nothing to classify. That is not the
+        same as nothing being there, which is why ``_has_link_entry`` asks the second question.
 
     Raises:
         InitPersistenceError: If the root can be neither confirmed nor ruled out.
@@ -242,13 +250,40 @@ def _docs_root_mode(root: str, candidate: Path) -> int | None:
         raise error from exc
 
 
+def _has_link_entry(candidate: Path) -> bool:
+    """Report whether a root ``stat`` could not classify is nonetheless a symlink standing there.
+
+    ``stat`` follows the whole path, so it collapses three different filesystems into the same
+    refusal: a root that is genuinely not there yet, a root that is a symlink to nothing, and a
+    root reached through a symlink loop. Only the first takes the literal directory selector. For
+    the other two something is there and the walk will never enter it, so a selector written over
+    the spelling could not match however the project later grows. ``lstat`` separates them,
+    because it does not follow the final component, and a path ``lstat`` itself cannot traverse
+    holds a link of its own further up.
+
+    Args:
+        candidate: The root resolved against the invocation directory.
+
+    Returns:
+        True when a symlink stands in the way, False when nothing is there at all.
+    """
+    try:
+        candidate.lstat()
+    except OSError as exc:
+        return exc.errno not in _NO_ENTRY_ERRNOS
+    return True
+
+
 def _link_selectors(docs_roots: tuple[str, ...], cwd: Path) -> tuple[str, ...]:
     """Derive the ``link_sources`` selector for each docs root, from what the root is.
 
     A root that exists is classified by stat and spelled from its resolved, contained
     project-relative path rather than from the flag: the link gate never enters a symlinked
-    directory, so a selector written over the link would fail on every run. A root that does not
-    exist yet takes the directory form of its literal spelling.
+    directory, so a selector written over the link would fail on every run. A root that is not
+    there at all takes the directory form of its literal spelling. Between those two is the root
+    stat cannot follow, a link to nothing or through a loop, which gets no selector at all rather
+    than the literal one: ``_has_link_entry`` records why absence and unfollowability are not the
+    same answer.
 
     Every derived selector is then put through the same validator the config loader runs, and a
     rejection is reported here rather than written. ``_validate_init_flags`` refuses the flag
@@ -265,8 +300,9 @@ def _link_selectors(docs_roots: tuple[str, ...], cwd: Path) -> tuple[str, ...]:
         One selector per root, in root order.
 
     Raises:
-        ValidationError: If an existing root resolves outside the invocation directory, or if a
-            root's derived selector is one the ``link_sources`` grammar cannot express.
+        ValidationError: If an existing root resolves outside the invocation directory, if a root
+            is a symlink stat cannot follow, or if a root's derived selector is one the
+            ``link_sources`` grammar cannot express.
         InitPersistenceError: If a root can be neither confirmed nor ruled out.
     """
     project_root = cwd.resolve()
@@ -275,6 +311,13 @@ def _link_selectors(docs_roots: tuple[str, ...], cwd: Path) -> tuple[str, ...]:
         candidate = cwd / root
         mode = _docs_root_mode(root, candidate)
         if mode is None:
+            if _has_link_entry(candidate):
+                msg = (
+                    f"--docs-root {format_path_for_display(root)} is a symlink init cannot "
+                    "follow; the link gate never enters a symlinked directory, so a link_sources "
+                    "selector cannot reach it"
+                )
+                raise ValidationError(msg)
             selector = selector_for_root(root, "directory")
         else:
             try:
