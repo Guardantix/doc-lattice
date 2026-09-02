@@ -42,6 +42,7 @@ is a tool error: a gate that cannot see its inputs must not pass.
 """
 
 import errno
+import os
 import stat
 from collections.abc import Sequence
 from dataclasses import dataclass
@@ -52,7 +53,13 @@ from urllib.parse import SplitResult, parse_qs, unquote, urlsplit
 from markdown_it import MarkdownIt
 from markdown_it.token import Token
 
-from .error_types import UnreadableDocError
+from .error_types import ConfigError, UnreadableDocError
+from .link_selectors import (
+    RECURSIVE_SEGMENT,
+    SELECTOR_SEPARATOR,
+    segment_matches,
+    validate_link_selector,
+)
 from .markdown_compat import full_heading_inventory
 from .path_utils import format_path_for_display
 
@@ -625,3 +632,127 @@ def check_links(project_root: Path, sources: Sequence[Path]) -> list[LinkFinding
         found.sort(key=lambda entry: entry[0])
         findings.extend(LinkFinding(relative, line, message) for line, message in found)
     return findings
+
+
+def select_link_sources(project_root: Path, selectors: Sequence[str]) -> list[Path]:
+    """Expand the ``link_sources`` selectors into the documents the gate will check.
+
+    Each selector is expanded lexically by a no-follow walk from the project root. The matches
+    are unioned, sorted by project-relative POSIX spelling, and then judged in that order:
+    a spelling that resolves outside the project root is kept, so ``check_links`` reports every
+    bad configured source; a contained spelling has to be, or resolve to, a regular file, and
+    aliases of one file are collapsed onto the first spelling in sorted order. YAML order,
+    overlapping selectors, and filesystem order therefore cannot change what is returned.
+
+    Args:
+        project_root: The project root the selectors are relative to.
+        selectors: The ``link_sources`` entries, already validated by config load or not.
+
+    Returns:
+        Unresolved paths under the resolved project root, sorted and deduplicated.
+
+    Raises:
+        ConfigError: If a selector is malformed, matches no lexical path, or the walk meets a
+            directory it cannot scan.
+        UnreadableDocError: If a contained match is a dangling symlink, a directory reached
+            through a symlink, or a special file. None of those is opened: the classification is
+            a ``stat``, because opening a FIFO or a device can block indefinitely.
+    """
+    root = project_root.resolve()
+    matched: set[str] = set()
+    for entry in selectors:
+        try:
+            segments = validate_link_selector(entry)
+        except ValueError as exc:
+            msg = f"link_sources entry {format_path_for_display(entry)} {exc}"
+            raise ConfigError(msg) from exc
+        found: set[str] = set()
+        _walk(root, "", segments, 0, found)
+        if not found:
+            msg = (
+                f"link_sources entry {format_path_for_display(entry)} matches no file under "
+                f"the project root {format_path_for_display(root)}; the links command refuses "
+                "to run over a selector that selects nothing"
+            )
+            raise ConfigError(msg)
+        matched.update(found)
+    seen: set[Path] = set()
+    sources: list[Path] = []
+    for relative in sorted(matched):
+        candidate = root.joinpath(*relative.split(SELECTOR_SEPARATOR))
+        resolved = _resolved(candidate)
+        if not resolved.is_relative_to(root):
+            sources.append(candidate)
+            continue
+        _require_regular_file(candidate)
+        if resolved in seen:
+            continue
+        seen.add(resolved)
+        sources.append(candidate)
+    return sources
+
+
+def _require_regular_file(candidate: Path) -> None:
+    """Refuse a contained match that is not, or does not resolve to, a regular file."""
+    mode = _stat_mode(candidate)
+    if mode is None:
+        msg = f"link source {format_path_for_display(candidate)} is a symlink to nothing"
+        raise UnreadableDocError(msg, source=candidate)
+    if not stat.S_ISREG(mode):
+        msg = f"link source {format_path_for_display(candidate)} is not a regular file"
+        raise UnreadableDocError(msg, source=candidate)
+
+
+def _scan(directory: Path) -> list[os.DirEntry[str]]:
+    """List one directory, turning a scan the filesystem refuses into a config error."""
+    try:
+        with os.scandir(directory) as entries:
+            return list(entries)
+    except OSError as exc:
+        msg = f"link_sources selection could not scan {format_path_for_display(directory)}: {exc}"
+        raise ConfigError(msg) from exc
+
+
+def _is_directory(entry: os.DirEntry[str]) -> bool:
+    """Report whether an entry is a directory in its own right, never through a symlink."""
+    try:
+        return entry.is_dir(follow_symlinks=False)
+    except OSError as exc:
+        displayed = format_path_for_display(entry.path)
+        msg = f"link_sources selection could not inspect {displayed}: {exc}"
+        raise ConfigError(msg) from exc
+
+
+def _join(prefix: str, name: str) -> str:
+    return name if prefix == "" else f"{prefix}{SELECTOR_SEPARATOR}{name}"
+
+
+def _walk(
+    directory: Path, prefix: str, segments: tuple[str, ...], index: int, found: set[str]
+) -> None:
+    """Match ``segments[index:]`` beneath one directory, collecting project-relative spellings.
+
+    A directory is a traversal node and never a match; only a non-directory entry can satisfy
+    the last segment. ``**`` matches zero or more directories, so it is tried against the
+    remaining segments here before descending with itself still current.
+    """
+    segment = segments[index]
+    last = index == len(segments) - 1
+    entries = _scan(directory)
+    if segment == RECURSIVE_SEGMENT:
+        if not last:
+            _walk(directory, prefix, segments, index + 1, found)
+        for entry in entries:
+            if _is_directory(entry):
+                _walk(Path(entry.path), _join(prefix, entry.name), segments, index, found)
+            elif last:
+                found.add(_join(prefix, entry.name))
+        return
+    for entry in entries:
+        if not segment_matches(entry.name, segment):
+            continue
+        if last:
+            if not _is_directory(entry):
+                found.add(_join(prefix, entry.name))
+        elif _is_directory(entry):
+            _walk(Path(entry.path), _join(prefix, entry.name), segments, index + 1, found)

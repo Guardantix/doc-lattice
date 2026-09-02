@@ -6,7 +6,7 @@ from pathlib import Path
 import pytest
 
 from doc_lattice import link_check as link_check_module
-from doc_lattice.error_types import UnreadableDocError
+from doc_lattice.error_types import ConfigError, UnreadableDocError
 from doc_lattice.link_check import (
     _PARSER,
     LinkFinding,
@@ -14,6 +14,7 @@ from doc_lattice.link_check import (
     _links_in,
     _split_destination,
     check_links,
+    select_link_sources,
 )
 from doc_lattice.path_utils import format_path_for_display
 
@@ -1002,3 +1003,137 @@ def test_the_target_inventory_is_the_engines_full_heading_inventory(tmp_path):
     )
 
     assert check_links(tmp_path, _root_sources(tmp_path)) == []
+
+
+def _relative(root: Path, sources: list[Path]) -> list[str]:
+    return [path.relative_to(root.resolve()).as_posix() for path in sources]
+
+
+def test_a_recursive_selector_matches_at_every_depth_and_a_root_one_only_at_the_root(tmp_path):
+    _write(tmp_path, "README.md", "# R\n")
+    _write(tmp_path, "docs/a.md", "# A\n")
+    _write(tmp_path, "docs/deep/b.md", "# B\n")
+    _write(tmp_path, "docs/notes.txt", "x\n")
+
+    assert _relative(tmp_path, select_link_sources(tmp_path, ["docs/**/*.md"])) == [
+        "docs/a.md",
+        "docs/deep/b.md",
+    ]
+    assert _relative(tmp_path, select_link_sources(tmp_path, ["*.md"])) == ["README.md"]
+
+
+def test_selection_is_sorted_and_lexically_deduplicated_across_selectors(tmp_path):
+    _write(tmp_path, "b.md", "# b\n")
+    _write(tmp_path, "a.md", "# a\n")
+    _write(tmp_path, "docs/c.md", "# c\n")
+
+    selected = select_link_sources(tmp_path, ["docs/**/*.md", "*.md", "b.md", "**/*.md"])
+
+    assert _relative(tmp_path, selected) == ["a.md", "b.md", "docs/c.md"]
+
+
+def test_every_selector_must_match_at_least_one_path(tmp_path):
+    _write(tmp_path, "ARCHITECTURE.md", "# A\n")
+
+    with pytest.raises(ConfigError, match=r"docs/\*\*/\*\.md"):
+        select_link_sources(tmp_path, ["ARCHITECTURE.md", "docs/**/*.md"])
+
+
+def test_a_directory_never_satisfies_a_selector(tmp_path):
+    (tmp_path / "docs").mkdir()
+
+    with pytest.raises(ConfigError, match="matches no file"):
+        select_link_sources(tmp_path, ["docs"])
+
+
+def test_a_malformed_selector_is_a_config_error(tmp_path):
+    with pytest.raises(ConfigError, match="backslash"):
+        select_link_sources(tmp_path, ["docs\\a.md"])
+
+
+def test_matching_is_case_sensitive(tmp_path):
+    _write(tmp_path, "README.MD", "# R\n")
+
+    with pytest.raises(ConfigError):
+        select_link_sources(tmp_path, ["*.md"])
+
+
+def test_hidden_directories_get_no_special_treatment(tmp_path):
+    _write(tmp_path, ".hidden/a.md", "# a\n")
+
+    assert _relative(tmp_path, select_link_sources(tmp_path, ["**/*.md"])) == [".hidden/a.md"]
+
+
+def test_a_trailing_recursive_segment_matches_every_file_beneath(tmp_path):
+    _write(tmp_path, "docs/a.md", "# a\n")
+    _write(tmp_path, "docs/deep/b.txt", "b\n")
+
+    assert _relative(tmp_path, select_link_sources(tmp_path, ["docs/**"])) == [
+        "docs/a.md",
+        "docs/deep/b.txt",
+    ]
+
+
+def test_contained_aliases_are_deduplicated_by_resolved_target_keeping_the_first_sorted(tmp_path):
+    _write(tmp_path, "real.md", "# r\n")
+    (tmp_path / "alias.md").symlink_to(tmp_path / "real.md")
+
+    assert _relative(tmp_path, select_link_sources(tmp_path, ["*.md"])) == ["alias.md"]
+
+
+def test_an_escaping_symlink_is_selected_and_then_reported_by_the_checker(tmp_path):
+    outside = tmp_path.parent / "outside.md"
+    outside.write_text("# o\n", encoding="utf-8")
+    (tmp_path / "escape.md").symlink_to(outside)
+    _write(tmp_path, "ok.md", "# ok\n")
+
+    selected = select_link_sources(tmp_path, ["*.md"])
+
+    assert _relative(tmp_path, selected) == ["escape.md", "ok.md"]
+    assert check_links(tmp_path, selected) == [
+        LinkFinding("escape.md", None, link_check_module.ESCAPING_SOURCE_MESSAGE)
+    ]
+
+
+def test_a_symlinked_directory_is_never_entered(tmp_path):
+    _write(tmp_path, "real/a.md", "# a\n")
+    (tmp_path / "linked").symlink_to(tmp_path / "real", target_is_directory=True)
+
+    assert _relative(tmp_path, select_link_sources(tmp_path, ["**/*.md"])) == ["real/a.md"]
+    with pytest.raises(ConfigError, match="matches no file"):
+        select_link_sources(tmp_path, ["linked/*.md"])
+
+
+def test_a_symlink_to_a_directory_matched_as_a_leaf_is_a_tool_error(tmp_path):
+    (tmp_path / "real").mkdir()
+    (tmp_path / "linked.md").symlink_to(tmp_path / "real", target_is_directory=True)
+
+    with pytest.raises(UnreadableDocError, match="not a regular file"):
+        select_link_sources(tmp_path, ["*.md"])
+
+
+def test_a_dangling_symlink_is_a_tool_error(tmp_path):
+    (tmp_path / "gone.md").symlink_to(tmp_path / "nowhere.md")
+
+    with pytest.raises(UnreadableDocError, match=r"gone\.md"):
+        select_link_sources(tmp_path, ["*.md"])
+
+
+@pytest.mark.skipif(os.name != "posix", reason="FIFOs are a POSIX shape")
+def test_a_special_file_is_a_tool_error_without_being_opened(tmp_path):
+    os.mkfifo(tmp_path / "pipe.md")
+
+    with pytest.raises(UnreadableDocError, match="not a regular file"):
+        select_link_sources(tmp_path, ["*.md"])
+
+
+@_requires_permission_enforcement
+def test_an_unscannable_directory_is_a_config_error(tmp_path):
+    _write(tmp_path, "docs/a.md", "# a\n")
+    locked = tmp_path / "docs"
+    locked.chmod(0)
+    try:
+        with pytest.raises(ConfigError, match="could not scan"):
+            select_link_sources(tmp_path, ["docs/**/*.md"])
+    finally:
+        locked.chmod(0o755)
