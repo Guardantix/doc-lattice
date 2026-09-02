@@ -334,7 +334,9 @@ def _contained_parts(base: PurePosixPath, raw_path: str) -> tuple[str, ...] | No
     return tuple(parts)
 
 
-def _heading_ids(document: Path, cache: dict[Path, frozenset[str]]) -> frozenset[str] | None:
+def _heading_ids(
+    document: Path, cache: dict[Path, frozenset[str]], *, text: str | None = None
+) -> frozenset[str] | None:
     """Return the link-target GitHub heading ids of a Markdown document, memoized.
 
     The ids are the engine's own: ``full_heading_inventory`` reads every heading a GitHub render
@@ -352,9 +354,15 @@ def _heading_ids(document: Path, cache: dict[Path, frozenset[str]]) -> frozenset
     well, which is where a character reference wider than the interpreter's integer-conversion
     limit makes the parser raise, and ``check_links`` owns that case for sources.
 
+    ``text`` is the document's already-read content, which the caller has whenever the target is
+    the source the link was written in: a ``#fragment`` destination resolves against its own
+    document, and re-reading a file ``check_links`` has in hand is a second read of every source
+    that carries so much as a table of contents.
+
     Args:
         document: The Markdown target whose heading ids are wanted.
         cache: Heading ids already read, keyed by target path.
+        text: The document's content when the caller already read it, else None to read here.
 
     Returns:
         The target's link-target heading ids, or None when the file would not decode.
@@ -365,13 +373,14 @@ def _heading_ids(document: Path, cache: dict[Path, frozenset[str]]) -> frozenset
             parser invariant failure, not bad content, and is deliberately not caught.
     """
     if document not in cache:
-        try:
-            text = document.read_text(encoding="utf-8")
-        except UnicodeDecodeError:
-            return None
-        except OSError as exc:
-            msg = f"link target {format_path_for_display(document)} could not be read: {exc}"
-            raise UnreadableDocError(msg, source=document) from exc
+        if text is None:
+            try:
+                text = document.read_text(encoding="utf-8")
+            except UnicodeDecodeError:
+                return None
+            except OSError as exc:
+                msg = f"link target {format_path_for_display(document)} could not be read: {exc}"
+                raise UnreadableDocError(msg, source=document) from exc
         cache[document] = frozenset(record.github_id for record in full_heading_inventory(text))
     return cache[document]
 
@@ -381,14 +390,19 @@ def _fragment_message(
     target: Path,
     root: Path,
     cache: dict[Path, frozenset[str]],
+    *,
+    text: str | None = None,
 ) -> str | None:
     """Return a diagnostic when a fragment matches no heading in a Markdown target.
 
     Both interpolations are neutralized: the target is a repo-controlled filename, and the
     fragment carries whatever the destination percent-encoded, so ``#%1b`` would otherwise put
     a live ESC on stderr. See AD-34.
+
+    ``text`` is passed only for the target that is the source document itself; ``_heading_ids``
+    records why.
     """
-    heading_ids = _heading_ids(target, cache)
+    heading_ids = _heading_ids(target, cache, text=text)
     displayed_target = format_path_for_display(target.relative_to(root).as_posix())
     if heading_ids is None:
         return f"link target {displayed_target} could not be read for its headings"
@@ -525,6 +539,7 @@ def _link_message(
     document: Path,
     root: Path,
     cache: dict[Path, frozenset[str]],
+    source_text: str,
 ) -> str | None:
     """Return a diagnostic for one link, or None when it resolves.
 
@@ -540,6 +555,8 @@ def _link_message(
         document: The source document the link was written in.
         root: The project root every target must stay inside.
         cache: Heading ids already read, keyed by target path.
+        source_text: The source document's already-read content, handed on for the one target
+            that is the source itself so it is not read a second time.
 
     Returns:
         The diagnostic text without its ``file:line`` prefix, or None.
@@ -552,7 +569,11 @@ def _link_message(
     # existence checking: the file still has to be there for the view to render it.
     fragment = "" if _selects_plain_view(parts.query) else unquote(parts.fragment)
     if not parts.path:
-        return _fragment_message(fragment, document, root, cache) if fragment else None
+        return (
+            _fragment_message(fragment, document, root, cache, text=source_text)
+            if fragment
+            else None
+        )
     target = _resolve_target(parts.path, document, root)
     if target is None:
         return f"link target {format_path_for_display(href)} does not resolve inside the repository"
@@ -623,7 +644,7 @@ def check_links(project_root: Path, sources: Sequence[Path]) -> list[LinkFinding
             continue
         found: list[tuple[int, str]] = []
         for link in links:
-            message = _link_message(link, document, root, cache)
+            message = _link_message(link, document, root, cache, text)
             if message is not None:
                 found.append((link.line, message))
         found.extend((line, HTML_ANCHOR_MESSAGE) for line in anchors)
@@ -740,8 +761,13 @@ class _WalkState:
     visited: set[tuple[str, int]]
 
 
-def _walk(
-    directory: Path, prefix: str, segments: tuple[str, ...], index: int, state: _WalkState
+def _walk(  # noqa: PLR0913
+    directory: Path,
+    prefix: str,
+    segments: tuple[str, ...],
+    index: int,
+    state: _WalkState,
+    entries: list[os.DirEntry[str]] | None = None,
 ) -> None:
     """Match ``segments[index:]`` beneath one directory, collecting project-relative spellings.
 
@@ -757,10 +783,14 @@ def _walk(
     state from multiple call paths lower in the tree. Recording each state before it is scanned
     bounds the whole walk to at most one scan per directory per segment index. What it removes
     is a state being re-entered from several call paths, not the handoff to ``index + 1``
-    itself: that lands on a different key, so the directory is still scanned once there too,
-    which is why the bound is directories times segments rather than directories alone. The
-    bound does not change what is found: revisiting a state a second time could only add matches
-    the first visit already added.
+    itself: that lands on a different key, so the bound stays directories times segments rather
+    than directories alone. The bound does not change what is found: revisiting a state a second
+    time could only add matches the first visit already added.
+
+    ``entries`` is that handoff's own listing, passed rather than re-read. The handoff is the one
+    recursion that stays in the same directory, so it is the one that can reuse what this frame
+    already scanned, and reusing it is what keeps the common ``docs/**/*.md`` shape at one
+    ``scandir`` per directory instead of two. Every other recursion descends and passes None.
     """
     key = (prefix, index)
     if key in state.visited:
@@ -768,10 +798,11 @@ def _walk(
     state.visited.add(key)
     segment = segments[index]
     last = index == len(segments) - 1
-    entries = _scan(directory)
+    if entries is None:
+        entries = _scan(directory)
     if segment == RECURSIVE_SEGMENT:
         if not last:
-            _walk(directory, prefix, segments, index + 1, state)
+            _walk(directory, prefix, segments, index + 1, state, entries)
         for entry in entries:
             if _is_directory(entry):
                 _walk(Path(entry.path), _join(prefix, entry.name), segments, index, state)

@@ -61,12 +61,12 @@ def create_app(*, runtime_factory: RuntimeFactory = default_runtime) -> typer.Ty
 
     register_check(application)
     register_lint(application)
+    register_links(application)
     register_impact(application)
     register_reconcile(application)
     register_graph(application)
     register_linear(application)
     register_init(application)
-    register_links(application)
     return application
 
 

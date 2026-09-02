@@ -207,6 +207,41 @@ def _validate_init_flags(docs_roots: tuple[str, ...], linear_team: str | None) -
         raise ValidationError(msg)
 
 
+def _docs_root_mode(root: str, candidate: Path) -> int | None:
+    """Read one docs root's mode, refusing to answer when the filesystem cannot.
+
+    The same stat decision ``_walk_entry_mode`` makes, and it shares that function's
+    ``_ABSENT_ERRNOS`` reasoning, but not its diagnostic: the ancestor walk's refusal explains
+    that it could not tell whether this directory sits inside a configured lattice, which is a
+    sentence about a question this caller is not asking. What is unanswerable here is which
+    ``link_sources`` selector shape the root takes, and the message has to say so or it sends a
+    reader after the wrong file.
+
+    Args:
+        root: The ``--docs-root`` value as written, for the diagnostic.
+        candidate: The root resolved against the invocation directory.
+
+    Returns:
+        The root's ``st_mode``, or None when it is not there yet.
+
+    Raises:
+        InitPersistenceError: If the root can be neither confirmed nor ruled out.
+    """
+    try:
+        return candidate.stat().st_mode
+    except OSError as exc:
+        if exc.errno in _ABSENT_ERRNOS:
+            return None
+        error = InitPersistenceError(
+            f"cannot determine what --docs-root {format_path_for_display(root)} is: {exc}. That "
+            "answer decides the link_sources selector written for it, so init refuses to "
+            "scaffold rather than guess. Pass --print-only to obtain the snippets without "
+            "writing anything."
+        )
+        copy_exception_notes(error, exc)
+        raise error from exc
+
+
 def _link_selectors(docs_roots: tuple[str, ...], cwd: Path) -> tuple[str, ...]:
     """Derive the ``link_sources`` selector for each docs root, from what the root is.
 
@@ -238,7 +273,7 @@ def _link_selectors(docs_roots: tuple[str, ...], cwd: Path) -> tuple[str, ...]:
     selectors: list[str] = []
     for root in docs_roots:
         candidate = cwd / root
-        mode = _walk_entry_mode(candidate)
+        mode = _docs_root_mode(root, candidate)
         if mode is None:
             selector = selector_for_root(root, "directory")
         else:

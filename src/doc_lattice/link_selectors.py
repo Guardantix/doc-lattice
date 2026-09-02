@@ -13,6 +13,7 @@ as a literal, which is what ``fnmatch`` would do, because a selector that silent
 other than what was written is how a mandatory gate ends up green over the wrong files.
 """
 
+import re
 from fnmatch import fnmatchcase
 from pathlib import PureWindowsPath
 
@@ -21,8 +22,10 @@ from .text_utils import strip_control_chars
 SELECTOR_SEPARATOR = "/"
 RECURSIVE_SEGMENT = "**"
 _DOT_SEGMENTS = frozenset({".", ".."})
-# ``[`` first: the later two introduce brackets of their own that must not be re-escaped.
-_LITERAL_ESCAPES = (("[", "[[]"), ("*", "[*]"), ("?", "[?]"))
+# One pass over the text, because each replacement introduces a bracket of its own: a sequence
+# of per-character replacements is correct only while ``[`` is handled first, and that ordering
+# is an invariant nothing enforces. A single substitution never revisits what it wrote.
+_LITERAL_METACHARACTER = re.compile(r"([*?\[])")
 
 
 def validate_link_selector(entry: str) -> tuple[str, ...]:
@@ -122,6 +125,4 @@ def escape_selector_literal(text: str) -> str:
     Returns:
         The text with ``[``, ``*``, and ``?`` each wrapped in a one-member bracket class.
     """
-    for character, escaped in _LITERAL_ESCAPES:
-        text = text.replace(character, escaped)
-    return text
+    return _LITERAL_METACHARACTER.sub(r"[\1]", text)

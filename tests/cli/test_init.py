@@ -1325,3 +1325,22 @@ def test_init_rejects_an_existing_directory_whose_selector_the_grammar_rejects(
     assert not (tmp_path / ".doc-lattice.yml").exists()
     assert "C:foo" in result.stderr
     assert "is absolute" in result.stderr
+
+
+def test_init_refuses_a_docs_root_the_filesystem_will_not_classify(tmp_path: Path, monkeypatch):
+    # The selector derivation asks the same stat question the ancestor walk asks, and earns its
+    # own diagnostic: what it could not decide is which link_sources shape the root takes, not
+    # whether this directory already sits inside a configured lattice. Reusing that message here
+    # would send a reader after a file that has nothing to do with the failure.
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(Path, "stat", _stat_denying(tmp_path / "docs"))
+
+    result = runner.invoke(app, ["init"])
+
+    assert result.exit_code == 2
+    assert result.stdout == ""
+    assert result.stderr.startswith("error (INIT_PERSISTENCE): ")
+    assert f"--docs-root {format_path_for_display('docs')}" in result.stderr
+    assert "link_sources" in result.stderr
+    assert "configured lattice" not in result.stderr
+    assert not (tmp_path / ".doc-lattice.yml").exists()
