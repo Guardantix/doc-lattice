@@ -280,8 +280,8 @@ exists and was left untouched, and which branch the printed workflow triggers on
 status records are each one record on one line at any terminal width, the same promise the
 `check` verdict line carries below, so a long branch name stays intact for a line-oriented
 pipeline instead of wrapping mid-token on a narrow console. The promise covers exactly those
-records: the placement, baseline, and activation guidance printed beside them is prose and wraps
-normally.
+records: the Git precondition, placement, baseline, and activation guidance printed beside them
+is prose and wraps normally.
 
 Because `init` writes into the current directory and every lattice-loading command selects its
 config from *its* current directory, a run from a subdirectory of a repository whose root is
@@ -853,9 +853,10 @@ target that is still present locally is indistinguishable from a current one wit
 access. Reading the reported source line is how you catch that, and `--default-branch` is how you
 fix it. Prefer passing it explicitly whenever you want a reproducible result, such as in an
 upgrade you intend to repeat. A missing remote, a missing `git`, or a directory outside a worktree
-all fall back quietly; ordinary `init` has no Git requirement. The probe runs `git` only from an
-absolute path outside the directory being scaffolded, so a checkout carrying its own `git` falls
-back rather than running it, as does a `git` reachable only through a relative `PATH` entry. A branch name that is supplied or
+all fall back quietly; ordinary `init` has no Git requirement, though following what it prints
+does. The probe runs `git` only from an absolute path outside the directory being scaffolded, so a
+checkout carrying its own `git` falls back rather than running it, as does a `git` reachable only
+through a relative `PATH` entry. A branch name that is supplied or
 detected but is not a supported literal name is a different case and is rejected with an error:
 names are limited to ASCII letters, digits, `.`, `_`, and `-` in `/`-separated parts, because a
 GitHub `branches:` filter is a glob pattern rather than a literal and `*`, `?`, `[`, `]`, and `!`
@@ -864,6 +865,19 @@ anywhere in the name, a leading or trailing `.` on any part, a `.lock` suffix, a
 name `HEAD`: no branch can carry such a name, so a filter built from one would never match. Only
 that exact spelling of `HEAD` is reserved, so `head`, `release/HEAD`, and similar names are
 ordinary branch names and are accepted.
+
+Having no Git requirement is a fact about running `init`, not about following its output. `init`
+and every lattice-loading command work outside a worktree, and outside one `init` still writes
+`.doc-lattice.yml` and prints the same complete recipe, because the three blocks are fixed text
+rather than anything it discovers there. What the recipe installs is Git and GitHub artifacts
+throughout: the `.gitignore` block needs a repository to be ignored in, the workflow needs a
+GitHub repository to run in, and [enabling the gates](#enabling-the-gates) needs a clone for
+`pre-commit` to write its hook into, so `pre-commit install` exits 1 outside one. Every run
+therefore names that precondition on stderr, once, ahead of the blocks. The line is unconditional
+and byte-identical under `--print-only`, because the precondition is on the repository you install
+the blocks into rather than on the directory the run happened in, and
+[`--print-only`](#the-pre-commit-snippet-every-install) deliberately carries no directory
+precondition of its own.
 
 `--default-branch` applies only to this printed workflow. The Linear workflow the recipe in
 [MANAGED_CI.md](https://github.com/Guardantix/doc-lattice/blob/main/MANAGED_CI.md) publishes is

@@ -46,6 +46,18 @@ _EXPECTED_ACTIVATION_GUIDANCE = (
     "them immediately."
 )
 
+# The recipe's own Git precondition, spelled out here for the same reason as the two above. It is
+# printed unconditionally, so this is also the only place that pins the wording an adopter outside
+# a worktree reads before the blocks that cannot be installed there.
+_EXPECTED_GIT_PRECONDITION_GUIDANCE = (
+    "The three blocks and the activation step install into a Git checkout of the docs "
+    "repository, and none of them is usable outside one: the ignore patterns need a repository "
+    "to be ignored in, the workflow needs a GitHub repository to run in, and activation needs a "
+    "clone to write its hook into. Producing this output needs no repository of its own, so the "
+    "precondition is on the repository you install into rather than on the directory this run "
+    "happened in."
+)
+
 
 def _shared_guidance(version: str) -> str:
     return (
@@ -162,6 +174,16 @@ def test_init_delegates_create_only_write_to_shared_persistence(tmp_path: Path, 
         # The fixture repository has no remote, so the probe finds nothing and the fixed
         # fallback is used. Naming the source is what makes a silent fallback visible.
         "workflow triggers on branch main (fallback)\n"
+        # The recipe's Git precondition, ahead of everything it qualifies and on its own line
+        # rather than folded into the three-cause `(fallback)` label above. Hard-wrapped here,
+        # unlike the two guidance lines below: it carries no copyable command, so it is prose
+        # like the placement line and is printed without soft_wrap.
+        "The three blocks and the activation step install into a Git checkout of the docs\n"
+        "repository, and none of them is usable outside one: the ignore patterns need a \n"
+        "repository to be ignored in, the workflow needs a GitHub repository to run in, \n"
+        "and activation needs a clone to write its hook into. Producing this output needs\n"
+        "no repository of its own, so the precondition is on the repository you install \n"
+        "into rather than on the directory this run happened in.\n"
         "Append the .gitignore block, add the pre-commit block under `repos:`, save the \n"
         "workflow as .github/workflows/doc-lattice.yml, and make sure the exact pinned \n"
         f"version {__version__} is published on PyPI so the snippets resolve.\n"
@@ -246,6 +268,78 @@ def test_init_reports_the_branch_before_the_copy_paste_guidance(tmp_path: Path, 
         "Append the .gitignore block"
     )
     assert "workflow triggers on branch" not in result.stdout
+
+
+def test_init_names_the_git_precondition_between_the_branch_and_the_placement(
+    tmp_path: Path,
+    monkeypatch,
+):
+    # The precondition is about the recipe, the branch record is about this run, and they stay
+    # separate lines in that order: the branch record must not become a fourth spelling of the
+    # precondition, and the precondition must precede the instructions it qualifies. Run inside
+    # the fixture repository with a controlled branch source, so this pins ordering alone and
+    # `test_init_outside_any_repository_...` pins the outside-a-worktree case.
+    _origin_head(tmp_path, "trunk")
+    monkeypatch.chdir(tmp_path)
+
+    result = runner.invoke(app, ["init"])
+
+    # Normalized because the line is prose and wraps, so its bytes are split by the console.
+    stderr = " ".join(result.stderr.split())
+    assert stderr.index("workflow triggers on branch trunk") < stderr.index(
+        _EXPECTED_GIT_PRECONDITION_GUIDANCE
+    )
+    assert stderr.index(_EXPECTED_GIT_PRECONDITION_GUIDANCE) < stderr.index(
+        "Append the .gitignore block"
+    )
+    assert _EXPECTED_GIT_PRECONDITION_GUIDANCE not in " ".join(result.stdout.split())
+
+
+def _assert_outside_any_repository(directory: Path) -> None:
+    """Fail unless no ancestor of `directory` carries a repository marker.
+
+    The premise of the test below, asserted rather than assumed. pytest's basetemp is
+    configurable, and one placed inside a checkout would put a repository above the directory,
+    turning a test about running outside a worktree into a test about running inside one: the
+    branch probe would report that repository's `origin/HEAD` instead of falling back, and the
+    ancestor walk would find its boundary. Fail loudly rather than skip, so the case the issue
+    names keeps being exercised instead of quietly going unrun.
+
+    Args:
+        directory: The invocation directory the test is about to use.
+    """
+    for ancestor in (directory, *directory.parents):
+        marker = ancestor / ".git"
+        # lexists, not exists: a dangling symlink is still a marker the command would honor.
+        if os.path.lexists(marker):
+            pytest.fail(
+                f"expected no repository above {directory}, found {marker}: "
+                "pytest's basetemp appears to sit inside a Git checkout"
+            )
+
+
+def test_init_outside_any_repository_prints_the_full_recipe_and_the_precondition(
+    tmp_path_factory,
+    monkeypatch,
+):
+    # The case the autouse fixture makes unreachable from `tmp_path`: a directory with no
+    # repository anywhere above it. `init` has no Git requirement, so it still writes the config
+    # and prints all three blocks byte-for-byte; what changes is that the recipe's own Git
+    # precondition is named before them, which is the whole of what an adopter here can act on.
+    outside = tmp_path_factory.mktemp("outside_any_repository")
+    _assert_outside_any_repository(outside)
+    monkeypatch.chdir(outside)
+
+    result = runner.invoke(app, ["init"])
+
+    assert result.exit_code == 0
+    assert result.stdout == _legacy_stdout(__version__)
+    assert (outside / ".doc-lattice.yml").is_file()
+    stderr = " ".join(result.stderr.split())
+    assert _EXPECTED_GIT_PRECONDITION_GUIDANCE in stderr
+    # The branch record stays the three-cause `(fallback)` label rather than disambiguating into
+    # a fourth source spelling that names the missing worktree.
+    assert "workflow triggers on branch main (fallback)\n" in result.stderr
 
 
 @pytest.mark.parametrize("branch", ["release/*", "main branch", "!main", "..", "réf", "main."])
@@ -752,6 +846,9 @@ def test_init_print_only_prints_exactly_what_an_ordinary_run_prints(tmp_path: Pa
     # The upgrade path emits the activation guidance too, which is why it is conditioned on the
     # clone not already being gated rather than telling every re-fetch to reinstall the hook.
     assert _EXPECTED_ACTIVATION_GUIDANCE in " ".join(printed.stderr.split())
+    # Emitted from `_print_artifacts`, the one site both modes reach, so parity holds by
+    # construction rather than by two call sites being kept in step.
+    assert _EXPECTED_GIT_PRECONDITION_GUIDANCE in " ".join(printed.stderr.split())
 
 
 def test_init_print_only_leaves_the_directory_byte_identical(tmp_path: Path, monkeypatch):

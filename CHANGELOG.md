@@ -6,6 +6,20 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Changed
+
+- `init` now names the printed recipe's Git precondition on stderr, once, ahead of the three
+  blocks: they install into a Git checkout of the docs repository and none of them is usable
+  outside one. `init` itself keeps its no-Git contract, so a run outside a worktree still writes
+  the config and prints the same complete recipe; what changes is that the terminal now says why
+  none of it can be followed there. The line is unconditional and byte-identical under
+  `--print-only`, because the precondition is on the repository the blocks are installed into
+  rather than on the directory the run happened in, and `--print-only` deliberately has no
+  directory precondition. Conditioning the output on Git presence was considered and rejected:
+  it would break the parity `--print-only` owes the ordinary run, and the only available
+  classifier is the `.git` filesystem marker that bounds the nested-config refusal, which
+  deliberately approximates Git discovery and is left doing only that.
+
 ## [7.0.0] - 2026-09-01
 
 ### Migration

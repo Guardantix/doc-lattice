@@ -75,6 +75,42 @@ _ACTIVATION_GUIDANCE = (
 )
 
 
+# GTX-298. `init` has no Git requirement and every lattice-loading command runs without Git, but
+# the recipe it prints is entirely Git and GitHub artifacts, so an adopter outside a worktree was
+# handed a complete set of instructions none of which could be followed -- and the terminal said
+# nothing, because the gap was never in README.md. Naming the precondition once is the arm chosen
+# over conditioning the output on a worktree, for two reasons that are properties of this command
+# rather than preferences. The three blocks are a stable stdout payload shared byte-for-byte with
+# --print-only, which is the documented upgrade retrieval path, and varying them would make the
+# read-only path a second source of truth. And there is no classifier to vary them on that is not
+# a repurposing: --print-only runs no ancestor walk at all, `_REPOSITORY_MARKER` bounds a refusal
+# rather than selecting output and may disagree with Git under GIT_DIR and friends, and the branch
+# probe collapses "no git", "no remote", and "outside a worktree" into one None.
+#
+# Worded about the destination rather than the invocation directory, because those are genuinely
+# different: README.md documents --print-only as carrying no directory precondition, so a sentence
+# telling the reader to go and enter a repository would be wrong for the adopter who ran it from a
+# subdirectory precisely because the directory does not matter.
+#
+# Deliberately a separate line from the branch record above it. That record's `(fallback)` label
+# is one three-cause label by design, and folding the precondition into it would make the label
+# disambiguate a case it does not measure. Placement, baseline, and activation are separate lines
+# for the same reason; this is the precondition on all three.
+#
+# Printed without soft_wrap, unlike the two lines above: it carries no copyable command, so it is
+# prose that wraps like the placement line rather than a record that must survive redirection
+# intact. README.md owns the rule and states it in "Ordinary offline setup"; tests/cli/test_init.py
+# holds the only mechanically enforced copy of the wording.
+_GIT_PRECONDITION_GUIDANCE = (
+    "The three blocks and the activation step install into a Git checkout of the docs "
+    "repository, and none of them is usable outside one: the ignore patterns need a repository "
+    "to be ignored in, the workflow needs a GitHub repository to run in, and activation needs a "
+    "clone to write its hook into. Producing this output needs no repository of its own, so the "
+    "precondition is on the repository you install into rather than on the directory this run "
+    "happened in."
+)
+
+
 # Narrated on stderr next to the generated workflow so a wrong probe result is visible when it
 # happens, rather than buried in YAML nobody re-reads. The probe is a local hint that cannot
 # detect an upstream rename whose old target still exists, so naming the source is what makes
@@ -254,7 +290,7 @@ def _print_unmanaged_guidance(runtime: CliRuntime, ci_text: str) -> None:
 def _print_artifacts(
     runtime: CliRuntime, gitignore_text: str, precommit_text: str, ci_text: str
 ) -> None:
-    """Print the three hand-installed blocks in their fixed order.
+    """Print the recipe's Git precondition, then the three hand-installed blocks in order.
 
     The one site that prints the three blocks, reached by both modes, so block order and the
     headers around them cannot differ between an ordinary run and ``--print-only``. It also
@@ -264,12 +300,21 @@ def _print_artifacts(
     texts came from, which is why ``tests/cli/test_init.py`` pins their exact bytes against each
     other rather than trusting this function alone.
 
+    The precondition leads, unconditionally, because it qualifies everything after it: this is
+    the one function both modes reach, so emitting it here makes the two modes share it by
+    construction rather than by two call sites being kept in step. "Before the blocks" is a
+    terminal-only property, since stdout and stderr interleave nowhere else -- an adopter
+    redirecting stdout to a file gets the precondition on stderr and the blocks in the file, in
+    no relative order at all -- which is why the wording states the precondition outright rather
+    than pointing at what follows it.
+
     Args:
         runtime: The invocation's output streams.
         gitignore_text: The ignore patterns block.
         precommit_text: The pre-commit hooks block.
         ci_text: The ordinary GitHub Actions workflow.
     """
+    runtime.stderr.print(_GIT_PRECONDITION_GUIDANCE)
     runtime.write_stdout("# ===== .gitignore (append these lines) =====")
     runtime.write_stdout(gitignore_text)
     runtime.write_stdout("# ===== .pre-commit-config.yaml (add under `repos:`) =====")

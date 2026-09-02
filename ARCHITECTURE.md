@@ -281,8 +281,13 @@ this module: routing it through Git would re-create the top-level resolution con
 above and give `init` the Git prerequisite it does not have. The two can therefore disagree
 under `GIT_DIR`, `GIT_CEILING_DIRECTORIES`, or `GIT_DISCOVERY_ACROSS_FILESYSTEM`, which the
 subprocess honors and the walk does not. That is accepted rather than reconciled, because the
-walk bounds only a refusal and never selects a write destination. `git_repository.py` remains
-the sole owner of the Git subprocess boundary either way.
+walk bounds only a refusal and never selects a write destination. It does not select printed
+output either, and GTX-298 declined to make it: `init`'s recipe carries a Git precondition its
+execution does not, and that is named in one unconditional stderr line rather than by varying the
+output on the marker. Conditioning on it would promote an accepted approximation into user-visible
+behavior and would break the byte-for-byte parity `--print-only` owes the ordinary run, which runs
+no ancestor walk at all. `git_repository.py` remains the sole owner of the Git subprocess boundary
+either way.
 
 Both contracts resolve the Git executable before running it, through two independent rejections.
 A `PATH` lookup that returns a relative result is refused outright, because the result is the
