@@ -38,12 +38,18 @@ class Annotation:
 
     ``severity`` is defaulted, so the sites that annotate only what they gate on read exactly as
     they did before it existed.
+
+    ``line`` is declared last and defaulted for the same reason ``severity`` is: every
+    existing site constructs an annotation positionally through ``severity``, and a
+    document-level link finding has no line to give. GitHub attaches a line-less annotation at
+    line 1, which is the closest representation workflow commands allow.
     """
 
     path: Path
     title: str
     message: str
     severity: AnnotationSeverity = "error"
+    line: int | None = None
 
 
 def escape_github_message(value: str) -> str:
@@ -70,8 +76,13 @@ def escape_github_property(value: str) -> str:
     return escape_github_message(value).replace(":", "%3A").replace(",", "%2C")
 
 
-def github_annotation(
-    path: Path, root: Path, title: str, message: str, severity: AnnotationSeverity = "error"
+def github_annotation(  # noqa: PLR0913
+    path: Path,
+    root: Path,
+    title: str,
+    message: str,
+    severity: AnnotationSeverity = "error",
+    line: int | None = None,
 ) -> str:
     """Render one GitHub Actions annotation for a finding.
 
@@ -86,6 +97,7 @@ def github_annotation(
         message: Annotation message, before escaping.
         severity: The workflow command to emit. Defaults to ``error``, which is what a
             command annotating exactly what it gates on wants.
+        line: The 1-based line to attach at, or None to omit the property.
 
     Returns:
         A single escaped workflow-command line.
@@ -94,8 +106,9 @@ def github_annotation(
         relative = path.relative_to(root)
     except ValueError:
         relative = path
+    position = "" if line is None else f",line={line}"
     return (
-        f"::{severity} file={escape_github_property(str(relative))},"
+        f"::{severity} file={escape_github_property(str(relative))}{position},"
         f"title={escape_github_property(title)}::{escape_github_message(message)}"
     )
 
@@ -126,6 +139,7 @@ def write_annotations(runtime: CliRuntime, items: Iterable[Annotation]) -> None:
                 item.title,
                 item.message,
                 item.severity,
+                line=item.line,
             )
         )
         annotated.append(item.path)

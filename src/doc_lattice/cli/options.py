@@ -16,3 +16,4 @@ IndentOpt = Annotated[
 ]
 ReportFormatOpt = Annotated[str, typer.Option("--format", help="human, json, or github.")]
 BasicFormatOpt = Annotated[str, typer.Option("--format", help="human or json.")]
+LinkFormatOpt = Annotated[str, typer.Option("--format", help="human or github.")]

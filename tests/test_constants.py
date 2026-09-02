@@ -143,3 +143,12 @@ def test_envelope_kind_domain_is_derived_from_the_literal():
     assert {"fence", "comment"} == VALID_ENVELOPE_KINDS
     assert COMMENT_ENVELOPE_OPEN == "<!-- doc-lattice"
     assert COMMENT_ENVELOPE_CLOSE == "-->"
+
+
+def test_link_report_formats_are_the_report_formats_minus_json():
+    from doc_lattice.constants import (  # noqa: PLC0415
+        VALID_LINK_REPORT_FORMATS,
+        VALID_REPORT_FORMATS,
+    )
+
+    assert VALID_REPORT_FORMATS - {"json"} == VALID_LINK_REPORT_FORMATS
