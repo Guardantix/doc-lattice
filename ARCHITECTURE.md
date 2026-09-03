@@ -2519,10 +2519,21 @@ decision removes. A token that *did* change is a deliberate act and is held to i
 content, or a version other than the one being released, fails the run rather than passing
 silently. A malformed token nobody touched is never parsed, so it cannot fail pushes indefinitely.
 
+One bound is about when re-arm stays *honest* rather than about the token, and it is the one this
+decision nearly shipped without. Re-arm is the only path that can tag a commit later merges have
+moved on to, while release notes are extracted from the `## [X.Y.Z]` section alone. Work that
+landed between the stranded bump and the re-arm is therefore inside the tag, and its entries sit
+under `## [Unreleased]` where the notes will not reach them. The gate refuses a re-arm while that
+section carries anything. The ordinary flow promotes Unreleased into the versioned section and
+leaves the heading present and empty, so the refusal is aimed exactly at the drift re-arm
+introduces and costs the ordinary path nothing. Requiring instead that *nothing* have landed since
+the bump was rejected: it cannot be checked without the token also naming the stranded commit, and
+it would refuse the case where folding the entries forward is both easy and correct.
+
 **Consequences:** A source-fix recovery is one ordinary merge instead of two release-shaped ones.
-The gate gains a second reason to create a tag, so its fail-closed surface is three conditions
+The gate gains a second reason to create a tag, so its fail-closed surface is five conditions
 rather than one; re-arm is unreachable unless the tag is absent, the version is unchanged, the
-token changed, and it names the current version. The token is not a check on the fix itself, only
+token changed, it names the current version, and no unreleased entries are pending. The token is not a check on the fix itself, only
 on the intent, so a re-arm without a working fix simply fails again and is re-armed again. The file
 is deliberately absent in normal operation and carries no version pin that
 `scripts/check_version_sync.py` reads, because a token naming a superseded version is its correct

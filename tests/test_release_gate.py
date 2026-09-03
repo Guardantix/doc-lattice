@@ -34,6 +34,13 @@ def _write_attempt(repo: Path, text: str) -> None:
     (repo / _ATTEMPT_FILE).write_text(text, encoding="utf-8")
 
 
+def _write_changelog(repo: Path, *, unreleased: str, released: str) -> None:
+    (repo / "CHANGELOG.md").write_text(
+        f"# Changelog\n\n## [Unreleased]\n\n{unreleased}\n## [1.0.0] - 2026-01-01\n\n{released}",
+        encoding="utf-8",
+    )
+
+
 def _commit(repo: Path, message: str) -> str:
     _git(repo, "add", ".")
     _git(repo, "commit", "-m", message)
@@ -328,3 +335,36 @@ def test_a_fresh_re_arm_token_never_recreates_an_existing_tag(repo: Path):
 
     assert result.returncode == 0
     assert outputs == ["proceed=false", "create_tag=false"]
+
+
+def test_a_re_arm_with_pending_unreleased_entries_fails(repo: Path):
+    _write_version(repo, "1.0.0")
+    _write_changelog(repo, unreleased="", released="- the release this bump described\n")
+    before = _commit(repo, "release version whose run failed before the tag")
+    _write_changelog(
+        repo,
+        unreleased="- work that landed after the bump\n",
+        released="- the release this bump described\n",
+    )
+    _write_attempt(repo, "1.0.0 fixture-fix\n")
+    sha = _commit(repo, "re-arm after unrelated work landed")
+
+    result, outputs = _run_gate(repo, tag="v1.0.0", version="1.0.0", sha=sha, before=before)
+
+    assert result.returncode != 0
+    assert "::error::" in result.stdout
+    assert "CHANGELOG.md still has unreleased entries" in result.stdout
+    assert outputs == []
+
+
+def test_a_re_arm_with_an_empty_unreleased_heading_starts_release_work(repo: Path):
+    _write_version(repo, "1.0.0")
+    _write_changelog(repo, unreleased="", released="- the release this bump described\n")
+    before = _commit(repo, "release version whose run failed before the tag")
+    _write_attempt(repo, "1.0.0 fixture-fix\n")
+    sha = _commit(repo, "fix the defect and re-arm")
+
+    result, outputs = _run_gate(repo, tag="v1.0.0", version="1.0.0", sha=sha, before=before)
+
+    assert result.returncode == 0
+    assert outputs == ["proceed=true", "create_tag=true"]

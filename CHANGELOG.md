@@ -26,8 +26,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   changing it takes the same protected merge to `main` that lands a version bump. Re-arm is read
   only after every existing-tag outcome is decided, so it can never create, move, or replace a tag
   for a version that already has one, and an absent, untouched, or deleted token is not a request.
-  A token that did change but is malformed or names another version fails the run closed.
-  RELEASING.md owns the operator procedure and ARCHITECTURE.md's AD-46 owns the decision.
+  A token that did change but is malformed or names another version fails the run closed, as does
+  one offered while `CHANGELOG.md` still carries entries under `## [Unreleased]`: re-arm is the one
+  path that can tag a commit later merges have moved on to, and those entries would ship inside the
+  tag with the release notes silent about them. RELEASING.md owns the operator procedure and
+  ARCHITECTURE.md's AD-46 owns the decision.
 
 ### Changed
 

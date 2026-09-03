@@ -123,6 +123,12 @@ After verifying, refresh any installed tool with `uv tool install doc-lattice@la
   push is not a request. A token that did change but is malformed, or names another version, fails
   the run closed. Re-arm is consulted only after every existing-tag outcome above has been decided,
   so it can never create, move, or replace a tag for a version that already has one.
+- A re-arm also fails closed when `CHANGELOG.md` still carries entries under `## [Unreleased]` at
+  the release commit. Release notes come from the `## [X.Y.Z]` section alone, and re-arm is the one
+  path that can tag a commit later merges have moved on to, so pending entries there are work that
+  would ship inside the tag with the notes silent about it. The ordinary release flow promotes
+  Unreleased into the versioned section and leaves the heading empty, so this refuses only the
+  drift re-arm introduces.
 - Malformed current, pre-push, or tagged version declarations fail closed. Unexpected Git or
   source-reading failures also fail closed; they are never treated as permission to publish.
 
@@ -198,11 +204,22 @@ Empty output means no tag. If it prints the tag, stop and use the sections below
    the run fails closed rather than releasing the wrong thing. The attempt id is yours to choose
    from `A-Za-z0-9._-` and is what makes the token *fresh*, so name it after the fix and the file
    reads as a record rather than a counter.
-3. Merge the pull request. The push to `main` carries both halves, so the gate sees an unchanged
-   version, an absent tag, and a token that differs from the pre-push copy, and starts release work
-   for X.Y.Z. From there the pipeline is the ordinary one, including the `pypi` approval.
-4. If that attempt also fails before the tag, re-arm again by changing the attempt id. The token
-   being *different* is what re-arms; editing it back to a value it already held does not.
+3. If anything else merged to `main` between the failed release and now, deal with it before you
+   merge. Work that landed since the bump is inside the commit the tag would identify, but the
+   release notes come from the `## [X.Y.Z]` section, so entries sitting under `## [Unreleased]`
+   would ship undocumented. The gate refuses that rather than letting it through, and there are two
+   honest answers: fold those entries into the `## [X.Y.Z]` section, since they are shipping in
+   X.Y.Z, or abandon the stranded version and cut a new one instead of re-arming. Prefer the second
+   when enough has landed that X.Y.Z would no longer describe the release.
+4. Merge the pull request. The push to `main` carries both halves, so the gate sees an unchanged
+   version, an absent tag, a token that differs from the pre-push copy, and no pending unreleased
+   entries, and starts release work for X.Y.Z. From there the pipeline is the ordinary one,
+   including the `pypi` approval.
+5. If that attempt also fails before the tag, re-arm again by changing the attempt id. Freshness is
+   measured against the *immediately preceding* copy and nothing older, so any edit that changes
+   the bytes re-arms, including setting the id back to one an earlier attempt used. Nothing tracks
+   the values a version has already been re-armed with. Pick a new id anyway, so the file reads as
+   a record of which fix is in flight rather than a value that happens to differ.
 
 Leave the token alone afterwards. Once the tag exists, every push resolves on the existing-tag
 path and the token is never read, so a spent `.release-attempt` naming a superseded version is its

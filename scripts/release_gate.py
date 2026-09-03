@@ -25,6 +25,16 @@ byte-identical to the pre-push copy, or deleted in the push is not a request and
 ordinary no-op, so a spent token left behind after a successful release is inert and needs no
 cleanup merge. A token that did change is a deliberate act and is held to it: malformed content
 or a version other than the one being released fails the run rather than passing silently.
+
+The last of those bounds is about *when* re-arm is still honest rather than about the token.
+Re-arm is the one path that can tag a commit later merges have moved on to, and the release notes
+come from the ``## [X.Y.Z]`` section alone -- so entries left under ``## [Unreleased]`` at the
+release commit would ship inside the tag with the notes silent about them. The ordinary flow
+promotes Unreleased into the versioned section, leaving the heading present and empty, so
+requiring that here refuses exactly the drift re-arm introduces and nothing the ordinary path
+does. The remedy is a real choice, not a formality: fold the intervening entries into the
+version being re-armed, since they will ship in it, or cut a new version and leave the stranded
+one behind.
 """
 
 from __future__ import annotations
@@ -39,6 +49,11 @@ _VERSION_PATH = "src/doc_lattice/__init__.py"
 _VERSION_ASSIGNMENT = re.compile(r'^__version__ = "([^"]+)"$', re.MULTILINE)
 _ATTEMPT_PATH = ".release-attempt"
 _ATTEMPT_TOKEN = re.compile(r"(?P<version>\d+\.\d+\.\d+)[ \t]+(?P<attempt>[A-Za-z0-9._-]+)")
+_CHANGELOG_PATH = "CHANGELOG.md"
+_UNRELEASED_SECTION = re.compile(
+    r"^##[ \t]*\[Unreleased\].*?$(?P<body>.*?)(?=^##[ \t]*\[|\Z)",
+    re.MULTILINE | re.DOTALL,
+)
 
 
 class GateError(RuntimeError):
@@ -76,6 +91,20 @@ def _version_at(ref: str, label: str, *, may_be_missing: bool = False) -> str | 
     return matches[0]
 
 
+def _pending_unreleased(ref: str) -> bool:
+    # The ordinary release flow promotes `## [Unreleased]` into `## [X.Y.Z]`, so the heading is
+    # present but empty at a release commit. Re-arm is the one path that can tag a commit reached
+    # by later merges, and the notes are extracted from the `## [X.Y.Z]` section alone -- so
+    # content sitting under Unreleased here is work that would ship inside the tag while the
+    # release notes said nothing about it. An absent changelog is not this failure: the release
+    # job's own extraction refuses that, before the tag, on every path.
+    changelog = _source_at(ref, _CHANGELOG_PATH)
+    if changelog is None:
+        return False
+    section = _UNRELEASED_SECTION.search(changelog)
+    return section is not None and bool(section["body"].strip())
+
+
 def _re_arm_attempt(current_sha: str, before_sha: str, version: str) -> str | None:
     # Freshness is a byte comparison of the two copies rather than a comparison of parsed
     # tokens, so "changed" means "edited in this push" and no historical content is ever
@@ -90,6 +119,13 @@ def _re_arm_attempt(current_sha: str, before_sha: str, version: str) -> str | No
         raise GateError(f"release commit has a malformed re-arm token in {_ATTEMPT_PATH}")
     if match["version"] != version:
         raise GateError(f"re-arm token names version {match['version']!r}, not {version}")
+    if _pending_unreleased(current_sha):
+        raise GateError(
+            f"re-arm token names {version} but {_CHANGELOG_PATH} still has unreleased entries; "
+            f"work landed since the bump would ship inside the tag undocumented. Fold those "
+            f"entries into the '## [{version}]' section, or cut a new version instead of "
+            f"re-arming."
+        )
     return match["attempt"]
 
 
