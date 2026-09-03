@@ -40,14 +40,16 @@ decode, a character reference the parser refuses -- is a finding on that documen
 continues. A filesystem the gate cannot inspect -- a resolve, stat, scan, or open that fails --
 is a tool error: a gate that cannot see its inputs must not pass.
 
-Which tool error it becomes turns on when the refusal was met. A selection-time refusal, met
-while expanding a selector, is a ``ConfigError``, because the selector is what reached the path
-and narrowing the selector is the repair. A document-time refusal, met against a document the
-selection already chose, is an ``UnreadableDocError`` carrying that document. That second half is
-load-bearing rather than cosmetic: ``UnreadableDocError`` is a ``DocumentError``, and
-``exit_on_project_error`` annotates its ``source`` as a document under ``--format github``, which
-is why a directory never raises one. GitHub drops an annotation whose ``file=`` is not a file in
-the diff, and it drops it in silence.
+Which tool error it becomes turns on when the refusal was met. A refusal met while a selector is
+being expanded is a ``ConfigError``, because the selector is what reached the path and narrowing
+the selector is the repair. A refusal met against a path the selection already chose is an
+``UnreadableDocError`` carrying that path. That second half is load-bearing rather than cosmetic:
+``UnreadableDocError`` is a ``DocumentError``, and ``exit_on_project_error`` annotates its
+``source`` as a document under ``--format github``, and GitHub drops an annotation whose ``file=``
+is not a file in the diff, in silence. That is why the walk never hands one a directory: only a
+non-directory entry can satisfy a selector's last segment. A link target is the one ``source``
+that is not itself a selected document, so a target the filesystem refuses to stat can still
+carry a path the diff has nothing to attach to.
 """
 
 import errno
@@ -700,16 +702,19 @@ def select_link_sources(project_root: Path, selectors: Sequence[str]) -> list[Pa
 
     Raises:
         ConfigError: If ``selectors`` is empty, or a selector is malformed, matches no lexical
-            path, or reaches a directory the walk cannot scan. Every selection-time refusal is a
-            ``ConfigError``, per the taxonomy this module's docstring records.
-        UnreadableDocError: If a contained match is a dangling symlink, a directory reached
-            through a symlink, or a special file. None of those is opened: the classification is
-            a ``stat``, because opening a FIFO or a device can block indefinitely.
+            path, or reaches a directory the walk cannot scan. Every refusal met while a selector
+            is being expanded is a ``ConfigError``, per the taxonomy this module's docstring
+            records.
+        UnreadableDocError: If a contained match will not resolve, or is a dangling symlink, a
+            directory reached through a symlink, or a special file. Those are refusals against a
+            path the expansion already chose, which is the other half of that taxonomy. None of
+            them is opened: the classification is a ``stat``, because opening a FIFO or a device
+            can block indefinitely.
     """
     root = project_root.resolve()
     if not selectors:
         msg = (
-            f"link_sources selects nothing under the project root "
+            f"link_sources names no selector for the project root "
             f"{format_path_for_display(root)}; the links command refuses to run "
             "without a selector"
         )
