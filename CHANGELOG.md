@@ -52,6 +52,21 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   considered and rejected: it would break the parity `--print-only` owes the ordinary run, and
   the only available classifier is the `.git` filesystem marker that bounds the nested-config
   refusal, which deliberately approximates Git discovery and is left doing only that.
+- CI now runs the shipped test suite from an unpacked sdist, on one leg of the `tests` matrix,
+  after the ordinary run. The archive is built and unpacked outside the checkout and the suite runs
+  from the extracted root against a freshly resolved dev group, so a test module that reads a
+  repository-only path fails there at collection instead of shipping. Until now nothing in CI ever
+  executed the archive: the manifest excludes such modules by name and a test couples that list to
+  the archive-membership denial set, but a module absent from both passes that coupling cleanly.
+  ARCHITECTURE.md's AD-47 owns the decision, including why the check rides the `tests` matrix
+  rather than a job of its own or the release path.
+
+### Fixed
+
+- `tests/test_check_migration_rule.py` no longer ships in the sdist. It reads
+  `scripts/check_migration_rule.py`, which the sdist does not carry, so the shipped suite failed
+  at collection for anyone who unpacked and ran it. It is the sixth such module and the first
+  caught by a gate rather than by hand.
 
 ### Migration
 

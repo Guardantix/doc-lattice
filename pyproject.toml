@@ -19,6 +19,7 @@ exclude = [
     "/tests/test_audit_action_runtimes.py",
     "/tests/test_bench_sections.py",
     "/tests/test_check_action_pin_correspondence.py",
+    "/tests/test_check_migration_rule.py",
     "/tests/test_check_typing_boundaries.py",
     "/tests/test_check_version_sync.py",
     "/tests/test_ci_report.py",
