@@ -28,6 +28,13 @@ routes contributors and agents to those decisions and lists enforced repository 
 
 ## Decision Log
 
+Statuses describe whether each decision currently governs. `Accepted` means the decision governs
+without a later AD changing it. `Accepted; amended by AD-N` means a stated core still governs while
+each named later AD changes part of it. `Superseded by AD-N` means none of the original decision
+governs and the named successor remains here. `Removed` means no decision from the record remains
+in this repository; the record may be collapsed, as AD-17 through AD-23 are below. A status names
+every later AD that amends or supersedes the decision.
+
 ### AD-1: A broken ref is a lattice state, not a load error
 
 **Date:** 2026-06-27
@@ -46,7 +53,7 @@ edges.
 ### AD-2: Pure core, thin impure shell
 
 **Date:** 2026-06-27
-**Status:** Accepted
+**Status:** Accepted; amended by AD-32 and AD-45
 **Context:** Graph and report logic must be testable against synthetic inputs.
 **Decision:** All graph and report logic is filesystem-free and pure. `config`,
 `discovery`, and `orchestrate` own load-path filesystem work. `link_check.py` owns the
@@ -95,7 +102,7 @@ nesting is possible.
 ### AD-3: Untyped-to-typed boundary policy
 
 **Date:** 2026-06-27
-**Status:** Accepted
+**Status:** Accepted; amended by AD-32
 **Context:** Document frontmatter YAML, workflow YAML, and Linear JSON arrive untyped.
 **Decision:** `typing.Any`/`typing.cast` are allowed only in boundary modules
 (`scripts/check_typing_boundaries.py`); the real boundaries are `frontmatter_parser`
@@ -214,7 +221,7 @@ a violation (mirroring `check`).
 ### AD-7: Tag-gated PyPI distribution
 
 **Date:** 2026-07-12
-**Status:** Accepted
+**Status:** Accepted; amended by AD-46
 **Context:** Releases publish wheels and source distributions to PyPI, with the tag as
 the immutable source identity and no stored PyPI credential.
 **Decision:** A merge-triggered `release` job validates or creates the `vX.Y.Z` tag.
@@ -260,7 +267,7 @@ case keeps the reporting stability the Decision describes.
 ### AD-9: Per-invocation CLI package boundaries
 
 **Date:** 2026-07-14
-**Status:** Accepted
+**Status:** Accepted; amended by AD-32
 **Context:** The command-line application must isolate repeated invocations while
 preserving the installed `doc_lattice.cli:main` entry point and the importable `app`
 compatibility surface. Command wiring also needs named ownership boundaries without
@@ -440,7 +447,7 @@ configuration keys are not reserved as inert surface without an approved require
 ### AD-16: GitHub administration remains an external human boundary
 
 **Date:** 2026-07-15
-**Status:** Accepted
+**Status:** Accepted; amended by AD-32
 **Context:** Workflow files are repository-controlled input, so a same-repository pull request can
 edit a workflow that receives a broadly scoped secret. The normal package code must not receive
 GitHub administration credentials while establishing a safer authorization boundary.
@@ -529,7 +536,7 @@ its own cadence, and a change there can no longer regress this engine.
 ### AD-26: Reconcile output identity depends on ruamel parser internals
 
 **Date:** 2026-08-11
-**Status:** Accepted
+**Status:** Accepted; amended by AD-32
 **Context:** Reconcile rewrites exact source bytes so a document's body, key order, comments, and
 list indentation survive a `seen` update. Locating those bytes means reading ruamel's parser
 events and scanner tokens, and the byte offsets on their source marks, rather than dumping a
@@ -597,7 +604,7 @@ is the failure mode this engine prefers.
 ### AD-27: Runtime dependencies are bounded above, and markdown-it-py stays exact
 
 **Date:** 2026-08-14
-**Status:** Accepted
+**Status:** Accepted; amended by AD-40
 **Context:** Adopters invoke this engine by exact version, and `uvx --from doc-lattice==X` resolves
 the dependency closure fresh on every run, so an upstream release rather than a doc-lattice release
 decides what an adopter's gate actually executes. `typer`, `rich`, and `pydantic` were declared by
@@ -711,7 +718,7 @@ verification, and benchmark validation AD-13 already prescribes.
 ### AD-29: A skipped file's reason is cached data, and is reported from one site
 
 **Date:** 2026-08-15
-**Status:** Accepted
+**Status:** Accepted; amended by AD-39 and AD-40
 **Context:** Parsing answered "is this a node?" with a node or nothing, so a file whose `id` key
 was mistyped left the lattice with its declared edges and no diagnostic, indistinguishable from
 prose the engine never tracked. Reporting the skip is only half the fix. AD-12 requires the
@@ -908,7 +915,7 @@ assertion in `tests/test_reconcile.py`; this decision governs only which bytes r
 ### AD-31: The reconcile rewriter supports a declared frontmatter subset
 
 **Date:** 2026-08-15
-**Status:** Accepted
+**Status:** Accepted; amended by AD-33, AD-35, and AD-44
 **Context:** `reconcile` is the only command that writes to a user's documents, and AD-26 makes it
 edit exact source bytes rather than dump a loaded document back out. That buys byte-level
 preservation and costs a bounded input language: every spelling the rewriter can locate an edit in
@@ -2058,7 +2065,7 @@ in the import graph.
 ### AD-42: A stale action pin is noticed by two stock signals, not by an auditor
 
 **Date:** 2026-08-22
-**Status:** Accepted
+**Status:** Accepted; amended by AD-43
 **Context:** GTX-170 moved the two shipped action pins off Node.js 20 releases, and it existed
 only because someone read `Node.js 20 is deprecated` in a live job log while doing unrelated
 work. Nothing in this repository would have said it otherwise. A deliberately frozen SHA cannot
@@ -2176,7 +2183,7 @@ Both fail the run, because an unverified pin is not a verified one, but an outag
 reported as a mislabeled release. A finding outranks a concurrent failure in the exit code, since
 the actionable answer must not be masked by an unrelated outage on the other pin.
 
-Alternatives were rejected. **Declining outright** was the other legitimate outcome ROADMAP named,
+Alternatives were rejected. **Declining outright** was the other legitimate outcome considered,
 and it fails on the mutability above: the case that survives AD-42's narrowing is real for at
 least one currently pinned release, and no local discipline covers it. **A one-time check after a
 bump** covers only authorship, which is the half AD-42 already covers. **Folding it into

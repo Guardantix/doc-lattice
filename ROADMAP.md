@@ -21,16 +21,16 @@ worth doing while that is still true, because each is expensive once outside ado
 
 **Finish the documentation-integrity story.** The engine tracks declared derivation edges between
 documents and reports when a downstream section goes stale against its upstream. It does not read
-ordinary Markdown links, so a broken relative link or heading anchor is invisible to it. This
-repository closes that gap for itself with a private script. Making link and anchor checking a
-first-class command is what lets the project stand behind documentation integrity as a whole
-rather than one half of it.
+ordinary Markdown links as derivation edges; its first-class `links` command checks relative links
+and heading anchors separately. Applying both gates to this repository's own maintained documents
+is what lets the project stand behind documentation integrity as a whole rather than one half of
+it.
 
 **Track our own documents.** The repository does not currently use the engine on its own
 maintained documents, which is both a credibility gap and a missed detector: the drift these
-documents produce is exactly the class the engine reports. The decision to adopt is made. It
-follows the link-checking work above rather than preceding it, so that self-adoption arrives as
-one coherent gate instead of a lattice with a known hole beside a separate script.
+documents produce is exactly the class the engine reports. The decision to adopt is made, and the
+shipped link command gives self-adoption one coherent gate over both declared derivation edges and
+ordinary Markdown links.
 
 **Make adoption legible to a first-time user.** Everything a new adopter meets before the engine
 runs, chiefly what `init` writes and prints, should be correct and followable in the context where
