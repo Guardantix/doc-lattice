@@ -135,6 +135,63 @@ jobs:
       - run: uv python install ${{ matrix.python }}
       - run: uv sync --locked --group dev
       - run: uv run --no-sync pytest
+      # GTX-292: the same suite again, but from an unpacked sdist rather than from the checkout.
+      # The step above proves the suite passes where every repository file is present, and
+      # `tests/test_package_metadata.py` proves the sdist manifest's exclude list and that
+      # module's archive-membership denial set name the same modules. Neither says either list is
+      # complete: a test module that reads `scripts/`, `.github/`, or a root document the sdist
+      # does not carry is absent from both and passes the coupling gate cleanly. Only running the
+      # archive catches it, which until now meant a human building the sdist by hand -- how
+      # GTX-251 was found, and how the sixth such module was found writing this step.
+      #
+      # It rides the `tests` matrix rather than standing as a job of its own so that it inherits
+      # the protected `Tests` context `tests-result` reports and the `release` job's `needs:` on
+      # `tests`. A standalone job would report a context branch protection does not require, which
+      # is advisory until the staged rollout RELEASING.md describes adds it. The release path was
+      # the other candidate and is worse: `release` pushes the immutable tag before
+      # `build-release` starts, so a check there strands a release for ordinary manifest drift
+      # instead of failing the pull request that introduced it.
+      #
+      # One leg, spelled as an exclusion of the older one for the reason `code-quality` records
+      # about `links`: this asks about archive membership and working-directory isolation, which
+      # do not vary by interpreter, and naming the leg to run on would drop the gate silently if
+      # that matrix value were ever removed, while excluding one leg can at worst restore the
+      # duplication. Interpreter compatibility stays the whole matrix's job.
+      - if: matrix.python != '3.13'
+        name: Run the shipped test suite from an unpacked sdist
+        env:
+          # The run above owns the coverage gate on this same leg, so measuring again would
+          # enforce a number already enforced -- and the shipped suite is a subset, so its total
+          # is not the one `fail_under` describes. The worker settings are the job's, and it
+          # records why `--dist loadfile` is load-bearing rather than tuning. Set here rather than
+          # inherited because the job-level value deliberately carries no `--no-cov` on 3.14.
+          PYTEST_ADDOPTS: --no-cov -n auto --dist loadfile
+          # Two directories, both under `runner.temp` and neither the other. Unpacking inside the
+          # checkout would put the repository's own `scripts/` and `.github/` within reach of a
+          # module the archive cannot supply them to, which is the entire failure this step
+          # exists to see; unpacking into the build directory would leave the archive beside the
+          # tree it produced and make the sole-root probe below ambiguous.
+          SDIST_DIR: ${{ runner.temp }}/sdist-build
+          UNPACK_DIR: ${{ runner.temp }}/sdist-unpacked
+        run: |
+          mkdir -p "${UNPACK_DIR}"
+          uv build --sdist --out-dir "${SDIST_DIR}"
+          # The archive, and the sole-archive gate, in one probe -- the shape the release smoke
+          # uses to select its wheel: a second `.tar.gz` makes this two lines, which is not a
+          # file, so the suite can only ever run from the one archive this step built.
+          ARCHIVE="$(ls -1 "${SDIST_DIR}"/*.tar.gz)"
+          test -f "${ARCHIVE}"
+          tar -xzf "${ARCHIVE}" -C "${UNPACK_DIR}"
+          # The same probe for the extracted root. Without it a second entry would leave the `cd`
+          # below naming no directory, and the step would report on a tree nobody selected.
+          ROOT="$(ls -1d "${UNPACK_DIR}"/*/)"
+          test -d "${ROOT}"
+          cd "${ROOT}"
+          # No `--locked`, and the repository lock is not copied in: the sdist ships
+          # `pyproject.toml` without `uv.lock` on purpose, so resolving the shipped dev group
+          # from scratch is part of what this step asserts about the artifact an adopter gets.
+          uv sync --group dev
+          uv run --no-sync pytest
 
   tests-result:
     name: Tests

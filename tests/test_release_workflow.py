@@ -70,6 +70,14 @@ _SMOKE_BUILT_STEP = "Smoke-test the built distribution"
 # The provider that smoke runs against, named from the workspace root rather than relatively: the
 # invocation runs from a throwaway directory, where `dist/` names nothing at all.
 _WHEEL_GLOB = "${GITHUB_WORKSPACE}/dist/*.whl"
+# GTX-292: the run of the shipped test suite from an unpacked sdist, and the only one. As with
+# the built-distribution smoke, the name is how this suite finds the step, so deleting the step
+# fails here rather than silently restoring the gap it closes.
+_SDIST_SUITE_STEP = "Run the shipped test suite from an unpacked sdist"
+# The step's interpreter condition, which the workflow spells as an exclusion of the older leg
+# rather than as a selection of the newer one. Parsed rather than compared as a string, so the
+# assertion below can say *which* leg is excluded instead of restating the whole expression.
+_MATRIX_EXCLUSION = re.compile(r"^matrix\.python != '([^']+)'$")
 # The line MANAGED_CI.md step 1 tells an adopter to read back, in full and on stderr. `init`
 # prints it after the write path and after the benign already-exists path alike, which is why the
 # config probes rather than this line are what prove scaffolding happened.
@@ -574,6 +582,50 @@ def _makes_local_wheel(value: str) -> bool:
     if len(inner) != 1 or inner[0][:1] != ["ls"] or not _REDIRECTIONS.isdisjoint(inner[0]):
         return False
     return _operands(inner[0]) == [_WHEEL_GLOB]
+
+
+def _sole_match(value: str, name: str, child: str, flags: set[str]) -> bool:
+    """Report whether an assigned value is a listing of `child` inside the directory `name` holds.
+
+    The third sibling of `_makes_throwaway_dir`, recognizing one shape and refusing the rest for
+    the reason both of the others give: what a substitution expands to is what its last command
+    printed, so a compound one vouches for nothing.
+
+    The listing is also the sole-match gate, which is why the pattern rather than a resolved path
+    is what has to be pinned. A glob matching two entries makes the value two lines, and the
+    `test` that follows rejects it as neither a file nor a directory; a caller that resolved the
+    match some other way could select one of several silently.
+
+    Args:
+        value: The assigned value, substitution included.
+        name: The variable whose directory the pattern is anchored in.
+        child: The pattern below that directory, `*.tar.gz` or `*/`.
+        flags: Short options the listing must carry, `-1` as the letter ``1``.
+
+    Returns:
+        True when the value is exactly that listing.
+    """
+    substitution = _COMMAND_SUBSTITUTION.match(value)
+    if substitution is None:
+        return False
+    inner = _invocations(substitution.group(1))
+    if len(inner) != 1 or inner[0][:1] != ["ls"] or not _REDIRECTIONS.isdisjoint(inner[0]):
+        return False
+    operands = _operands(inner[0])
+    return (
+        flags <= _short_flags(inner[0])
+        and len(operands) == 1
+        and _expands_under(operands[0], name, child)
+    )
+
+
+def _sdist_suite_step() -> dict:
+    """Return the `tests` step that runs the shipped suite from an unpacked sdist.
+
+    Three tests read it, and `_named_step` raises rather than returning None, so deleting the
+    step fails each of them at this line instead of leaving one of them vacuously green.
+    """
+    return _named_step(_WORKFLOW["jobs"]["tests"], _SDIST_SUITE_STEP)
 
 
 def _redirections(argv: list[str]) -> dict[str, str]:
@@ -1253,6 +1305,243 @@ def test_the_yaml_compatibility_matrix_installs_the_declared_ruamel_floor():
         f"expected exactly one overlay installing the cell's own version, found {floor_installs}."
         " A second install, or a hardcoded version, decouples the job from the matrix value this "
         "test correlates and the correlation stops describing what CI runs."
+    )
+
+
+def test_the_shipped_sdist_suite_is_gated_by_the_protected_tests_context():
+    """GTX-292: where the archive is executed, and on which leg.
+
+    `tests/test_package_metadata.py` couples the sdist manifest's exclude list to its
+    archive-membership denial set, which says the two lists agree and nothing about either being
+    complete. A test module that reads `scripts/`, `.github/`, or a root document the sdist does
+    not carry is absent from both and passes that coupling cleanly; it then ships, and fails at
+    collection for anyone who runs the shipped suite. Five such modules accumulated before
+    GTX-251 and a sixth afterwards, every existing gate green throughout, because nothing in CI
+    ever unpacked the archive and ran it. AD-47 owns the decision; these three tests own its
+    shape, and this module excludes itself from the sdist so it can read `ci.yml` without
+    recreating the problem it pins.
+
+    The step belongs to the `tests` matrix rather than to a job of its own, which is what gives it
+    the protected `Tests` context `tests-result` reports and the `release` job's `needs:`. As a
+    standalone job it would emit a context branch protection does not require -- advisory until
+    the staged rollout RELEASING.md describes adds it -- and on the release path it would run
+    after `release` has already pushed the immutable tag.
+
+    It runs after the ordinary suite rather than instead of it, so the cheaper and more
+    informative failure is the one a reader meets first and a manifest problem is distinguishable
+    from a real one. And on one leg, spelled as an exclusion of the oldest interpreter for the
+    reason `code-quality` records about `links`: naming the leg to run on drops the gate entirely
+    if that matrix value is ever removed, while excluding one leg can at worst run it twice.
+    """
+    job = _WORKFLOW["jobs"]["tests"]
+    step = _sdist_suite_step()
+    steps = job["steps"]
+    index = steps.index(step)
+
+    ordinary = [
+        position
+        for position, other in enumerate(steps)
+        if other is not step
+        and any(_launches(argv, "uv", "run") for argv in _invocations(_commands(other)))
+    ]
+    assert ordinary, (
+        f"the {_SDIST_SUITE_STEP!r} step is the job's only suite run. It duplicates the checkout's "
+        "own run deliberately and does not replace it: a failure that reaches only the archive is "
+        "a manifest problem, and telling the two apart needs both."
+    )
+    assert max(ordinary) < index, (
+        f"the {_SDIST_SUITE_STEP!r} step must follow the checkout's own suite, found it at "
+        f"{index} with runs at {ordinary}. A failure from the source tree is cheaper to read and "
+        "explains more, so it is the one a reader should meet first."
+    )
+
+    interpreters = list(job["strategy"]["matrix"]["python"])
+    exclusion = _MATRIX_EXCLUSION.fullmatch(step.get("if", ""))
+    assert exclusion is not None, (
+        f"expected the step's condition to exclude one interpreter, found {step.get('if')!r}. A "
+        "condition naming the leg to run on silently drops this gate if that matrix value is "
+        "ever removed; excluding a leg can at worst run the check twice."
+    )
+    assert exclusion.group(1) == min(interpreters, key=_release), (
+        f"the step excludes {exclusion.group(1)!r}, but the matrix's oldest interpreter is "
+        f"{min(interpreters, key=_release)!r}. Archive membership and working-directory isolation "
+        "do not vary by interpreter, so the newest leg is the one that carries this."
+    )
+    # "At worst twice" is only true while a leg survives the exclusion. A matrix shrunk to the
+    # excluded value alone leaves the condition false everywhere, and the assertion above still
+    # holds -- the silent drop this spelling exists to prevent, arriving by the other door.
+    assert [leg for leg in interpreters if leg != exclusion.group(1)], (
+        f"the matrix is {interpreters}, every leg of which the step's condition excludes, so the "
+        "gate runs nowhere while every assertion here still passes. Excluding a leg is only safe "
+        "while another remains."
+    )
+
+    addopts = shlex.split(step["env"]["PYTEST_ADDOPTS"])
+    assert "--no-cov" in addopts, (
+        f"expected the step to disable coverage, found {addopts}. The leg's ordinary run already "
+        "enforces `fail_under`, and the shipped suite is a subset whose total is not the number "
+        "that threshold describes."
+    )
+    assert _flag_value(addopts, "--dist") == "loadfile", (
+        f"expected `--dist loadfile`, found {addopts}. The `tests` job records why file "
+        "granularity is load-bearing rather than tuning: `tests/test_reconcile_fuzz.py` asserts "
+        "over an accumulator the rest of its module populates."
+    )
+
+
+def test_the_shipped_sdist_suite_runs_from_a_tree_the_step_built_outside_the_checkout():
+    """GTX-292: the assertions that keep the run honest rather than merely present.
+
+    Provenance is the half a rewrite would take first, because losing it costs nothing visible.
+    An unpack inside the working tree puts the repository's own `scripts/` and `.github/` within
+    reach of a module the archive cannot supply them to, so the step goes green on exactly the
+    drift it exists to catch -- a passing gate that has stopped asking the question.
+
+    The two listings are the sole-match gates as well as the selections. Each is one `ls` and
+    nothing else, for the reason `_makes_throwaway_dir` gives: a compound substitution expands to
+    whatever its last command printed and vouches for nothing. A glob with two matches then makes
+    the value two lines, which the `test` beside it rejects -- so the suite can only ever run from
+    the one archive this step built, and only from the tree that archive produced.
+    """
+    step = _sdist_suite_step()
+    text = _commands(step)
+    commands = _invocations(text)
+    build_dir = step["env"]["SDIST_DIR"]
+    unpack_dir = step["env"]["UNPACK_DIR"]
+    for label, value in (("SDIST_DIR", build_dir), ("UNPACK_DIR", unpack_dir)):
+        assert value.startswith("${{ runner.temp }}/"), (
+            f"{label} is {value!r}, which is not under the runner's temporary directory. A path "
+            "inside the checkout lets the repository's own files satisfy a module the archive "
+            "cannot, and the step then passes on the drift it exists to catch."
+        )
+    assert build_dir != unpack_dir, (
+        f"the archive is built into and unpacked from the same directory {build_dir!r}, which "
+        "leaves the sole-root probe unable to distinguish the extracted tree from its source."
+    )
+
+    builds = [argv for argv in commands if _runs_subcommand(argv, "uv", "build")]
+    assert len(builds) == 1, f"expected exactly one build, found {builds}"
+    assert "--sdist" in builds[0], (
+        f"the build is {builds[0]}. A wheel proves nothing here: the modules at issue are "
+        "excluded from the sdist manifest, which the wheel does not read."
+    )
+    assert _expands(_out_dir(builds[0]) or "", "SDIST_DIR"), (
+        f"the build writes to {_out_dir(builds[0])!r} rather than to the directory SDIST_DIR "
+        "names, so the probe below would select an archive this step did not build."
+    )
+
+    bindings = dict(_bindings(text))
+    assert _sole_match(bindings.get("ARCHIVE", ""), "SDIST_DIR", "*.tar.gz", {"1"}), (
+        f"ARCHIVE is bound to {bindings.get('ARCHIVE')!r}. It has to be a one-per-line listing "
+        "of the built archives: a second archive then makes the value two lines, which the "
+        "`test -f` below rejects, so the suite can only run from the one archive just built."
+    )
+    assert _sole_match(bindings.get("ROOT", ""), "UNPACK_DIR", "*/", {"1", "d"}), (
+        f"ROOT is bound to {bindings.get('ROOT')!r}. The same probe for the extracted tree, with "
+        "`-d` so the directory is listed rather than its contents; without it the value names "
+        "the archive's files and the `cd` below lands nowhere."
+    )
+    # `test -f PATH` is three words, and a longer `test` is some other expression entirely.
+    gates = {tuple(argv) for argv in commands if argv[:1] == ["test"] and len(argv) == 3}
+    assert ("test", "-f", "${ARCHIVE}") in gates, (
+        f"nothing gates ARCHIVE on being one existing file, found {sorted(gates)}. The listing "
+        "alone selects nothing: with two matches the variable holds two lines, and only this "
+        "check turns that into a failure instead of an unreadable path."
+    )
+    assert ("test", "-d", "${ROOT}") in gates, (
+        f"nothing gates ROOT on being one existing directory, found {sorted(gates)}."
+    )
+
+    tars = [argv for argv in commands if argv[:1] == ["tar"]]
+    assert len(tars) == 1, f"expected exactly one extraction, found {tars}"
+    assert _expands(_flag_value(tars[0], "-C") or "", "UNPACK_DIR"), (
+        f"the extraction targets {_flag_value(tars[0], '-C')!r} rather than the directory "
+        "UNPACK_DIR names, which leaves the tree the suite runs from unrelated to the archive."
+    )
+    # `-C` takes a value, which `_operands` is documented not to be sound against: its value
+    # lands among the operands. Dropping that value by name rather than dropping the flag -- which
+    # `_operands` has already discarded -- is what keeps this reading the archive operand whichever
+    # order the two are written in.
+    destination = _flag_value(tars[0], "-C")
+    assert _expands(
+        next((word for word in _operands(tars[0]) if word != destination), ""), "ARCHIVE"
+    ), f"the extraction does not read the archive ARCHIVE names, found {tars[0]}."
+
+
+def test_the_shipped_sdist_suite_runs_from_the_extracted_root_with_pytests_own_status():
+    """GTX-292: what the step runs, where it runs it, and what its exit status means.
+
+    Both commands run from the extracted root, and the sync resolves the shipped dev group rather
+    than the repository lock, which the sdist deliberately does not ship: resolving from scratch
+    is part of the artifact under test.
+
+    And pytest's own status is what the step exits with, which no presence assertion can see. A
+    trailing `|| true`, a pipe, a `set +e`, or a `continue-on-error` on the step leaves every
+    other check here green in front of the module-scope collection error this gate exists for --
+    and collection errors, not assertion failures, are that failure's whole shape.
+    """
+    step = _sdist_suite_step()
+    text = _commands(step)
+    commands = _invocations(text)
+    lines = text.splitlines()
+    moves = [
+        position
+        for position, line in enumerate(lines)
+        for _joined_by, argv in _separated_commands(line)
+        if argv[:1] == ["cd"]
+    ]
+    assert len(moves) == 1, (
+        f"expected exactly one change of directory, found {len(moves)} at lines {moves}. A second "
+        "one leaves it unsettled which tree the two commands below ran in."
+    )
+    moved_at = moves[0]
+    moved = _separated_commands(lines[moved_at])
+    assert len(moved) == 1, (
+        f"the move shares its line: {lines[moved_at].strip()!r}. Joined to another command it may "
+        "not run at all, and the commands below would then read the checkout."
+    )
+    # `cd PATH` is two words; anything longer is not a plain move to one named directory.
+    move = moved[0][1]
+    assert len(move) == 2, f"the move takes more than one operand: {move}"
+    assert _expands(move[1], "ROOT"), (
+        f"the move is {lines[moved_at].strip()!r}. It has to target the directory ROOT names; any "
+        "other target runs the suite from a tree that is not the extracted one."
+    )
+
+    syncs = []
+    for position, line in enumerate(lines):
+        for _joined_by, argv in _separated_commands(line):
+            if not _launches(argv, "uv", "sync") and not _launches(argv, "uv", "run"):
+                continue
+            assert position > moved_at, (
+                f"{' '.join(argv)!r} runs before the move to the extracted root, so it reads the "
+                "checkout's own project rather than the archive's."
+            )
+            if _launches(argv, "uv", "sync"):
+                syncs.append(argv)
+
+    assert len(syncs) == 1, f"expected exactly one dependency sync, found {syncs}"
+    assert _flag_value(syncs[0], "--group") == "dev", (
+        f"the sync is {syncs[0]}. The shipped suite needs the dev group the archive's own "
+        "`pyproject.toml` declares, which is the group under test."
+    )
+    assert "--locked" not in syncs[0], (
+        f"the sync is {syncs[0]}. It resolves with no lock: the sdist ships `pyproject.toml` and "
+        "deliberately not `uv.lock`, so resolving from scratch is part of what this step asserts "
+        "about the artifact an adopter installs."
+    )
+
+    assert any(_launches(argv, "uv", "run") and "pytest" in argv for argv in commands), (
+        f"the step never runs pytest from the extracted root: {text!r}"
+    )
+    assert "continue-on-error" not in step, (
+        "continue-on-error makes this step advisory, which is the one thing it must not be: the "
+        "drift it catches is invisible to every other gate."
+    )
+    assert _status_reaches_the_step(text, "uv", "run"), (
+        f"pytest's exit status does not become the step's: {text!r}. A trailing `|| true`, a "
+        "pipe, or a preceding `set +e` each leave every check above green in front of the "
+        "module-scope collection error this gate exists to surface."
     )
 
 

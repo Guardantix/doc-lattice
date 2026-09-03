@@ -2539,3 +2539,67 @@ is deliberately absent in normal operation and carries no version pin that
 `scripts/check_version_sync.py` reads, because a token naming a superseded version is its correct
 resting state. RELEASING.md owns the operator procedure and the rerun-versus-new-attempt
 distinction; this record owns why the mechanism has the shape it does.
+
+### AD-47: The shipped test suite is executed from the archive, on the pull request that ships it
+
+**Date:** 2026-09-02
+**Status:** Accepted
+**Context:** The sdist carries `tests/`, and some test modules read files the sdist does not
+carry: a script under `scripts/`, a workflow under `.github/`, a maintained root document. Such a
+module fails at collection for anyone who unpacks the archive and runs it. Two gates describe that
+boundary and neither executes it. The sdist manifest excludes the modules by name, and
+`tests/test_package_metadata.py` couples that exclude list to its own archive-membership denial
+set so the two cannot drift apart. That coupling says the lists agree; it says nothing about
+either being complete. A newly added module that reads a repository-only path is absent from both
+and passes cleanly. Five accumulated before GTX-251, which a human found by building the sdist by
+hand; a sixth, `tests/test_check_migration_rule.py`, landed afterwards with every gate green and
+was found the same way.
+
+**Decision:** A step in the `tests` matrix builds the sdist, unpacks it outside the checkout, and
+runs the shipped suite from the extracted root. Its failure mode is a module-scope
+`FileNotFoundError` during collection, so the step fails on collection errors and not only on
+assertions -- which is what an unmasked pytest exit status gives for free, and why
+`tests/test_release_workflow.py` pins that status reaching the step rather than only pinning the
+commands present.
+
+**Why the matrix and not a job of its own.** A standalone job emits a context branch protection
+does not require, so it is advisory until the staged rollout RELEASING.md describes adds it -- and
+a gate that is advisory during the window it is most likely to catch something is not a gate. As a
+step in `tests` it inherits the protected `Tests` context `tests-result` reports and the `release`
+job's `needs:` on `tests`, with no protection edit at all.
+
+**Why not the release path.** It is cheaper there and later everywhere that matters. The `release`
+job creates the immutable tag and the GitHub Release before `build-release` starts, so a check in
+`build-release` would stop publication and still strand a release over ordinary manifest drift --
+the outcome AD-46 exists to make recoverable, reintroduced for a cause that belongs to a pull
+request. Every check that can fail a release runs before the tag exists, and this one can.
+
+**What bounds it.** One interpreter leg, spelled as an exclusion of the oldest rather than a
+selection of the newest, for the reason the `links` gate records: naming the leg to run on drops
+the check silently if that matrix value is removed, while excluding one can at worst run it twice.
+Archive membership and working-directory isolation do not vary by interpreter; compatibility
+remains the whole matrix's job. The build and unpack directories are distinct and both outside the
+checkout, which is load-bearing rather than tidy: unpacking into the working tree puts the
+repository's own `scripts/` and `.github/` within reach of a module the archive cannot supply them
+to, and the step then passes on exactly the drift it exists to catch. The sync resolves the
+shipped dev group with no lock, because the sdist ships `pyproject.toml` and deliberately not
+`uv.lock`, so resolving from scratch is part of the artifact under test.
+
+**Consequences:** Every pull request runs the suite twice on one leg, for about the duration of
+the suite plus the build. That duplication is the price of the only signal that reads the archive
+as an adopter receives it, and it is paid where the drift is introduced rather than where it would
+be discovered.
+
+This is also the only unlocked resolve in `ci.yml`, and the exposure it buys has to be stated
+rather than discovered. Every other job syncs `--locked`; the dev group carries no upper bounds,
+so an upstream major of `pytest`, `pytest-xdist`, `pytest-cov`, `pytest-mock`, or `hypothesis`
+turns this step red with no change in this repository. Because the step rides the `tests` matrix,
+that reddens the protected `Tests` context on every open pull request and blocks `release`, which
+`needs: tests` -- and it presents as the manifest drift the step exists to report, which is the
+part that misleads. Locking it would defeat the check: `uv.lock` is exactly what the sdist does
+not ship, so a locked resolve would verify a dependency set no adopter can obtain. Bounding the
+dev group above is the fix if this ever fires, not pinning the step to a lock, and the tell is
+that the failure names a dependency rather than a missing repository file. The two describing gates stay: the manifest still excludes by name and the coupling
+test still holds the two lists together, because a red run here names the module that failed and
+those lists are how it is fixed. `tests/test_release_workflow.py` owns the step's contract, and
+excludes itself from the sdist, so it can read `ci.yml` without recreating the problem.
