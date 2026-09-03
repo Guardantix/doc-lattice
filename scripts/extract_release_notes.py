@@ -7,7 +7,12 @@ import sys
 from pathlib import Path
 
 _REPO_ROOT = Path(__file__).resolve().parent.parent
-_ANY_HEADING = re.compile(r"^##\s*\[", re.MULTILINE)
+# `[ \t]*` rather than `\s*`: a heading is one line, and `\s` matches a newline, so a bare `##`
+# above a line starting with `[` would bound a section that no Markdown reader ends there. That
+# truncates the notes at a boundary that does not exist, and it is load-bearing beyond the notes
+# -- `release_gate.py` refuses a re-arm on this same reading, so a phantom boundary reports an
+# `## [Unreleased]` section as empty and lets undocumented work ship inside the tag.
+_ANY_HEADING = re.compile(r"^##[ \t]*\[", re.MULTILINE)
 
 
 def changelog_section(changelog_text: str, version: str) -> str | None:
@@ -15,10 +20,11 @@ def changelog_section(changelog_text: str, version: str) -> str | None:
 
     The body is everything between that heading and the next ``## [`` heading (or the
     end of the document for the final section), trimmed of leading and trailing blank
-    lines. Only ``## [`` lines bound a section, so a fenced code block whose content
-    starts with ``## `` does not truncate the notes. A section that exists but has no
-    content returns the empty string, so the caller can distinguish a missing heading
-    (None) from an empty one ("").
+    lines. Only ``## [`` lines bound a section, so neither a fenced code block whose
+    content starts with ``## `` nor a bare ``##`` above a bracketed line truncates the
+    notes: the whitespace between ``##`` and ``[`` is spaces and tabs, never a newline.
+    A section that exists but has no content returns the empty string, so the caller can
+    distinguish a missing heading (None) from an empty one ("").
 
     Args:
         changelog_text: The full text of ``CHANGELOG.md``.
@@ -28,7 +34,7 @@ def changelog_section(changelog_text: str, version: str) -> str | None:
         The trimmed section body, "" if the heading exists but is empty, or None if
         no ``## [version]`` heading is present.
     """
-    heading = re.compile(r"^##\s*\[" + re.escape(version) + r"\].*$", re.MULTILINE)
+    heading = re.compile(r"^##[ \t]*\[" + re.escape(version) + r"\].*$", re.MULTILINE)
     match = heading.search(changelog_text)
     if match is None:
         return None

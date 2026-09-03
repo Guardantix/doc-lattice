@@ -45,15 +45,14 @@ import subprocess
 import sys
 from pathlib import Path
 
+from extract_release_notes import changelog_section
+
 _VERSION_PATH = "src/doc_lattice/__init__.py"
 _VERSION_ASSIGNMENT = re.compile(r'^__version__ = "([^"]+)"$', re.MULTILINE)
 _ATTEMPT_PATH = ".release-attempt"
 _ATTEMPT_TOKEN = re.compile(r"(?P<version>\d+\.\d+\.\d+)[ \t]+(?P<attempt>[A-Za-z0-9._-]+)")
 _CHANGELOG_PATH = "CHANGELOG.md"
-_UNRELEASED_SECTION = re.compile(
-    r"^##[ \t]*\[Unreleased\].*?$(?P<body>.*?)(?=^##[ \t]*\[|\Z)",
-    re.MULTILINE | re.DOTALL,
-)
+_UNRELEASED_HEADING = "Unreleased"
 
 
 class GateError(RuntimeError):
@@ -98,11 +97,15 @@ def _pending_unreleased(ref: str) -> bool:
     # content sitting under Unreleased here is work that would ship inside the tag while the
     # release notes said nothing about it. An absent changelog is not this failure: the release
     # job's own extraction refuses that, before the tag, on every path.
+    #
+    # The section is read through the notes extractor's own parser rather than a second regex,
+    # so the reading that refuses a re-arm and the reading that produces the notes cannot drift:
+    # they are the same function, and this refusal exists precisely because of what that one
+    # would have omitted.
     changelog = _source_at(ref, _CHANGELOG_PATH)
     if changelog is None:
         return False
-    section = _UNRELEASED_SECTION.search(changelog)
-    return section is not None and bool(section["body"].strip())
+    return bool(changelog_section(changelog, _UNRELEASED_HEADING))
 
 
 def _re_arm_attempt(current_sha: str, before_sha: str, version: str) -> str | None:
@@ -113,8 +116,9 @@ def _re_arm_attempt(current_sha: str, before_sha: str, version: str) -> str | No
     current = _source_at(current_sha, _ATTEMPT_PATH)
     if current is None or current == _source_at(before_sha, _ATTEMPT_PATH):
         return None
-    lines = [line.strip() for line in current.splitlines() if line.strip()]
-    match = _ATTEMPT_TOKEN.fullmatch(lines[0]) if len(lines) == 1 else None
+    # `fullmatch` over the stripped text is the whole "one non-blank line" rule: neither
+    # character class in `_ATTEMPT_TOKEN` matches a newline, so a second line cannot pass.
+    match = _ATTEMPT_TOKEN.fullmatch(current.strip())
     if match is None:
         raise GateError(f"release commit has a malformed re-arm token in {_ATTEMPT_PATH}")
     if match["version"] != version:

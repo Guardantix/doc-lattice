@@ -119,6 +119,9 @@ def test_existing_tag_at_older_commit_is_ordinary_noop(repo: Path):
 
 
 def test_absent_tag_with_same_version_before_push_is_ordinary_noop(repo: Path):
+    # This is also the no-token re-arm case, and deliberately not a second test: with no
+    # `.release-attempt` in the release commit, `_re_arm_attempt` returns before it parses
+    # anything, so a token's absence and a version that did not change are one path.
     _write_version(repo, "1.0.0")
     before = _commit(repo, "release version without tag")
     (repo / "README.md").write_text("later change\n", encoding="utf-8")
@@ -244,18 +247,6 @@ def test_absent_tag_with_an_unchanged_re_arm_token_is_an_ordinary_noop(repo: Pat
     assert outputs == ["proceed=false", "create_tag=false"]
 
 
-def test_absent_tag_with_no_re_arm_token_is_an_ordinary_noop(repo: Path):
-    _write_version(repo, "1.0.0")
-    before = _commit(repo, "release version without tag")
-    (repo / "README.md").write_text("later change\n", encoding="utf-8")
-    sha = _commit(repo, "later change")
-
-    result, outputs = _run_gate(repo, tag="v1.0.0", version="1.0.0", sha=sha, before=before)
-
-    assert result.returncode == 0
-    assert outputs == ["proceed=false", "create_tag=false"]
-
-
 def test_a_second_re_arm_for_the_same_version_starts_release_work(repo: Path):
     _write_version(repo, "1.0.0")
     _write_attempt(repo, "1.0.0 first-fix\n")
@@ -368,3 +359,29 @@ def test_a_re_arm_with_an_empty_unreleased_heading_starts_release_work(repo: Pat
 
     assert result.returncode == 0
     assert outputs == ["proceed=true", "create_tag=true"]
+
+
+def test_a_re_arm_is_refused_when_a_bare_heading_marker_precedes_the_pending_entries(
+    repo: Path,
+):
+    # The changelog reading is shared with the release-notes extractor, which is the point:
+    # both have to agree on where a section ends. A bare `##` above a bracketed line is not a
+    # boundary, so these entries are still pending and would ship inside the tag with the notes
+    # silent about them. A reader that ended the section at the `##` would report Unreleased as
+    # empty and permit the re-arm.
+    _write_version(repo, "1.0.0")
+    _write_changelog(repo, unreleased="", released="- the release this bump described\n")
+    before = _commit(repo, "release version whose run failed before the tag")
+    (repo / "CHANGELOG.md").write_text(
+        "# Changelog\n\n## [Unreleased]\n##\n[Notes]\n- work that landed after the bump\n\n"
+        "## [1.0.0] - 2026-01-01\n\n- the release this bump described\n",
+        encoding="utf-8",
+    )
+    _write_attempt(repo, "1.0.0 fixture-fix\n")
+    sha = _commit(repo, "re-arm after unrelated work landed")
+
+    result, outputs = _run_gate(repo, tag="v1.0.0", version="1.0.0", sha=sha, before=before)
+
+    assert result.returncode != 0
+    assert "CHANGELOG.md still has unreleased entries" in result.stdout
+    assert outputs == []

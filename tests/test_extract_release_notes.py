@@ -139,3 +139,25 @@ def test_changelog_section_does_not_truncate_on_a_code_comment_line():
     assert "## step one" in section  # the code comment survives, not truncated
     assert "- trailing bullet after the block" in section
     assert "old" not in section  # the next real section still bounds it
+
+
+def test_changelog_section_does_not_truncate_on_a_bare_heading_marker():
+    # A heading is one line. `##` alone above a line starting with `[` is not a section
+    # boundary, and reading it as one truncates the notes where no Markdown reader ends
+    # them. `release_gate.py` refuses a re-arm on this same reading, so a phantom boundary
+    # there reports `## [Unreleased]` as empty and lets undocumented work ship in the tag.
+    changelog = (
+        "# Changelog\n\n"
+        "## [0.6.0]\n\n"
+        "- a bullet\n"
+        "##\n"
+        "[not a heading]\n"
+        "- another bullet\n\n"
+        "## [0.5.0]\n\n"
+        "- old\n"
+    )
+    section = changelog_section(changelog, "0.6.0")
+    assert section is not None
+    assert "[not a heading]" in section
+    assert "- another bullet" in section
+    assert "old" not in section  # the next real section still bounds it

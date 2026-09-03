@@ -2540,12 +2540,13 @@ it would refuse the case where folding the entries forward is both easy and corr
 **Consequences:** A source-fix recovery is one ordinary merge instead of two release-shaped ones.
 The gate gains a second reason to create a tag, so its fail-closed surface is five conditions
 rather than one; re-arm is unreachable unless the tag is absent, the version is unchanged, the
-token changed, it names the current version, and no unreleased entries are pending. The token is not a check on the fix itself, only
-on the intent, so a re-arm without a working fix simply fails again and is re-armed again. The file
-is deliberately absent in normal operation and carries no version pin that
-`scripts/check_version_sync.py` reads, because a token naming a superseded version is its correct
-resting state. RELEASING.md owns the operator procedure and the rerun-versus-new-attempt
-distinction; this record owns why the mechanism has the shape it does.
+token changed, it names the current version, and no unreleased entries are pending. The token
+is not a check on the fix itself, only on the intent, so a re-arm without a working fix simply
+fails again and is re-armed again. The file is deliberately absent in normal operation and
+carries no version pin that `scripts/check_version_sync.py` reads, because a token naming a
+superseded version is its correct resting state. RELEASING.md owns the operator procedure and
+the rerun-versus-new-attempt distinction; this record owns why the mechanism has the shape it
+does.
 
 ### AD-47: The shipped test suite is executed from the archive, on the pull request that ships it
 
@@ -2606,7 +2607,9 @@ that reddens the protected `Tests` context on every open pull request and blocks
 part that misleads. Locking it would defeat the check: `uv.lock` is exactly what the sdist does
 not ship, so a locked resolve would verify a dependency set no adopter can obtain. Bounding the
 dev group above is the fix if this ever fires, not pinning the step to a lock, and the tell is
-that the failure names a dependency rather than a missing repository file. The two describing gates stay: the manifest still excludes by name and the coupling
-test still holds the two lists together, because a red run here names the module that failed and
+that the failure names a dependency rather than a missing repository file.
+
+The two describing gates stay: the manifest still excludes by name and the coupling test
+still holds the two lists together, because a red run here names the module that failed and
 those lists are how it is fixed. `tests/test_release_workflow.py` owns the step's contract, and
 excludes itself from the sdist, so it can read `ci.yml` without recreating the problem.

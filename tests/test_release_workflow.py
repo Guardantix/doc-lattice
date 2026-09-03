@@ -16,7 +16,16 @@ from pathlib import Path
 
 from ruamel.yaml import YAML
 from typer.testing import CliRunner
-from workflow_helpers import _commands, _invocations, _invokes, _named_step, _uncommented
+from workflow_helpers import (
+    _commands,
+    _invocations,
+    _invokes,
+    _matrix_leg_condition,
+    _matrix_legs_selected,
+    _named_step,
+    _triggers,
+    _uncommented,
+)
 
 from doc_lattice.cli import app
 from doc_lattice.config import DEFAULT_CONFIG_NAME
@@ -67,17 +76,10 @@ _PROTECTED_STEPS = frozenset(
 # load-bearing twice over -- it is how this suite finds the step, so deleting the step fails here
 # rather than silently publishing an artifact nothing ever ran.
 _SMOKE_BUILT_STEP = "Smoke-test the built distribution"
-# The provider that smoke runs against, named from the workspace root rather than relatively: the
-# invocation runs from a throwaway directory, where `dist/` names nothing at all.
-_WHEEL_GLOB = "${GITHUB_WORKSPACE}/dist/*.whl"
 # GTX-292: the run of the shipped test suite from an unpacked sdist, and the only one. As with
 # the built-distribution smoke, the name is how this suite finds the step, so deleting the step
 # fails here rather than silently restoring the gap it closes.
 _SDIST_SUITE_STEP = "Run the shipped test suite from an unpacked sdist"
-# The step's interpreter condition, which the workflow spells as an exclusion of the older leg
-# rather than as a selection of the newer one. Parsed rather than compared as a string, so the
-# assertion below can say *which* leg is excluded instead of restating the whole expression.
-_MATRIX_EXCLUSION = re.compile(r"^matrix\.python != '([^']+)'$")
 # The line MANAGED_CI.md step 1 tells an adopter to read back, in full and on stderr. `init`
 # prints it after the write path and after the benign already-exists path alike, which is why the
 # config probes rather than this line are what prove scaffolding happened.
@@ -565,31 +567,13 @@ def _bindings(text: str) -> list[tuple[str, str]]:
     return bound
 
 
-def _makes_local_wheel(value: str) -> bool:
-    """Report whether an assigned value is the path of the one wheel the job just built.
-
-    The sibling of `_makes_throwaway_dir`, and it recognizes a single shape for the same reason:
-    what a substitution expands to is what its last command printed, so a compound one vouches
-    for nothing. The listing has to name `dist/*.whl` under the workspace root and nothing else.
-    A relative `dist/` would resolve against the throwaway directory the run happens in, and a
-    requirement naming the index or the repository would install something other than what this
-    job produced, which is the whole claim the step exists to make.
-    """
-    substitution = _COMMAND_SUBSTITUTION.match(value)
-    if substitution is None:
-        return False
-    inner = _invocations(substitution.group(1))
-    if len(inner) != 1 or inner[0][:1] != ["ls"] or not _REDIRECTIONS.isdisjoint(inner[0]):
-        return False
-    return _operands(inner[0]) == [_WHEEL_GLOB]
-
-
 def _sole_match(value: str, name: str, child: str, flags: set[str]) -> bool:
     """Report whether an assigned value is a listing of `child` inside the directory `name` holds.
 
-    The third sibling of `_makes_throwaway_dir`, recognizing one shape and refusing the rest for
-    the reason both of the others give: what a substitution expands to is what its last command
-    printed, so a compound one vouches for nothing.
+    The general form of the listing probe, which `_makes_local_wheel` below binds to the wheel's
+    own pattern and which the sdist tests call directly for theirs. It recognizes one shape and
+    refuses the rest for the reason `_makes_throwaway_dir` gives: what a substitution expands to
+    is what its last command printed, so a compound one vouches for nothing.
 
     The listing is also the sole-match gate, which is why the pattern rather than a resolved path
     is what has to be pinned. A glob matching two entries makes the value two lines, and the
@@ -617,6 +601,19 @@ def _sole_match(value: str, name: str, child: str, flags: set[str]) -> bool:
         and len(operands) == 1
         and _expands_under(operands[0], name, child)
     )
+
+
+def _makes_local_wheel(value: str) -> bool:
+    """Report whether an assigned value is the path of the one wheel the job just built.
+
+    `_sole_match` at the wheel's own pattern: the listing has to name `dist/*.whl` under the
+    workspace root and nothing else. A relative `dist/` would resolve against the throwaway
+    directory the run happens in, and a requirement naming the index or the repository would
+    install something other than what this job produced, which is the whole claim the step
+    exists to make. No flags are required because the wheel listing's sole-match property comes
+    from the glob rather than from `-1`.
+    """
+    return _sole_match(value, "GITHUB_WORKSPACE", "dist/*.whl", set())
 
 
 def _sdist_suite_step() -> dict:
@@ -802,7 +799,7 @@ def test_release_is_reachable_only_from_a_push_to_the_default_branch():
     # workflow_dispatch or a pull_request trigger here would be a release authority surface
     # governed separately from the branch protection that authorizes a version bump. The
     # triggers are asserted alongside the condition because either half alone can open one.
-    triggers = _WORKFLOW["on"]
+    triggers = _triggers(_WORKFLOW)
     assert set(triggers) == {"push", "pull_request"}
     assert triggers["push"]["branches"] == ["main"]
     assert _WORKFLOW["jobs"]["release"]["if"] == (
@@ -1336,7 +1333,7 @@ def test_the_shipped_sdist_suite_is_gated_by_the_protected_tests_context():
     job = _WORKFLOW["jobs"]["tests"]
     step = _sdist_suite_step()
     steps = job["steps"]
-    index = steps.index(step)
+    index = _step_index(job, _SDIST_SUITE_STEP)
 
     ordinary = [
         position
@@ -1356,24 +1353,25 @@ def test_the_shipped_sdist_suite_is_gated_by_the_protected_tests_context():
     )
 
     interpreters = list(job["strategy"]["matrix"]["python"])
-    exclusion = _MATRIX_EXCLUSION.fullmatch(step.get("if", ""))
-    assert exclusion is not None, (
-        f"expected the step's condition to exclude one interpreter, found {step.get('if')!r}. A "
-        "condition naming the leg to run on silently drops this gate if that matrix value is "
-        "ever removed; excluding a leg can at worst run the check twice."
+    condition = step.get("if", "")
+    label = f"{_SDIST_SUITE_STEP!r} step's"
+    operator, excluded = _matrix_leg_condition(condition, label)
+    oldest = min(interpreters, key=_release)
+    assert (operator, excluded) == ("!=", oldest), (
+        f"the step's condition is {condition!r}; it has to exclude the matrix's oldest "
+        f"interpreter {oldest!r}. The spelling is load-bearing beyond the leg set it produces "
+        "today: naming the leg to run on drops this gate silently if that matrix value is ever "
+        "removed, while excluding one can at worst run the check twice."
     )
-    assert exclusion.group(1) == min(interpreters, key=_release), (
-        f"the step excludes {exclusion.group(1)!r}, but the matrix's oldest interpreter is "
-        f"{min(interpreters, key=_release)!r}. Archive membership and working-directory isolation "
-        "do not vary by interpreter, so the newest leg is the one that carries this."
-    )
-    # "At worst twice" is only true while a leg survives the exclusion. A matrix shrunk to the
-    # excluded value alone leaves the condition false everywhere, and the assertion above still
-    # holds -- the silent drop this spelling exists to prevent, arriving by the other door.
-    assert [leg for leg in interpreters if leg != exclusion.group(1)], (
-        f"the matrix is {interpreters}, every leg of which the step's condition excludes, so the "
-        "gate runs nowhere while every assertion here still passes. Excluding a leg is only safe "
-        "while another remains."
+    # The leg set as well as the spelling, which is what makes a *widened* matrix fail here too.
+    # Asserting only that some leg survives the exclusion would let a third interpreter run the
+    # job's most expensive step twice, green -- the mirror of the silent drop above, and the
+    # asymmetry that let this and the `links` gate be enforced to two different strengths.
+    selected = _matrix_legs_selected(condition, interpreters, label)
+    assert selected == [max(interpreters, key=_release)], (
+        f"the step's condition {condition!r} selects {selected} of the matrix {interpreters}. "
+        "Archive membership and working-directory isolation do not vary by interpreter, so "
+        "exactly the newest leg carries this."
     )
 
     addopts = shlex.split(step["env"]["PYTEST_ADDOPTS"])
