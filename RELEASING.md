@@ -107,17 +107,38 @@ After verifying, refresh any installed tool with `uv tool install doc-lattice@la
   retry neither re-uploads existing PyPI files nor fails because they already exist. That is
   the mechanical-failure path only. Never rerun to complete a release you already know is bad;
   see "If a release is bad" below.
+- A rerun and a new attempt are different things, and the words are not interchangeable. A rerun
+  replays the *same commit*: GitHub reruns use the original `GITHUB_SHA` and `GITHUB_REF`, so no
+  follow-up fix can enter that attempt. A release that failed because its payload was wrong needs
+  a new attempt, which means a new commit on `main`; see "Re-arming a stranded version bump".
 - A commit with an unchanged version whose tag points to an older commit is a no-op.
 - A matching tag that points to a source with a different version fails the release.
 - When the tag is absent, a push whose pre-push source declares a different version may create it.
   The version bump may appear anywhere in a multi-commit push; the tag identifies the final landed
   commit. A missing version file in the pre-push source can identify the package introduction.
+- When the tag is absent and the version is *unchanged*, the push is a no-op unless it carries a
+  fresh re-arm token. `.release-attempt` holds one line, `<version> <attempt-id>`, and a copy that
+  differs from the pre-push one and names the version being released starts release work for that
+  version once more. A token that is absent, byte-identical to the pre-push copy, or deleted in the
+  push is not a request. A token that did change but is malformed, or names another version, fails
+  the run closed. Re-arm is consulted only after every existing-tag outcome above has been decided,
+  so it can never create, move, or replace a tag for a version that already has one.
+- A re-arm also fails closed when `CHANGELOG.md` still carries entries under `## [Unreleased]` at
+  the release commit. Release notes come from the `## [X.Y.Z]` section alone, and re-arm is the one
+  path that can tag a commit later merges have moved on to, so pending entries there are work that
+  would ship inside the tag with the notes silent about it. The ordinary release flow promotes
+  Unreleased into the versioned section and leaves the heading empty, so this refuses only the
+  drift re-arm introduces.
 - Malformed current, pre-push, or tagged version declarations fail closed. Unexpected Git or
   source-reading failures also fail closed; they are never treated as permission to publish.
 
 If a release step fails *mechanically*, rerun the same workflow: a runner outage, a network
 timeout, an expired cache. Rerunning replays the pipeline against the same commit and resumes
 whatever did not finish.
+
+That is the whole of what a rerun can do. If the run failed because something in the release
+source was wrong, a fixture or the changelog section or the packaged CLI under smoke, no rerun
+reaches it, because the rerun checks out the same commit. Fix it and re-arm instead.
 
 Do not rerun, and do not approve the `pypi` environment, when the failure told you the release
 payload itself is wrong. Rerunning a bad payload publishes it. Never move a release tag, and
@@ -134,7 +155,7 @@ irreversible in the `publish` job. Find your stage first.
 | Stage | State | Action |
 |-------|-------|--------|
 | Before the version bump merges | Nothing exists | Fix the pull request. No release happened. |
-| Merged, `release` job running, tag not yet created | Nothing immutable yet | Cancel the run now. Every check that can fail the release runs before the tag, so this is the one stage that costs nothing. Revert on `main`, then confirm no `vX.Y.Z` tag exists before assuming you won the race. |
+| Merged, `release` job running or already failed, tag not yet created | Nothing immutable, and nothing to withdraw. The version is stranded, though: the bump has merged, so every later push reads it as already released | Cancel the run if it is still live, then confirm no `vX.Y.Z` tag exists before assuming you won the race. Fix the defect and re-arm in one merge, per "Re-arming a stranded version bump". Nothing is lost at this stage, but nothing recovers on its own either. |
 | Tag pushed, no GitHub Release | Tag is immutable, nothing on PyPI. Whether a run is still live is not visible from this state: the tag push and the Release publish are consecutive steps, so the run either died between them or is seconds from publishing its own Release and continuing to the `pypi` gate | Check the run first, then use "Defect found after the tag, before PyPI approval". A dead run starts at the manual Release command and step 4 there. A live one starts at step 1, which cancels it and withholds the approval. |
 | Tag and GitHub Release exist, `pypi` not yet approved | Tag is immutable, nothing on PyPI. A run may or may not be waiting: if `build-release` failed there is nothing pending to cancel, and the tag and Release are still the problem | Withhold approval, cancel any waiting run, record the withdrawal on the Release, then cut the next version. Full procedure under "Defect found after the tag, before PyPI approval". |
 | `publish` interrupted, some files on PyPI | Partially uploaded, and what landed is permanent | A payload you still trust is completed by rerunning, since `skip-existing` makes that safe. A payload you do not trust is never completed: treat it as published and go to the yank decision below. |
@@ -144,6 +165,72 @@ irreversible in the `publish` job. Find your stage first.
 There is deliberately no row for a published release whose GitHub Release failed. The `release`
 job publishes the Release before `build-release` and `publish` run at all, so nothing can reach
 PyPI without it.
+
+### Re-arming a stranded version bump
+
+This is the stage before the one-way doors. Nothing immutable exists, so there is nothing to
+withdraw and nobody to tell. What has happened is narrower and easier to miss: the version bump is
+on `main`, and the gate creates a tag only when the pre-push source declares a *different* version
+than the release commit. Every later push therefore reads the bump as already released and reports
+
+```
+Tag vX.Y.Z is absent but the pre-push source already declares X.Y.Z; ordinary no-op.
+```
+
+The version is stranded. It is not lost, and no state is corrupt, but no ordinary merge will
+release it. Re-arming is how you say so explicitly.
+
+Do this only for a run that failed *before* the tag was created. Confirm that first, because the
+procedure is wrong for every later stage:
+
+```bash
+git fetch --tags --force
+git tag --list vX.Y.Z
+```
+
+Empty output means no tag. If it prints the tag, stop and use the sections below instead.
+
+1. Fix the defect on a branch, as an ordinary pull request. This is not a release-shaped change:
+   leave `src/doc_lattice/__init__.py`, `pyproject.toml`, `CHANGELOG.md`, and the pinned install
+   refs in `README.md` and `MANAGED_CI.md` exactly as the failed release left them. The version is
+   already correct, and re-landing it is what this procedure exists to avoid.
+2. In the same branch, write the re-arm token:
+
+   ```bash
+   printf '%s %s\n' X.Y.Z first-fix > .release-attempt
+   ```
+
+   One non-blank line, `<version> <attempt-id>`. The version must be the one being released, or
+   the run fails closed rather than releasing the wrong thing. The attempt id is yours to choose
+   from `A-Za-z0-9._-` and is what makes the token *fresh*, so name it after the fix and the file
+   reads as a record rather than a counter.
+3. If anything else merged to `main` between the failed release and now, deal with it before you
+   merge. Work that landed since the bump is inside the commit the tag would identify, but the
+   release notes come from the `## [X.Y.Z]` section, so entries sitting under `## [Unreleased]`
+   would ship undocumented. The gate refuses that rather than letting it through, and there are two
+   honest answers: fold those entries into the `## [X.Y.Z]` section, since they are shipping in
+   X.Y.Z, or abandon the stranded version and cut a new one instead of re-arming. Prefer the second
+   when enough has landed that X.Y.Z would no longer describe the release.
+4. Merge the pull request. The push to `main` carries both halves, so the gate sees an unchanged
+   version, an absent tag, a token that differs from the pre-push copy, and no pending unreleased
+   entries, and starts release work for X.Y.Z. From there the pipeline is the ordinary one,
+   including the `pypi` approval.
+5. If that attempt also fails before the tag, re-arm again by changing the attempt id. Freshness is
+   measured against the *immediately preceding* copy and nothing older, so any edit that changes
+   the bytes re-arms, including setting the id back to one an earlier attempt used. Nothing tracks
+   the values a version has already been re-armed with. Pick a new id anyway, so the file reads as
+   a record of which fix is in flight rather than a value that happens to differ.
+
+Leave the token alone afterwards. Once the tag exists, every push resolves on the existing-tag
+path and the token is never read, so a spent `.release-attempt` naming a superseded version is its
+correct resting state. Deleting it would cost another merge and buy nothing, and
+`scripts/check_version_sync.py` does not read it, so it will not go stale against a later version.
+
+Re-arm authorizes nothing a version bump does not already authorize. The token is a tracked file,
+so changing it at the release commit takes the same protected merge to `main` that lands a bump,
+and the workflow gains no trigger of its own. AD-46 in [ARCHITECTURE.md](ARCHITECTURE.md) records
+why the mechanism has that shape, and `scripts/release_gate.py`'s module docstring owns what the
+token can and cannot do.
 
 ### Defect found after the tag, before PyPI approval
 
