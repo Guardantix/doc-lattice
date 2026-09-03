@@ -9,7 +9,7 @@ from doc_lattice.cli import app
 
 _ROOT = Path(__file__).resolve().parents[1]
 _WORKFLOW = _load_workflow(_ROOT / ".github/workflows/ci.yml")
-_LINKS_STEP = "the links step's"
+_LINKS_STEP = "links step's"
 
 
 def _code_quality_job() -> dict:

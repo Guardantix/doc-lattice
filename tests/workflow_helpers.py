@@ -1,12 +1,12 @@
 """Shared parsing helpers for the workflow-contract test modules.
 
-Four suites assert against the same three grammars: the YAML of ``.github/workflows/*.yml``,
-the shell text inside a ``run:`` step, and the ``matrix.python`` expression a step's ``if:``
-carries. All are subtle enough to get wrong more than once -- a ``#`` inside quotes is not a
-comment, ``-c`` and ``-m`` demote a script path to an argument nothing runs, and a YAML 1.1
-resolver reads a bare ``on:`` key as the boolean ``True``. Holding one implementation of each is
-what keeps a fix to any of them from landing in one suite and leaving the others reading the old
-semantics.
+The workflow-contract suites assert against the same three grammars: the YAML of
+``.github/workflows/*.yml``, the shell text inside a ``run:`` step, and the ``matrix.python``
+expression a step's ``if:`` carries. All are subtle enough to get wrong more than once -- a
+``#`` inside quotes is not a comment, ``-c`` and ``-m`` demote a script path to an argument
+nothing runs, and a YAML 1.1 resolver reads a bare ``on:`` key as the boolean ``True``. Holding
+one implementation of each is what keeps a fix to any of them from landing in one suite and
+leaving the others reading the old semantics.
 
 The names keep their leading underscore across the move, matching ``tests/cli/helpers.py``.
 """

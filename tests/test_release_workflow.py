@@ -570,10 +570,10 @@ def _bindings(text: str) -> list[tuple[str, str]]:
 def _sole_match(value: str, name: str, child: str, flags: set[str]) -> bool:
     """Report whether an assigned value is a listing of `child` inside the directory `name` holds.
 
-    The general form of the listing probe, with `_makes_local_wheel` below as its one fixed
-    argument. It recognizes one shape and refuses the rest for the reason `_makes_throwaway_dir`
-    gives: what a substitution expands to is what its last command printed, so a compound one
-    vouches for nothing.
+    The general form of the listing probe, which `_makes_local_wheel` below binds to the wheel's
+    own pattern and which the sdist tests call directly for theirs. It recognizes one shape and
+    refuses the rest for the reason `_makes_throwaway_dir` gives: what a substitution expands to
+    is what its last command printed, so a compound one vouches for nothing.
 
     The listing is also the sole-match gate, which is why the pattern rather than a resolved path
     is what has to be pinned. A glob matching two entries makes the value two lines, and the
