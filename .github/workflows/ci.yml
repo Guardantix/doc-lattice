@@ -27,7 +27,20 @@ jobs:
       - run: uv run --no-sync ty check src/ scripts/
       - run: uv run --no-sync python scripts/check_typing_boundaries.py src/
       - run: uv run --no-sync python scripts/check_version_sync.py
-      - run: uv run --no-sync doc-lattice links --format github
+      # One leg only. Every other step here is worth repeating per interpreter, but `links`
+      # reads Markdown and resolves headings against the engine's inventory, so its verdict does
+      # not depend on which interpreter ran it -- and under `--format github` a second run does
+      # not merely repeat a log line, it annotates the same diff position twice. The command is
+      # still exercised on both interpreters by the suite, which invokes it against this
+      # repository on every `tests` leg (`test_the_repository_is_clean_through_the_real_command`).
+      #
+      # Spelled as an exclusion of the older leg, mirroring the coverage gate in `tests`, because
+      # the two spellings fail in opposite directions when the matrix changes: naming the leg to
+      # run on would silently drop the gate entirely if that value were ever removed, while
+      # excluding one leg can at worst restore the duplication. `tests/test_link_gate_wiring.py`
+      # pins the wiring, so neither can land unseen.
+      - if: matrix.python != '3.13'
+        run: uv run --no-sync doc-lattice links --format github
       # On a pull request the guard also compares the committed baseline against the base branch,
       # which is the half that catches a renderer and its baseline updated in the same commit. The
       # base ref is fetched shallowly because `actions/checkout` leaves only the merge commit.
