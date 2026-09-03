@@ -224,6 +224,11 @@ validates the distributions, and transfers them as an artifact. The OIDC-only
 code.
 **Consequences:** Build input is tied to the validated tag, while the credentialed
 publisher executes neither repository code nor package build code. See RELEASING.md.
+**AD-46 amends what "merge-triggered" means here.** This record described the job as reacting to
+one merge-carried signal, a changed version. It now reads two: a changed version, and an explicit
+re-arm token that releases an unchanged version whose tag is absent. The trigger is unchanged --
+still a push to `main` and nothing else -- so what widens is the set of merge contents the job
+acts on, not the set of ways to reach it.
 
 ### AD-8: Symlink targets and document identity
 
@@ -2465,3 +2470,61 @@ migration-rule surfaces, and the generated config is now enrolled in the guard w
 This repository's own gate runs through the shipped command over `link_sources: ["*.md"]`, the
 first prerequisite of GTX-168. `scripts/check_doc_links.py` is deleted. JSON output was declined:
 nobody asked for a schema of link findings, and one is a contract to own.
+
+### AD-46: A stranded version bump is re-armed by a token the fix merge carries, not by a dispatch
+
+**Date:** 2026-09-02
+**Status:** Accepted
+**Context:** The gate creates the tag only when the pre-push source declares a different version
+than the release commit. That is what makes an ordinary merge a no-op and what stops a re-push
+from re-releasing, and it gives each version bump exactly one chance. Every check that can fail a
+release runs before the tag exists, so a failure there leaves the bump merged, the tag absent, and
+every later push reading the version as already released. Recovery was reverting the five
+hand-edited release surfaces, merging that, then re-landing the bump: two release-shaped merges for
+what may be a one-line fix. Observed on 7.0.0, 2026-09-01, where the release-smoke fixture had
+never gained the `lattice_format: 2` key 7.0 made mandatory.
+
+**Decision:** A tracked `.release-attempt` file, one line of `<version> <attempt-id>`, re-arms the
+gate. When the tag is absent and the version is unchanged, a token that differs between
+`github.event.before` and the release commit and names the version being released yields
+`proceed=true, create_tag=true`. Everything else in that position stays the ordinary no-op.
+
+**Why a merge-carried token and not `workflow_dispatch`.** The objection to a re-arm entry point
+was never the actor set. GitHub requires write access to dispatch a workflow, and RELEASING.md
+records a single administrator, zero required approving reviews, and administrator bypass on
+`main`, so the two sets coincide today. The objection that survives is that a dispatch trigger is
+a *separately governed* surface, free to drift away from branch policy later without that drift
+being visible in either place. A tracked file has no such freedom: changing it at the release
+commit on `main` requires the same protected merge that lands a version bump, so re-arm inherits
+that authority structurally rather than by resembling it. The workflow gains no trigger, and
+`tests/test_release_workflow.py` pins the release job to a push on `main` so that claim is tested
+rather than asserted. ROADMAP.md's release-confidence direction -- that a failed release leave a
+state a maintainer can resume from rather than unwind by hand -- is what selects re-arm over
+recording the two-merge cost and stopping there, which remained a defensible answer.
+
+**Why the token carries a version and an attempt id.** The version binds the request to the
+release it re-arms, so a token edited on an unrelated push releases nothing. The attempt id
+carries freshness: a token holding only a version could not re-arm a *second* source fix for the
+same stranded version, since it would be unchanged, while a permanent boolean would re-arm every
+later push. Freshness is a byte comparison of the two copies rather than of parsed tokens, so
+"changed" means "edited in this push" and no historical content is ever parsed; a whitespace-only
+edit re-arming is a harmless false positive that the version check still has to clear.
+
+**What bounds it.** The token is read only after every existing-tag branch has returned, so it can
+never create, move, or replace a tag for a version that already has one -- the property is
+structural, not a check that could be forgotten. An absent, byte-identical, or deleted token is not
+a request, which is why a spent token left behind after a successful release is inert and requires
+no cleanup merge; demanding cleanup would add back a second merge and most of the cost this
+decision removes. A token that *did* change is a deliberate act and is held to it: malformed
+content, or a version other than the one being released, fails the run rather than passing
+silently. A malformed token nobody touched is never parsed, so it cannot fail pushes indefinitely.
+
+**Consequences:** A source-fix recovery is one ordinary merge instead of two release-shaped ones.
+The gate gains a second reason to create a tag, so its fail-closed surface is three conditions
+rather than one; re-arm is unreachable unless the tag is absent, the version is unchanged, the
+token changed, and it names the current version. The token is not a check on the fix itself, only
+on the intent, so a re-arm without a working fix simply fails again and is re-armed again. The file
+is deliberately absent in normal operation and carries no version pin that
+`scripts/check_version_sync.py` reads, because a token naming a superseded version is its correct
+resting state. RELEASING.md owns the operator procedure and the rerun-versus-new-attempt
+distinction; this record owns why the mechanism has the shape it does.

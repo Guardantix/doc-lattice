@@ -16,6 +16,19 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   that matches nothing, is a config error rather than a green run. README.md owns the contract
   and ARCHITECTURE.md's AD-45 owns the decisions behind it.
 
+- A release whose run fails before the tag is created can now be re-armed instead of unwound. The
+  gate creates the tag only when the pre-push source declares a different version, so a pre-tag
+  failure left the bump merged and every later push reading it as already released; recovery was
+  reverting the five hand-edited release surfaces and re-landing them, two release-shaped merges
+  for what may be a one-line fix. A tracked `.release-attempt` file, one line of
+  `<version> <attempt-id>`, now re-arms that version when it differs from the pre-push copy and
+  names the version being released. It adds no workflow trigger: the token is a tracked file, so
+  changing it takes the same protected merge to `main` that lands a version bump. Re-arm is read
+  only after every existing-tag outcome is decided, so it can never create, move, or replace a tag
+  for a version that already has one, and an absent, untouched, or deleted token is not a request.
+  A token that did change but is malformed or names another version fails the run closed.
+  RELEASING.md owns the operator procedure and ARCHITECTURE.md's AD-46 owns the decision.
+
 ### Changed
 
 - The pre-commit block and the GitHub Actions workflow `init` prints now run `links` beside

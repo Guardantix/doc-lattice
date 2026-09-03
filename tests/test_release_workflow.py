@@ -744,6 +744,20 @@ def test_release_exposes_publish_coordination_outputs():
     }
 
 
+def test_release_is_reachable_only_from_a_push_to_the_default_branch():
+    # The re-arm token deliberately adds a second reason for the gate to create a tag without
+    # adding a way to reach the job. That claim is only true while this condition holds: a
+    # workflow_dispatch or a pull_request trigger here would be a release authority surface
+    # governed separately from the branch protection that authorizes a version bump. The
+    # triggers are asserted alongside the condition because either half alone can open one.
+    triggers = _WORKFLOW["on"]
+    assert set(triggers) == {"push", "pull_request"}
+    assert triggers["push"]["branches"] == ["main"]
+    assert _WORKFLOW["jobs"]["release"]["if"] == (
+        "github.event_name == 'push' && github.ref == 'refs/heads/main'"
+    )
+
+
 def test_release_gate_invokes_testable_script_with_runner_environment():
     steps = _WORKFLOW["jobs"]["release"]["steps"]
     gate_index = next(i for i, step in enumerate(steps) if step.get("name") == "Tag-health gate")

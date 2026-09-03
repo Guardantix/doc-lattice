@@ -10,6 +10,7 @@ import pytest
 _ROOT = Path(__file__).resolve().parents[1]
 _GATE = _ROOT / "scripts/release_gate.py"
 _VERSION_FILE = Path("src/doc_lattice/__init__.py")
+_ATTEMPT_FILE = Path(".release-attempt")
 
 
 def _git(repo: Path, *args: str) -> str:
@@ -27,6 +28,10 @@ def _write_version(repo: Path, version: str) -> None:
     path = repo / _VERSION_FILE
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(f'__version__ = "{version}"\n', encoding="utf-8")
+
+
+def _write_attempt(repo: Path, text: str) -> None:
+    (repo / _ATTEMPT_FILE).write_text(text, encoding="utf-8")
 
 
 def _commit(repo: Path, message: str) -> str:
@@ -204,3 +209,122 @@ def test_malformed_tagged_version_source_fails(repo: Path):
     assert "::error::" in result.stdout
     assert "tagged source" in result.stdout
     assert outputs == []
+
+
+def test_absent_tag_with_a_fresh_re_arm_token_starts_release_work(repo: Path):
+    _write_version(repo, "1.0.0")
+    before = _commit(repo, "release version whose run failed before the tag")
+    _write_attempt(repo, "1.0.0 fixture-fix\n")
+    sha = _commit(repo, "fix the defect and re-arm")
+
+    result, outputs = _run_gate(repo, tag="v1.0.0", version="1.0.0", sha=sha, before=before)
+
+    assert result.returncode == 0
+    assert outputs == ["proceed=true", "create_tag=true"]
+    assert "re-arm token" in result.stdout
+
+
+def test_absent_tag_with_an_unchanged_re_arm_token_is_an_ordinary_noop(repo: Path):
+    _write_version(repo, "1.0.0")
+    _write_attempt(repo, "1.0.0 fixture-fix\n")
+    before = _commit(repo, "released version carrying a spent token")
+    (repo / "README.md").write_text("later change\n", encoding="utf-8")
+    sha = _commit(repo, "unrelated later change")
+
+    result, outputs = _run_gate(repo, tag="v1.0.0", version="1.0.0", sha=sha, before=before)
+
+    assert result.returncode == 0
+    assert outputs == ["proceed=false", "create_tag=false"]
+
+
+def test_absent_tag_with_no_re_arm_token_is_an_ordinary_noop(repo: Path):
+    _write_version(repo, "1.0.0")
+    before = _commit(repo, "release version without tag")
+    (repo / "README.md").write_text("later change\n", encoding="utf-8")
+    sha = _commit(repo, "later change")
+
+    result, outputs = _run_gate(repo, tag="v1.0.0", version="1.0.0", sha=sha, before=before)
+
+    assert result.returncode == 0
+    assert outputs == ["proceed=false", "create_tag=false"]
+
+
+def test_a_second_re_arm_for_the_same_version_starts_release_work(repo: Path):
+    _write_version(repo, "1.0.0")
+    _write_attempt(repo, "1.0.0 first-fix\n")
+    before = _commit(repo, "first re-arm, whose run also failed")
+    _write_attempt(repo, "1.0.0 second-fix\n")
+    sha = _commit(repo, "second fix and second re-arm")
+
+    result, outputs = _run_gate(repo, tag="v1.0.0", version="1.0.0", sha=sha, before=before)
+
+    assert result.returncode == 0
+    assert outputs == ["proceed=true", "create_tag=true"]
+
+
+def test_a_re_arm_token_removed_in_the_push_is_not_a_re_arm(repo: Path):
+    _write_version(repo, "1.0.0")
+    _write_attempt(repo, "1.0.0 fixture-fix\n")
+    before = _commit(repo, "release version carrying a token")
+    (repo / _ATTEMPT_FILE).unlink()
+    sha = _commit(repo, "remove the token")
+
+    result, outputs = _run_gate(repo, tag="v1.0.0", version="1.0.0", sha=sha, before=before)
+
+    assert result.returncode == 0
+    assert outputs == ["proceed=false", "create_tag=false"]
+
+
+def test_a_changed_re_arm_token_naming_another_version_fails(repo: Path):
+    _write_version(repo, "1.0.0")
+    before = _commit(repo, "release version whose run failed before the tag")
+    _write_attempt(repo, "0.9.0 fixture-fix\n")
+    sha = _commit(repo, "re-arm the wrong version")
+
+    result, outputs = _run_gate(repo, tag="v1.0.0", version="1.0.0", sha=sha, before=before)
+
+    assert result.returncode != 0
+    assert "::error::re-arm token names version '0.9.0', not 1.0.0" in result.stdout
+    assert outputs == []
+
+
+def test_a_malformed_changed_re_arm_token_fails(repo: Path):
+    _write_version(repo, "1.0.0")
+    before = _commit(repo, "release version whose run failed before the tag")
+    _write_attempt(repo, "please release this\n")
+    sha = _commit(repo, "re-arm with an unreadable token")
+
+    result, outputs = _run_gate(repo, tag="v1.0.0", version="1.0.0", sha=sha, before=before)
+
+    assert result.returncode != 0
+    assert "::error::release commit has a malformed re-arm token in .release-attempt" in (
+        result.stdout
+    )
+    assert outputs == []
+
+
+def test_a_malformed_re_arm_token_left_unchanged_is_inert(repo: Path):
+    _write_version(repo, "1.0.0")
+    _write_attempt(repo, "please release this\n")
+    before = _commit(repo, "release version carrying an unreadable token")
+    (repo / "README.md").write_text("later change\n", encoding="utf-8")
+    sha = _commit(repo, "later change that does not touch the token")
+
+    result, outputs = _run_gate(repo, tag="v1.0.0", version="1.0.0", sha=sha, before=before)
+
+    assert result.returncode == 0
+    assert outputs == ["proceed=false", "create_tag=false"]
+
+
+def test_a_fresh_re_arm_token_never_recreates_an_existing_tag(repo: Path):
+    _write_version(repo, "1.0.0")
+    _commit(repo, "release")
+    _git(repo, "tag", "v1.0.0")
+    before = _git(repo, "rev-parse", "HEAD")
+    _write_attempt(repo, "1.0.0 fixture-fix\n")
+    sha = _commit(repo, "re-arm a version that already shipped")
+
+    result, outputs = _run_gate(repo, tag="v1.0.0", version="1.0.0", sha=sha, before=before)
+
+    assert result.returncode == 0
+    assert outputs == ["proceed=false", "create_tag=false"]
