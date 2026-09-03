@@ -119,6 +119,9 @@ def test_existing_tag_at_older_commit_is_ordinary_noop(repo: Path):
 
 
 def test_absent_tag_with_same_version_before_push_is_ordinary_noop(repo: Path):
+    # This is also the no-token re-arm case, and deliberately not a second test: with no
+    # `.release-attempt` in the release commit, `_re_arm_attempt` returns before it parses
+    # anything, so a token's absence and a version that did not change are one path.
     _write_version(repo, "1.0.0")
     before = _commit(repo, "release version without tag")
     (repo / "README.md").write_text("later change\n", encoding="utf-8")
@@ -237,18 +240,6 @@ def test_absent_tag_with_an_unchanged_re_arm_token_is_an_ordinary_noop(repo: Pat
     before = _commit(repo, "released version carrying a spent token")
     (repo / "README.md").write_text("later change\n", encoding="utf-8")
     sha = _commit(repo, "unrelated later change")
-
-    result, outputs = _run_gate(repo, tag="v1.0.0", version="1.0.0", sha=sha, before=before)
-
-    assert result.returncode == 0
-    assert outputs == ["proceed=false", "create_tag=false"]
-
-
-def test_absent_tag_with_no_re_arm_token_is_an_ordinary_noop(repo: Path):
-    _write_version(repo, "1.0.0")
-    before = _commit(repo, "release version without tag")
-    (repo / "README.md").write_text("later change\n", encoding="utf-8")
-    sha = _commit(repo, "later change")
 
     result, outputs = _run_gate(repo, tag="v1.0.0", version="1.0.0", sha=sha, before=before)
 

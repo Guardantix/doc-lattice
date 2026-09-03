@@ -1,21 +1,19 @@
 """This repository's own link gate runs through the shipped command, in the hook and in CI."""
 
-import re
 from pathlib import Path
 
 from cli.helpers import runner
-from workflow_helpers import _commands, _invocations, _load_workflow
+from workflow_helpers import _commands, _invocations, _load_workflow, _matrix_legs_selected
 
 from doc_lattice.cli import app
 
 _ROOT = Path(__file__).resolve().parents[1]
-# The two shapes `_matrix_legs_selected` can evaluate. Anything else is a wiring change that has
-# to be taught to this helper rather than passing unasserted.
-_LEG_CONDITION_RE = re.compile(r"^matrix\.python\s*(==|!=)\s*'([^']+)'$")
+_WORKFLOW = _load_workflow(_ROOT / ".github/workflows/ci.yml")
+_LINKS_STEP = "the links step's"
 
 
 def _code_quality_job() -> dict:
-    return _load_workflow(_ROOT / ".github/workflows/ci.yml")["jobs"]["code-quality"]
+    return _WORKFLOW["jobs"]["code-quality"]
 
 
 def _links_step_indices(job: dict) -> list[int]:
@@ -24,31 +22,6 @@ def _links_step_indices(job: dict) -> list[int]:
         for index, step in enumerate(job["steps"])
         if any("links" in argv for argv in _invocations(_commands(step)))
     ]
-
-
-def _matrix_legs_selected(condition: str, legs: list[str]) -> list[str]:
-    """Return the interpreter legs a step's ``matrix.python`` condition admits.
-
-    Args:
-        condition: The step's ``if:`` expression.
-        legs: The job's declared ``matrix.python`` values.
-
-    Returns:
-        The subset of `legs` on which the step runs.
-    """
-    match = _LEG_CONDITION_RE.match(condition.strip())
-    assert match is not None, (
-        f"the links step's condition is {condition!r}, which this test cannot evaluate, so it "
-        "cannot say how many legs annotate. It reads `matrix.python == '<version>'` and "
-        "`matrix.python != '<version>'`; a third shape has to be taught to this helper."
-    )
-    operator, value = match.groups()
-    assert value in legs, (
-        f"the links step's condition names interpreter {value!r}, which is not in the "
-        f"code-quality matrix {legs}. A condition that matches no leg either annotates on every "
-        "leg or on none, and both are the failure this test exists to catch."
-    )
-    return [leg for leg in legs if (leg == value) == (operator == "==")]
 
 
 def _hook_invocations(hook_id: str) -> list[list[str]]:
@@ -97,10 +70,11 @@ def test_the_ci_links_step_annotates_on_exactly_one_matrix_leg():
         "the links step runs on every code-quality leg, so each finding is annotated once per "
         "interpreter. Condition the step on a single leg, as the coverage gate in `tests` does."
     )
-    assert len(_matrix_legs_selected(condition, legs)) == 1, (
-        f"the links step's condition {condition!r} selects "
-        f"{_matrix_legs_selected(condition, legs)} of the matrix {legs}; annotations are per "
-        "leg, so anything but one leg annotates each finding zero or several times."
+    selected = _matrix_legs_selected(condition, legs, _LINKS_STEP)
+    assert len(selected) == 1, (
+        f"the links step's condition {condition!r} selects {selected} of the matrix {legs}; "
+        "annotations are per leg, so anything but one leg annotates each finding zero or "
+        "several times."
     )
 
 

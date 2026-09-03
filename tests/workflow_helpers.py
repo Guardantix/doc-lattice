@@ -1,11 +1,12 @@
 """Shared parsing helpers for the workflow-contract test modules.
 
-Four suites assert against the same two grammars: the YAML of ``.github/workflows/*.yml``, and
-the shell text inside a ``run:`` step. Both are subtle enough to get wrong more than once -- a
-``#`` inside quotes is not a comment, ``-c`` and ``-m`` demote a script path to an argument
-nothing runs, and a YAML 1.1 resolver reads a bare ``on:`` key as the boolean ``True``. Holding
-one implementation of each is what keeps a fix to any of them from landing in one suite and
-leaving the others reading the old semantics.
+Four suites assert against the same three grammars: the YAML of ``.github/workflows/*.yml``,
+the shell text inside a ``run:`` step, and the ``matrix.python`` expression a step's ``if:``
+carries. All are subtle enough to get wrong more than once -- a ``#`` inside quotes is not a
+comment, ``-c`` and ``-m`` demote a script path to an argument nothing runs, and a YAML 1.1
+resolver reads a bare ``on:`` key as the boolean ``True``. Holding one implementation of each is
+what keeps a fix to any of them from landing in one suite and leaving the others reading the old
+semantics.
 
 The names keep their leading underscore across the move, matching ``tests/cli/helpers.py``.
 """
@@ -22,6 +23,9 @@ _WORKFLOW_DIR = _ROOT / ".github/workflows"
 # One whitespace run after the list marker, not the single space the workflows happen to
 # be formatted with: `-  uses:` is the same step to the runner.
 _USES_RE = re.compile(r"^(?:-\s+)?uses:(.*)$")
+# The two shapes `_matrix_legs_selected` can evaluate. Anything else is a wiring change that has
+# to be taught to that helper rather than passing unasserted.
+_LEG_CONDITION_RE = re.compile(r"^matrix\.python\s*(==|!=)\s*'([^']+)'$")
 
 
 def _workflow_paths() -> list[Path]:
@@ -114,6 +118,56 @@ def _uses_fragments(path: Path) -> list[str]:
         value = value.strip().strip("'\"")
         fragments.append(f"{value} # {comment.strip()}" if marker else value)
     return fragments
+
+
+def _matrix_leg_condition(condition: str, label: str) -> tuple[str, str]:
+    """Return the operator and interpreter a step's ``matrix.python`` condition names.
+
+    Two gates now run on one leg of a matrix -- the `links` annotation and the shipped-sdist
+    suite -- and each has to reason about the expression that puts them there. Holding one
+    reader of the grammar is what keeps the two from pinning the same expression to different
+    shapes: a separate regex per suite already differed on whitespace before this was shared.
+
+    Both operators are read rather than only the exclusion the workflows use today, because a
+    caller asking which legs run is asking about the condition's effect, not its spelling. A
+    caller that also cares about the spelling -- and one does, since an exclusion and a
+    selection fail in opposite directions when the matrix changes -- reads the operator here.
+
+    Args:
+        condition: The step's ``if:`` expression.
+        label: The step, named for the assertion message.
+
+    Returns:
+        The operator, ``==`` or ``!=``, and the interpreter it names.
+    """
+    match = _LEG_CONDITION_RE.match(condition.strip())
+    assert match is not None, (
+        f"the {label} condition is {condition!r}, which this helper cannot evaluate, so it "
+        "cannot say how many legs run. It reads `matrix.python == '<version>'` and "
+        "`matrix.python != '<version>'`; a third shape has to be taught to this helper."
+    )
+    operator, value = match.groups()
+    return operator, value
+
+
+def _matrix_legs_selected(condition: str, legs: list[str], label: str) -> list[str]:
+    """Return the interpreter legs a step's ``matrix.python`` condition admits.
+
+    Args:
+        condition: The step's ``if:`` expression.
+        legs: The job's declared ``matrix.python`` values.
+        label: The step, named for the assertion messages.
+
+    Returns:
+        The subset of `legs` on which the step runs.
+    """
+    operator, value = _matrix_leg_condition(condition, label)
+    assert value in legs, (
+        f"the {label} condition names interpreter {value!r}, which is not in the matrix "
+        f"{legs}. A condition that matches no leg either runs on every leg or on none, and "
+        "both are the failure the callers of this helper exist to catch."
+    )
+    return [leg for leg in legs if (leg == value) == (operator == "==")]
 
 
 def _named_step(job: dict, name: str) -> dict:
