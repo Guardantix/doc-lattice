@@ -118,7 +118,7 @@ it.
 ### AD-4: Canonicalized, truncated content hash
 
 **Date:** 2026-06-27
-**Status:** Accepted
+**Status:** Accepted; amended by AD-44
 **Context:** Drift must be insensitive to cosmetic edits.
 **Decision:** Each edge stores a `seen` hash; the live hash is
 `sha256(canonicalize(text))` truncated to 32 hex chars (128 bits), where
