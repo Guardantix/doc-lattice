@@ -76,40 +76,34 @@ def escape_github_property(value: str) -> str:
     return escape_github_message(value).replace(":", "%3A").replace(",", "%2C")
 
 
-def github_annotation(  # noqa: PLR0913
-    path: Path,
-    root: Path,
-    title: str,
-    message: str,
-    severity: AnnotationSeverity = "error",
-    line: int | None = None,
-) -> str:
+def github_annotation(annotation: Annotation, root: Path) -> str:
     """Render one GitHub Actions annotation for a finding.
 
     The ``file`` property is emitted relative to ``root`` so GitHub Actions can attach
-    the annotation to the offending document in the pull request diff. When ``path``
-    falls outside ``root``, the absolute path is used instead of raising.
+    the annotation to the offending document in the pull request diff. When the annotation's
+    path falls outside ``root``, the absolute path is used instead of raising.
+
+    The record is taken whole rather than field by field, because it is already the shape a
+    caller holds: every property this renders is one of its fields, so a property the workflow
+    grammar gains later is added to ``Annotation`` and read here, with no signature between the
+    two to widen.
 
     Args:
-        path: Absolute path of the source document.
+        annotation: The finding to render, carrying its own path, text, severity, and line.
         root: Base for relative path reporting, chosen by ``CliRuntime.annotation_root``.
-        title: Annotation title, before escaping.
-        message: Annotation message, before escaping.
-        severity: The workflow command to emit. Defaults to ``error``, which is what a
-            command annotating exactly what it gates on wants.
-        line: The 1-based line to attach at, or None to omit the property.
 
     Returns:
         A single escaped workflow-command line.
     """
     try:
-        relative = path.relative_to(root)
+        relative = annotation.path.relative_to(root)
     except ValueError:
-        relative = path
-    position = "" if line is None else f",line={line}"
+        relative = annotation.path
+    position = "" if annotation.line is None else f",line={annotation.line}"
     return (
-        f"::{severity} file={escape_github_property(str(relative))}{position},"
-        f"title={escape_github_property(title)}::{escape_github_message(message)}"
+        f"::{annotation.severity} file={escape_github_property(str(relative))}{position},"
+        f"title={escape_github_property(annotation.title)}::"
+        f"{escape_github_message(annotation.message)}"
     )
 
 
@@ -132,16 +126,7 @@ def write_annotations(runtime: CliRuntime, items: Iterable[Annotation]) -> None:
     """
     annotated: list[Path] = []
     for item in items:
-        runtime.write_stdout(
-            github_annotation(
-                item.path,
-                runtime.annotation_root(item.path),
-                item.title,
-                item.message,
-                item.severity,
-                line=item.line,
-            )
-        )
+        runtime.write_stdout(github_annotation(item, runtime.annotation_root(item.path)))
         annotated.append(item.path)
     warn_unattachable_annotations(runtime, annotated)
 

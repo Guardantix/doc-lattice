@@ -10,8 +10,8 @@ Containment binds both ends: a source that leaves the project root through a sym
 rather than read, and a target is judged the same way before it is opened. Selection expands a
 selector lexically and never enters a symlinked directory, whether ``**`` reaches it or a fixed
 segment names it, because following one would let a link to ``/`` turn ``**`` into a filesystem
-walk. Every selector has to match at least one lexical path, so a mandatory gate can never pass
-over zero files.
+walk. The list has to name at least one selector and every selector has to match at least one
+lexical path, so a mandatory gate can never pass over zero files.
 
 Absolute and external destinations are out of scope and skipped, as are image destinations.
 Heading fragments are validated only against Markdown targets, against
@@ -39,6 +39,17 @@ Failures fall into two classes. Content the gate cannot read as a document -- by
 decode, a character reference the parser refuses -- is a finding on that document and the run
 continues. A filesystem the gate cannot inspect -- a resolve, stat, scan, or open that fails --
 is a tool error: a gate that cannot see its inputs must not pass.
+
+Which tool error it becomes turns on when the refusal was met. A refusal met while a selector is
+being expanded is a ``ConfigError``, because the selector is what reached the path and narrowing
+the selector is the repair. A refusal met against a path the selection already chose is an
+``UnreadableDocError`` carrying that path. That second half is load-bearing rather than cosmetic:
+``UnreadableDocError`` is a ``DocumentError``, and ``exit_on_project_error`` annotates its
+``source`` as a document under ``--format github``, and GitHub drops an annotation whose ``file=``
+is not a file in the diff, in silence. That is why the walk never hands one a directory: only a
+non-directory entry can satisfy a selector's last segment. A link target is the one ``source``
+that is not itself a selected document, so a target the filesystem refuses to stat can still
+carry a path the diff has nothing to attach to.
 """
 
 import errno
@@ -58,6 +69,7 @@ from .link_selectors import (
     RECURSIVE_SEGMENT,
     SELECTOR_SEPARATOR,
     segment_matches,
+    selector_defect_message,
     validate_link_selector,
 )
 from .markdown_compat import full_heading_inventory
@@ -583,9 +595,9 @@ def _link_message(
             else None
         )
     target = _resolve_target(parts.path, document, root)
-    if target is None:
-        return f"link target {format_path_for_display(href)} does not resolve inside the repository"
     displayed = format_path_for_display(href)
+    if target is None:
+        return f"link target {displayed} does not resolve inside the repository"
     if _escapes_by_symlink(target, root):
         return f"link target {displayed} leaves the repository through a symlink"
     mode = _stat_mode(target)
@@ -689,30 +701,40 @@ def select_link_sources(project_root: Path, selectors: Sequence[str]) -> list[Pa
         Unresolved paths under the resolved project root, sorted and deduplicated.
 
     Raises:
-        ConfigError: If a selector is malformed, matches no lexical path, or the walk meets a
-            directory it cannot scan.
-        UnreadableDocError: If a contained match is a dangling symlink, a directory reached
-            through a symlink, or a special file. None of those is opened: the classification is
-            a ``stat``, because opening a FIFO or a device can block indefinitely.
+        ConfigError: If ``selectors`` is empty, or a selector is malformed, matches no lexical
+            path, or reaches a directory the walk cannot scan. Every refusal met while a selector
+            is being expanded is a ``ConfigError``, per the taxonomy this module's docstring
+            records.
+        UnreadableDocError: If a contained match will not resolve, or is a dangling symlink, a
+            directory reached through a symlink, or a special file. Those are refusals against a
+            path the expansion already chose, which is the other half of that taxonomy. None of
+            them is opened: the classification is a ``stat``, because opening a FIFO or a device
+            can block indefinitely.
     """
     root = project_root.resolve()
+    if not selectors:
+        msg = (
+            f"link_sources names no selector for the project root "
+            f"{format_path_for_display(root)}; the links command refuses to run "
+            "without a selector"
+        )
+        raise ConfigError(msg)
     matched: set[str] = set()
     for entry in selectors:
         try:
             segments = validate_link_selector(entry)
         except ValueError as exc:
-            msg = f"link_sources entry {format_path_for_display(entry)} {exc}"
+            msg = selector_defect_message(entry, exc)
             raise ConfigError(msg) from exc
-        state = _WalkState(found=set(), visited=set())
-        _walk(root, segments, state)
-        if not state.found:
+        found = _walk(root, segments)
+        if not found:
             msg = (
                 f"link_sources entry {format_path_for_display(entry)} matches no file under "
                 f"the project root {format_path_for_display(root)}; the links command refuses "
                 "to run over a selector that selects nothing"
             )
             raise ConfigError(msg)
-        matched.update(state.found)
+        matched.update(found)
     seen: set[Path] = set()
     sources: list[Path] = []
     for relative in sorted(matched):
@@ -741,7 +763,12 @@ def _require_regular_file(candidate: Path) -> None:
 
 
 def _scan(directory: Path) -> list[os.DirEntry[str]]:
-    """List one directory, turning a scan the filesystem refuses into a config error."""
+    """List one directory.
+
+    Raises:
+        ConfigError: If the filesystem refuses the scan. A selection-time refusal is a config
+            error, per the taxonomy this module's docstring records.
+    """
     try:
         with os.scandir(directory) as entries:
             return list(entries)
@@ -751,7 +778,12 @@ def _scan(directory: Path) -> list[os.DirEntry[str]]:
 
 
 def _is_directory(entry: os.DirEntry[str]) -> bool:
-    """Report whether an entry is a directory in its own right, never through a symlink."""
+    """Report whether an entry is a directory in its own right, never through a symlink.
+
+    Raises:
+        ConfigError: If the filesystem refuses the inspection. A selection-time refusal is a
+            config error, per the taxonomy this module's docstring records.
+    """
     try:
         return entry.is_dir(follow_symlinks=False)
     except OSError as exc:
@@ -762,19 +794,6 @@ def _is_directory(entry: os.DirEntry[str]) -> bool:
 
 def _join(prefix: str, name: str) -> str:
     return name if prefix == "" else f"{prefix}{SELECTOR_SEPARATOR}{name}"
-
-
-@dataclass(slots=True)
-class _WalkState:
-    """The mutable state one ``select_link_sources`` selector accumulates in ``_walk``.
-
-    ``found`` collects matched project-relative spellings. ``visited`` memoizes ``(prefix,
-    index)`` states already scanned, as the ``_walk`` docstring explains; it is created fresh
-    per selector, so one selector's memoization never suppresses a scan another selector needs.
-    """
-
-    found: set[str]
-    visited: set[tuple[str, int]]
 
 
 @dataclass(frozen=True, slots=True)
@@ -794,7 +813,7 @@ class _Frame:
 
 
 def _recursive_frames(
-    frame: _Frame, entries: list[os.DirEntry[str]], last: bool, state: _WalkState
+    frame: _Frame, entries: list[os.DirEntry[str]], last: bool, found: set[str]
 ) -> list[_Frame]:
     """Expand one ``**`` frame: collect its file matches and return the steps it spawns.
 
@@ -809,27 +828,27 @@ def _recursive_frames(
         frame: The frame being expanded, whose segment is ``**``.
         entries: That directory's listing.
         last: Whether ``**`` is the selector's final segment.
-        state: The per-selector matches, mutated in place.
+        found: The selector's matched spellings, added to in place.
 
     Returns:
         The frames to push, children first and the ``index + 1`` handoff last.
 
     Raises:
-        ConfigError: If the filesystem refuses to inspect an entry.
+        ConfigError: If the filesystem refuses to inspect an entry, a selection-time refusal.
     """
     frames: list[_Frame] = []
     for entry in entries:
         if _is_directory(entry):
             frames.append(_Frame(Path(entry.path), _join(frame.prefix, entry.name), frame.index))
         elif last:
-            state.found.add(_join(frame.prefix, entry.name))
+            found.add(_join(frame.prefix, entry.name))
     if not last:
         frames.append(_Frame(frame.directory, frame.prefix, frame.index + 1, entries))
     return frames
 
 
-def _walk(root: Path, segments: tuple[str, ...], state: _WalkState) -> None:
-    """Match ``segments`` beneath ``root``, collecting project-relative spellings into ``state``.
+def _walk(root: Path, segments: tuple[str, ...]) -> set[str]:
+    """Match ``segments`` beneath ``root``, returning the project-relative spellings found.
 
     A directory is a traversal node and never a match; only a non-directory entry can satisfy
     the last segment.
@@ -842,10 +861,11 @@ def _walk(root: Path, segments: tuple[str, ...], state: _WalkState) -> None:
     which iterate. Popping from the end keeps the traversal depth-first, which is what lets a
     ``**`` handoff claim its state ahead of the children pushed beneath it.
 
-    ``state.visited`` memoizes ``(prefix, index)`` states already scanned, for the one selector
-    this walk is expanding. Adjacent ``**`` segments are valid grammar, and without memoization a
-    directory at depth d reached through k of them is scanned about C(d+k-1, k-1) times: the
-    non-last ``**`` branch both takes each child directory at the same index and hands the same
+    ``visited`` memoizes ``(prefix, index)`` states already scanned. It lives for this call and
+    this call only, so one selector's memoization never suppresses a scan another selector needs.
+    Adjacent ``**`` segments are valid grammar, and without memoization a directory at depth d
+    reached through k of them is scanned about C(d+k-1, k-1) times: the non-last ``**`` branch
+    both takes each child directory at the same index and hands the same
     directory to ``index + 1``, and those two spreads converge on the same ``(prefix, index)``
     state from many paths lower in the tree. Claiming each state as it is popped bounds the whole
     walk to at most one scan per directory per segment index. What it removes is a state being
@@ -857,30 +877,36 @@ def _walk(root: Path, segments: tuple[str, ...], state: _WalkState) -> None:
     Args:
         root: The resolved project root the selector is anchored to.
         segments: The validated selector segments.
-        state: The per-selector matches and memo, mutated in place.
+
+    Returns:
+        Every project-relative spelling the selector matched, unordered.
 
     Raises:
-        ConfigError: If the filesystem refuses to scan a directory or inspect an entry.
+        ConfigError: If the filesystem refuses to scan a directory or inspect an entry, both
+            selection-time refusals.
     """
+    found: set[str] = set()
+    visited: set[tuple[str, int]] = set()
     pending = [_Frame(root, "", 0)]
     while pending:
         frame = pending.pop()
         key = (frame.prefix, frame.index)
-        if key in state.visited:
+        if key in visited:
             continue
-        state.visited.add(key)
+        visited.add(key)
         segment = segments[frame.index]
         last = frame.index == len(segments) - 1
         entries = _scan(frame.directory) if frame.entries is None else frame.entries
         if segment == RECURSIVE_SEGMENT:
-            pending.extend(_recursive_frames(frame, entries, last, state))
+            pending.extend(_recursive_frames(frame, entries, last, found))
             continue
         for entry in entries:
             if not segment_matches(entry.name, segment):
                 continue
             if last:
                 if not _is_directory(entry):
-                    state.found.add(_join(frame.prefix, entry.name))
+                    found.add(_join(frame.prefix, entry.name))
             elif _is_directory(entry):
                 spelling = _join(frame.prefix, entry.name)
                 pending.append(_Frame(Path(entry.path), spelling, frame.index + 1))
+    return found

@@ -6,6 +6,7 @@ import sys
 from pathlib import Path
 
 import pytest
+from link_gate_helpers import _requires_permission_enforcement, _write
 
 from doc_lattice import link_check as link_check_module
 from doc_lattice.error_types import ConfigError, UnreadableDocError
@@ -13,6 +14,7 @@ from doc_lattice.link_check import (
     _PARSER,
     LinkFinding,
     _anchor_hrefs,
+    _is_directory,
     _links_in,
     _split_destination,
     check_links,
@@ -39,20 +41,9 @@ def check_repository_links(root: Path) -> list[str]:
     return [_line(finding) for finding in check_links(root, _root_sources(root))]
 
 
-_requires_permission_enforcement = pytest.mark.skipif(
-    os.name != "posix" or os.geteuid() == 0, reason="needs a POSIX filesystem that enforces modes"
-)
-
-
 def _links(markdown: str) -> list:
     """Return the links of a Markdown string, for tests that drive the scan from text."""
     return _links_in(_PARSER.parse(markdown))
-
-
-def _write(root: Path, name: str, text: str) -> None:
-    path = root / name
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(text, encoding="utf-8")
 
 
 def _only_message(root: Path) -> str:
@@ -1088,6 +1079,12 @@ def test_selection_is_sorted_and_lexically_deduplicated_across_selectors(tmp_pat
     assert _relative(tmp_path, selected) == ["a.md", "b.md", "docs/c.md"]
 
 
+def test_an_empty_selector_list_is_refused(tmp_path):
+    """The engine holds both halves of the fail-closed rule, not only the command adapter."""
+    with pytest.raises(ConfigError, match="refuses to run without a selector"):
+        select_link_sources(tmp_path, [])
+
+
 def test_every_selector_must_match_at_least_one_path(tmp_path):
     _write(tmp_path, "ARCHITECTURE.md", "# A\n")
 
@@ -1215,6 +1212,25 @@ def test_an_unscannable_directory_is_a_config_error(tmp_path):
             select_link_sources(tmp_path, ["docs/**/*.md"])
     finally:
         locked.chmod(0o755)
+
+
+class _RefusingEntry:
+    """A directory entry whose kind the filesystem refuses to report.
+
+    ``os.DirEntry`` has no public constructor and cannot be instantiated or subclassed, so the
+    only way to reach ``_is_directory``'s refusal branch is to hand it a stand-in.
+    """
+
+    path = "blocked"
+    name = "blocked"
+
+    def is_dir(self, **_kwargs: bool) -> bool:
+        raise PermissionError(errno.EACCES, "Permission denied")
+
+
+def test_an_entry_whose_kind_cannot_be_read_is_a_config_error():
+    with pytest.raises(ConfigError, match="could not inspect"):
+        _is_directory(_RefusingEntry())  # ty: ignore[invalid-argument-type] - the stand-in
 
 
 def test_adjacent_recursive_segments_match_the_same_set_as_one(tmp_path):

@@ -17,6 +17,7 @@ import re
 from fnmatch import fnmatchcase
 from pathlib import PureWindowsPath
 
+from .path_utils import format_path_for_display
 from .text_utils import strip_control_chars
 
 SELECTOR_SEPARATOR = "/"
@@ -76,6 +77,24 @@ def validate_link_selector(entry: str) -> tuple[str, ...]:
             msg = "leaves a '[' bracket class unclosed"
             raise ValueError(msg)
     return segments
+
+
+def selector_defect_message(entry: str, defect: ValueError) -> str:
+    """Return the user-facing diagnostic for one rejected ``link_sources`` entry.
+
+    ``validate_link_selector`` raises a subjectless predicate, so the subject is supplied here
+    rather than at each call site. Both callers that reject an entry -- config load and the
+    selection walk -- report the same defect about the same value, and a reader who meets one
+    message should not have to recognize the other as the same refusal.
+
+    Args:
+        entry: The ``link_sources`` entry as written.
+        defect: The ``ValueError`` ``validate_link_selector`` raised for it.
+
+    Returns:
+        The full diagnostic, ready to carry whatever error type the caller raises.
+    """
+    return f"link_sources entry {format_path_for_display(entry)} {defect}"
 
 
 def _has_unclosed_bracket(segment: str) -> bool:

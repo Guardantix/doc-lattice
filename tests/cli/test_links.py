@@ -1,11 +1,10 @@
 """CLI integration tests for the links command."""
 
 import errno
-import os
 from io import StringIO
 from pathlib import Path
 
-import pytest
+from link_gate_helpers import _requires_permission_enforcement, _write
 from rich.console import Console
 
 from doc_lattice.cli import app
@@ -15,17 +14,7 @@ from doc_lattice.cli.runtime import CliConsole, CliRuntime, RuntimeFactory
 from doc_lattice.config import load_config
 from doc_lattice.orchestrate import load_lattice
 
-from .helpers import runner
-
-_requires_permission_enforcement = pytest.mark.skipif(
-    os.name != "posix" or os.geteuid() == 0, reason="needs a POSIX filesystem that enforces modes"
-)
-
-
-def _write(root: Path, name: str, text: str) -> None:
-    path = root / name
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(text, encoding="utf-8")
+from .helpers import _RefusingStream, runner
 
 
 def _config(root: Path, *selectors: str) -> None:
@@ -38,15 +27,6 @@ def _witness(root: Path) -> None:
     _config(root, "*.md")
     _write(root, "README.md", "# Readme\n\n[a](GUIDE.md#nope)\n\n[b](MISSING.md)\n")
     _write(root, "GUIDE.md", "# Guide\n")
-
-
-class _RefusingStream(StringIO):
-    def __init__(self, error: OSError) -> None:
-        super().__init__()
-        self._error = error
-
-    def write(self, _text: str) -> int:
-        raise self._error
 
 
 def _runtime(stdout: Console, stderr: Console, cwd: Path) -> CliRuntime:

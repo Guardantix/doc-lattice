@@ -49,7 +49,11 @@ from doc_lattice.cli.commands.reconcile import (
     _report_recovery,
     _report_recovery_problems,
 )
-from doc_lattice.cli.github import github_annotation, warn_unattachable_annotations
+from doc_lattice.cli.github import (
+    Annotation,
+    github_annotation,
+    warn_unattachable_annotations,
+)
 from doc_lattice.cli.runtime import CliRuntime
 from doc_lattice.config import DEFAULT_CONFIG_NAME, load_config
 from doc_lattice.constants import (
@@ -1037,7 +1041,7 @@ class TestInitSinks:
 def test_machine_channels_are_deliberately_untouched(tmp_path: Path):
     """JSON and the GitHub annotation ``file=`` keep their own encoders, per the issue's scope."""
     path = tmp_path / HOSTILE
-    line = github_annotation(path, tmp_path, "title", "message")
+    line = github_annotation(Annotation(path, "title", "message"), tmp_path)
     # The annotation encoder still emits the raw relative spelling, not the display one, so the
     # value stays something GitHub can attach to a diff.
     assert format_path_for_display(path) not in line
@@ -1057,7 +1061,7 @@ def test_annotation_encodes_the_two_controls_the_grammar_defines(
     # is what keeps that public wording from drifting back to the whole control range, which is
     # what it first said and what the ESC-only end-to-end case could not have caught.
     path = tmp_path / f"cr{control}lf.md"
-    line = github_annotation(path, tmp_path, "title", "message")
+    line = github_annotation(Annotation(path, "title", "message"), tmp_path)
 
     assert f"file=cr{encoded}lf.md," in line
     assert control not in line
@@ -1074,7 +1078,7 @@ def test_annotation_passes_every_other_control_through_raw(tmp_path: Path, contr
     # attachment. `\x9b` is the single-byte C1 CSI, which some terminals act on exactly as they
     # do on the two-byte `ESC[`, so the exception is not merely theoretical.
     path = tmp_path / f"pwn{control}evil.md"
-    line = github_annotation(path, tmp_path, "title", "message")
+    line = github_annotation(Annotation(path, "title", "message"), tmp_path)
 
     assert f"file=pwn{control}evil.md," in line
 

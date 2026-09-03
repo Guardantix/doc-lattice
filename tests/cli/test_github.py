@@ -29,17 +29,15 @@ def runtime(tmp_path: Path) -> CliRuntime:
 def test_github_annotation_uses_escaped_absolute_path_outside_root(tmp_path: Path):
     outside = tmp_path.parent / "outside%:,\nfile.md"
 
-    result = github_annotation(outside, tmp_path, "title", "message")
+    result = github_annotation(Annotation(outside, "title", "message"), tmp_path)
 
     assert result == (f"::error file={escape_github_property(str(outside))},title=title::message")
 
 
 def test_github_annotation_escapes_all_workflow_metacharacters(tmp_path: Path):
     result = github_annotation(
-        tmp_path / "sub%:,\nline.md",
+        Annotation(tmp_path / "sub%:,\nline.md", "title%:,\r\nline", "message%:,\r\nline"),
         tmp_path,
-        "title%:,\r\nline",
-        "message%:,\r\nline",
     )
 
     assert result == (
@@ -48,7 +46,9 @@ def test_github_annotation_escapes_all_workflow_metacharacters(tmp_path: Path):
 
 
 def test_github_annotation_emits_the_requested_severity(tmp_path: Path):
-    line = github_annotation(tmp_path / "doc.md", tmp_path, "title", "message", "warning")
+    line = github_annotation(
+        Annotation(tmp_path / "doc.md", "title", "message", "warning"), tmp_path
+    )
 
     assert line == "::warning file=doc.md,title=title::message"
 
@@ -175,8 +175,9 @@ def test_warn_unattachable_annotations_reports_once_for_a_repeated_document(
 
 
 def test_github_annotation_emits_a_line_only_when_given_one(tmp_path: Path):
-    without = github_annotation(tmp_path / "doc.md", tmp_path, "title", "message")
-    with_line = github_annotation(tmp_path / "doc.md", tmp_path, "title", "message", line=7)
+    doc = tmp_path / "doc.md"
+    without = github_annotation(Annotation(doc, "title", "message"), tmp_path)
+    with_line = github_annotation(Annotation(doc, "title", "message", line=7), tmp_path)
 
     assert without == "::error file=doc.md,title=title::message"
     assert with_line == "::error file=doc.md,line=7,title=title::message"

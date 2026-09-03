@@ -342,7 +342,7 @@ class CliRuntime:
         except BrokenPipeError as exc:
             raise PipeClosed from exc
 
-    def write_stderr(self, text: str, *, newline: bool = True) -> None:
+    def write_stderr(self, text: str) -> None:
         """Write exact text to the captured stderr stream, bypassing Rich.
 
         The stderr analogue of ``write_stdout``, for a diagnostic line that must reach the
@@ -353,13 +353,10 @@ class CliRuntime:
         code stands. Only a stdout that refuses a write reaches the silent 141.
 
         Args:
-            text: Text to write without Rich rendering.
-            newline: Whether to append one newline after ``text``.
+            text: Text to write without Rich rendering, one line, newline-terminated here.
         """
         try:
-            self.stderr.file.write(text)
-            if newline:
-                self.stderr.file.write("\n")
+            self.stderr.file.write(f"{text}\n")
             self.stderr.file.flush()
         except BrokenPipeError:
             apply_broken_pipe_policy(self.stderr)
