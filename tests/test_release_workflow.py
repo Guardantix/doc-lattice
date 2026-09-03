@@ -1367,6 +1367,14 @@ def test_the_shipped_sdist_suite_is_gated_by_the_protected_tests_context():
         f"{min(interpreters, key=_release)!r}. Archive membership and working-directory isolation "
         "do not vary by interpreter, so the newest leg is the one that carries this."
     )
+    # "At worst twice" is only true while a leg survives the exclusion. A matrix shrunk to the
+    # excluded value alone leaves the condition false everywhere, and the assertion above still
+    # holds -- the silent drop this spelling exists to prevent, arriving by the other door.
+    assert [leg for leg in interpreters if leg != exclusion.group(1)], (
+        f"the matrix is {interpreters}, every leg of which the step's condition excludes, so the "
+        "gate runs nowhere while every assertion here still passes. Excluding a leg is only safe "
+        "while another remains."
+    )
 
     addopts = shlex.split(step["env"]["PYTEST_ADDOPTS"])
     assert "--no-cov" in addopts, (
@@ -1374,7 +1382,7 @@ def test_the_shipped_sdist_suite_is_gated_by_the_protected_tests_context():
         "enforces `fail_under`, and the shipped suite is a subset whose total is not the number "
         "that threshold describes."
     )
-    assert addopts[addopts.index("--dist") + 1 : addopts.index("--dist") + 2] == ["loadfile"], (
+    assert _flag_value(addopts, "--dist") == "loadfile", (
         f"expected `--dist loadfile`, found {addopts}. The `tests` job records why file "
         "granularity is load-bearing rather than tuning: `tests/test_reconcile_fuzz.py` asserts "
         "over an accumulator the rest of its module populates."
@@ -1450,9 +1458,14 @@ def test_the_shipped_sdist_suite_runs_from_a_tree_the_step_built_outside_the_che
         f"the extraction targets {_flag_value(tars[0], '-C')!r} rather than the directory "
         "UNPACK_DIR names, which leaves the tree the suite runs from unrelated to the archive."
     )
-    assert _expands(next((word for word in _operands(tars[0]) if word != "-C"), ""), "ARCHIVE"), (
-        f"the extraction does not read the archive ARCHIVE names, found {tars[0]}."
-    )
+    # `-C` takes a value, which `_operands` is documented not to be sound against: its value
+    # lands among the operands. Dropping that value by name rather than dropping the flag -- which
+    # `_operands` has already discarded -- is what keeps this reading the archive operand whichever
+    # order the two are written in.
+    destination = _flag_value(tars[0], "-C")
+    assert _expands(
+        next((word for word in _operands(tars[0]) if word != destination), ""), "ARCHIVE"
+    ), f"the extraction does not read the archive ARCHIVE names, found {tars[0]}."
 
 
 def test_the_shipped_sdist_suite_runs_from_the_extracted_root_with_pytests_own_status():

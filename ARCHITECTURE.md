@@ -2588,7 +2588,18 @@ shipped dev group with no lock, because the sdist ships `pyproject.toml` and del
 **Consequences:** Every pull request runs the suite twice on one leg, for about the duration of
 the suite plus the build. That duplication is the price of the only signal that reads the archive
 as an adopter receives it, and it is paid where the drift is introduced rather than where it would
-be discovered. The two describing gates stay: the manifest still excludes by name and the coupling
+be discovered.
+
+This is also the only unlocked resolve in `ci.yml`, and the exposure it buys has to be stated
+rather than discovered. Every other job syncs `--locked`; the dev group carries no upper bounds,
+so an upstream major of `pytest`, `pytest-xdist`, `pytest-cov`, `pytest-mock`, or `hypothesis`
+turns this step red with no change in this repository. Because the step rides the `tests` matrix,
+that reddens the protected `Tests` context on every open pull request and blocks `release`, which
+`needs: tests` -- and it presents as the manifest drift the step exists to report, which is the
+part that misleads. Locking it would defeat the check: `uv.lock` is exactly what the sdist does
+not ship, so a locked resolve would verify a dependency set no adopter can obtain. Bounding the
+dev group above is the fix if this ever fires, not pinning the step to a lock, and the tell is
+that the failure names a dependency rather than a missing repository file. The two describing gates stay: the manifest still excludes by name and the coupling
 test still holds the two lists together, because a red run here names the module that failed and
 those lists are how it is fixed. `tests/test_release_workflow.py` owns the step's contract, and
 excludes itself from the sdist, so it can read `ci.yml` without recreating the problem.
