@@ -10,8 +10,8 @@ Containment binds both ends: a source that leaves the project root through a sym
 rather than read, and a target is judged the same way before it is opened. Selection expands a
 selector lexically and never enters a symlinked directory, whether ``**`` reaches it or a fixed
 segment names it, because following one would let a link to ``/`` turn ``**`` into a filesystem
-walk. Every selector has to match at least one lexical path, so a mandatory gate can never pass
-over zero files.
+walk. The list has to name at least one selector and every selector has to match at least one
+lexical path, so a mandatory gate can never pass over zero files.
 
 Absolute and external destinations are out of scope and skipped, as are image destinations.
 Heading fragments are validated only against Markdown targets, against
@@ -39,6 +39,15 @@ Failures fall into two classes. Content the gate cannot read as a document -- by
 decode, a character reference the parser refuses -- is a finding on that document and the run
 continues. A filesystem the gate cannot inspect -- a resolve, stat, scan, or open that fails --
 is a tool error: a gate that cannot see its inputs must not pass.
+
+Which tool error it becomes turns on when the refusal was met. A selection-time refusal, met
+while expanding a selector, is a ``ConfigError``, because the selector is what reached the path
+and narrowing the selector is the repair. A document-time refusal, met against a document the
+selection already chose, is an ``UnreadableDocError`` carrying that document. That second half is
+load-bearing rather than cosmetic: ``UnreadableDocError`` is a ``DocumentError``, and
+``exit_on_project_error`` annotates its ``source`` as a document under ``--format github``, which
+is why a directory never raises one. GitHub drops an annotation whose ``file=`` is not a file in
+the diff, and it drops it in silence.
 """
 
 import errno
@@ -690,13 +699,21 @@ def select_link_sources(project_root: Path, selectors: Sequence[str]) -> list[Pa
         Unresolved paths under the resolved project root, sorted and deduplicated.
 
     Raises:
-        ConfigError: If a selector is malformed, matches no lexical path, or the walk meets a
-            directory it cannot scan.
+        ConfigError: If ``selectors`` is empty, or a selector is malformed, matches no lexical
+            path, or reaches a directory the walk cannot scan. Every selection-time refusal is a
+            ``ConfigError``, per the taxonomy this module's docstring records.
         UnreadableDocError: If a contained match is a dangling symlink, a directory reached
             through a symlink, or a special file. None of those is opened: the classification is
             a ``stat``, because opening a FIFO or a device can block indefinitely.
     """
     root = project_root.resolve()
+    if not selectors:
+        msg = (
+            f"link_sources selects nothing under the project root "
+            f"{format_path_for_display(root)}; the links command refuses to run "
+            "without a selector"
+        )
+        raise ConfigError(msg)
     matched: set[str] = set()
     for entry in selectors:
         try:
@@ -741,7 +758,12 @@ def _require_regular_file(candidate: Path) -> None:
 
 
 def _scan(directory: Path) -> list[os.DirEntry[str]]:
-    """List one directory, turning a scan the filesystem refuses into a config error."""
+    """List one directory.
+
+    Raises:
+        ConfigError: If the filesystem refuses the scan. A selection-time refusal is a config
+            error, per the taxonomy this module's docstring records.
+    """
     try:
         with os.scandir(directory) as entries:
             return list(entries)
@@ -751,7 +773,12 @@ def _scan(directory: Path) -> list[os.DirEntry[str]]:
 
 
 def _is_directory(entry: os.DirEntry[str]) -> bool:
-    """Report whether an entry is a directory in its own right, never through a symlink."""
+    """Report whether an entry is a directory in its own right, never through a symlink.
+
+    Raises:
+        ConfigError: If the filesystem refuses the inspection. A selection-time refusal is a
+            config error, per the taxonomy this module's docstring records.
+    """
     try:
         return entry.is_dir(follow_symlinks=False)
     except OSError as exc:
@@ -802,7 +829,7 @@ def _recursive_frames(
         The frames to push, children first and the ``index + 1`` handoff last.
 
     Raises:
-        ConfigError: If the filesystem refuses to inspect an entry.
+        ConfigError: If the filesystem refuses to inspect an entry, a selection-time refusal.
     """
     frames: list[_Frame] = []
     for entry in entries:
@@ -850,7 +877,8 @@ def _walk(root: Path, segments: tuple[str, ...]) -> set[str]:
         Every project-relative spelling the selector matched, unordered.
 
     Raises:
-        ConfigError: If the filesystem refuses to scan a directory or inspect an entry.
+        ConfigError: If the filesystem refuses to scan a directory or inspect an entry, both
+            selection-time refusals.
     """
     found: set[str] = set()
     visited: set[tuple[str, int]] = set()

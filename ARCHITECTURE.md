@@ -2421,7 +2421,12 @@ an honest-looking green over the wrong files. `ignore_globs` is anchored to each
 applying it here would re-couple the corpora silently. A selector already says exactly what it
 wants. The key fails closed per selector: omitted, empty, or any selector matching nothing is
 exit 2, because the generated hook and workflow run the command unconditionally and a fallback
-would let a mandatory gate pass over zero files.
+would let a mandatory gate pass over zero files. Both halves of that refusal live in the engine:
+`select_link_sources` rejects an empty selector sequence as well as a selector matching nothing,
+so a caller that bypasses the command adapter cannot pass over zero files either. The adapter
+keeps its own precondition because only it holds `ProjectConfig.config_path` and can tell an
+absent `.doc-lattice.yml` from a config that declares no `link_sources`; the engine is handed a
+project root and can name neither. The engine guard is the backstop, not the diagnostic.
 
 **One heading inventory.** The script built its own link-target inventory, wider than the
 addressable subset because a link to a setext or nested heading resolves on GitHub. v7 shipped
