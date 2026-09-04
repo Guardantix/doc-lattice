@@ -27,6 +27,11 @@ jobs:
       - run: uv run --no-sync ty check src/ scripts/
       - run: uv run --no-sync python scripts/check_typing_boundaries.py src/
       - run: uv run --no-sync python scripts/check_version_sync.py
+      # The pre-merge counterpart of the release job's extraction, beside the guard whose top
+      # heading it reads the body of. Both legs, because the verdict does not vary by interpreter
+      # and this step annotates nothing, so a second run costs a log line rather than a duplicate
+      # review comment -- which is what puts `links` below on one leg and leaves this on two.
+      - run: uv run --no-sync python scripts/extract_release_notes.py --check
       # One leg only. Every other step here is worth repeating per interpreter, but `links`
       # reads Markdown and resolves headings against the engine's inventory, so its verdict does
       # not depend on which interpreter ran it -- and under `--format github` a second run does

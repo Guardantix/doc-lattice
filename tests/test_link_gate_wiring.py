@@ -3,7 +3,13 @@
 from pathlib import Path
 
 from cli.helpers import runner
-from workflow_helpers import _commands, _invocations, _load_workflow, _matrix_legs_selected
+from workflow_helpers import (
+    _commands,
+    _hook_invocations,
+    _invocations,
+    _load_workflow,
+    _matrix_legs_selected,
+)
 
 from doc_lattice.cli import app
 
@@ -22,18 +28,6 @@ def _links_step_indices(job: dict) -> list[int]:
         for index, step in enumerate(job["steps"])
         if any("links" in argv for argv in _invocations(_commands(step)))
     ]
-
-
-def _hook_invocations(hook_id: str) -> list[list[str]]:
-    config = _load_workflow(_ROOT / ".pre-commit-config.yaml")
-    hooks = [
-        hook for repo in config["repos"] for hook in repo["hooks"] if hook.get("id") == hook_id
-    ]
-    assert len(hooks) == 1, f"expected one {hook_id} hook, found {len(hooks)}"
-    hook = hooks[0]
-    assert hook["always_run"] is True
-    assert hook["pass_filenames"] is False
-    return _invocations(hook["entry"])
 
 
 def test_the_pre_commit_hook_runs_the_shipped_links_command():

@@ -61,12 +61,28 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   ARCHITECTURE.md's AD-47 owns the decision, including why the check rides the `tests` matrix
   rather than a job of its own or the release path.
 
+- An empty changelog section for the version under release now fails before merge.
+  `scripts/extract_release_notes.py` gains a `--check` mode, defaulting the version to the
+  declared package version, and the `code-quality` job and a new `check-changelog-body`
+  pre-commit hook run it beside the existing version-sync check. Until now the only reader of the
+  section body ran in the release job, so a heading promoted with nothing under it merged green
+  and stranded the version at the tag, and RELEASING.md's checklist carried a manual step saying
+  so. That step is gone. The release job's own steps are unchanged, and the re-arm token is
+  deliberately still checked only there; ARCHITECTURE.md's AD-48 owns both halves of that
+  decision.
+
 ### Fixed
 
 - `tests/test_check_migration_rule.py` no longer ships in the sdist. It reads
   `scripts/check_migration_rule.py`, which the sdist does not carry, so the shipped suite failed
   at collection for anyone who unpacked and ran it. It is the sixth such module and the first
   caught by a gate rather than by hand.
+
+- The version-sync guard and the release-notes extractor no longer disagree about where a
+  changelog heading is. The guard matched `^##\s*\[`, and `\s` matches a newline, so a bare `##`
+  line above a line starting `[X.Y.Z]` read there as that version's heading while the extractor,
+  which uses `^##[ \t]*\[`, saw no section at all. Such a bump merged green and failed at the
+  extraction with nothing to extract. Both now read a heading as one line.
 
 ### Migration
 

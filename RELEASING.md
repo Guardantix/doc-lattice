@@ -38,7 +38,9 @@ check its current state.
 1. Bump the version in `src/doc_lattice/__init__.py`, `pyproject.toml`, and every
    released-version pin in `README.md` and `MANAGED_CI.md`, and promote `## [Unreleased]` in `CHANGELOG.md` to
    `## [X.Y.Z] - YYYY-MM-DD` so it becomes the first versioned heading, which is the heading
-   the version-sync guard reads.
+   the version-sync guard reads. The body of that same section is checked in the same job and
+   the same hook: a heading promoted with nothing under it fails on the pull request, not in
+   the release job.
 
    Those five are the whole set you edit by hand. `uv.lock` records the same version for the
    local package and picks it up in step 2. `.gx-new-version` is not in either group: it records
@@ -46,9 +48,7 @@ check its current state.
    never bumped on release. `scripts/check_version_sync.py` does not read it, so nothing catches
    the mistake.
 2. Run `uv lock` and commit the refreshed `uv.lock`.
-3. Confirm the new changelog section is nonempty. The release job checks this too, before it
-   pushes the tag, but failing there costs a release run.
-4. Add a `### Migration` subsection to that changelog section when the release changes output an
+3. Add a `### Migration` subsection to that changelog section when the release changes output an
    adopter installs, in shape or behavior: the config `init` writes and the `.gitignore`,
    pre-commit, and workflow blocks it prints, or the trusted Linear workflow and `gh` procedure
    MANAGED_CI.md publishes. The trigger is a semantic change, not the version-pin substitution
@@ -63,8 +63,8 @@ check its current state.
    with `--update` in the same commit; the guard fails the release pull request until it does.
    The script's module docstring owns the mechanism, what the baseline's stamp closes, and the
    limits of both.
-5. Run the full verification suite, open a pull request, and wait for every CI check to pass.
-6. Merge the pull request to `main`.
+4. Run the full verification suite, open a pull request, and wait for every CI check to pass.
+5. Merge the pull request to `main`.
 
 The release pipeline then runs in this order:
 

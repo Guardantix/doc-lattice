@@ -37,7 +37,12 @@ from doc_lattice import __version__
 _REPO_ROOT = Path(__file__).resolve().parent.parent
 _MARKDOWN_SUFFIX = ".md"
 _CHANGELOG_NAME = "CHANGELOG.md"
-_VERSION_HEADING = re.compile(r"^##\s*\[(?P<version>\d+\.\d+\.\d+)\]", re.MULTILINE)
+# `[ \t]*` rather than `\s*`, matching `changelog_section` in `scripts/extract_release_notes.py`:
+# a heading is one line, and `\s` matches a newline, so a bare `##` above a line starting with
+# `[X.Y.Z]` would read here as that version's heading. That reader refuses the same shape, so the
+# two would disagree about one file -- this guard passing a bump whose section the release job
+# then cannot find, which is the strand the changelog-body check ahead of it exists to prevent.
+_VERSION_HEADING = re.compile(r"^##[ \t]*\[(?P<version>\d+\.\d+\.\d+)\]", re.MULTILINE)
 _PINNED_REF = re.compile(
     r"(?<![A-Za-z0-9._-])doc-lattice(?:==|@v)"
     r"(?P<version>\d+\.\d+\.\d+)(?![A-Za-z0-9._+-])"
