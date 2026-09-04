@@ -2613,3 +2613,78 @@ The two describing gates stay: the manifest still excludes by name and the coupl
 still holds the two lists together, because a red run here names the module that failed and
 those lists are how it is fixed. `tests/test_release_workflow.py` owns the step's contract, and
 excludes itself from the sdist, so it can read `ci.yml` without recreating the problem.
+
+### AD-48: The changelog body is gated before merge by the extractor's own check mode, and the re-arm token is not
+
+**Date:** 2026-09-03
+**Status:** Accepted
+**Context:** AD-46 made a pre-tag release failure cheap to recover from. It did not make one less
+likely, and two source defects still reached the release job that a pull request could have
+caught. `scripts/check_version_sync.py` compared the top `## [X.Y.Z]` heading against
+`__version__` and stopped there, never asserting the section had a body; the check that does,
+`scripts/extract_release_notes.py`, ran only in the release job, and RELEASING.md's checklist
+carried a manual step telling the operator to confirm the section was nonempty because failing
+there costs a release run. A malformed `.release-attempt`, or one naming a version other than the
+one being released, failed closed in the same job with nothing local having objected. Both are one
+shape: a pre-tag source check with no pre-merge counterpart.
+
+**Decision:** `scripts/extract_release_notes.py` gains a `--check` mode that defaults the version
+to `doc_lattice.__version__`, validates the section, and prints nothing. It runs in the
+`code-quality` job and in a pre-commit hook, beside the existing version-sync invocations. The
+re-arm token gains no local validation. RELEASING.md's manual step is removed rather than
+rewritten, because the gate it stood in for now exists.
+
+**Why beside version sync rather than inside it.** Version sync owns agreement among the release
+surfaces, which is why it reads the heading and not the body, and the `release` job re-asserts it
+before extracting the notes. Extending it would move which release step rejects an empty section
+from the extraction to that re-assertion, and what the release job checks is meant to be unchanged
+by this. The deciding reason is narrower than the placement, though: the section boundary has
+exactly one reader. `changelog_section` is what the release job extracts with and what
+`release_gate.py` refuses a re-arm on, and a second implementation beside version sync would be a
+third reading of the same lines, free to disagree with both. A check mode on the script that
+already owns the parser reuses its refusal, its message text, and its test module, and adds no
+import the release job does not already carry through `scripts/release_target.py`.
+
+**What the two readers already disagreed about.** Version sync matched the heading with `^##\s*\[`
+while the extractor deliberately uses `^##[ \t]*\[`, because `\s` matches a newline. A changelog
+whose top heading is a bare `##` line above a line starting `[X.Y.Z]` therefore passed version
+sync, which read the version across the newline, and returned no section at all from
+`changelog_section`, which does not join the two lines. That merged green and failed at the
+extraction with nothing to extract, which is precisely the strand this record exists to prevent,
+so the alignment lands with the gate rather than as separate tidying. It also fixes what the new
+mode must refuse: a missing section and an empty one both fail, not only an empty one.
+
+**Why the check is unconditional.** Between releases the first versioned heading is the last
+shipped release, whose section is nonempty by construction because the extractor refused to tag it
+otherwise. So the check is only ever discriminating at the bump pull request, needs no base-ref
+plumbing, and fits the `always_run` shape the version-sync hook already has. The consequence is
+for its tests rather than its wiring: a case that runs the entry point against this repository's
+own changelog always passes and proves nothing, so the assertions drive it over synthetic
+changelogs instead.
+
+**Why the re-arm token is not validated locally.** Not because it cannot be. The syntactic half is
+one line matching `_ATTEMPT_TOKEN` and needs no context at all, and the contextual half has a
+faithful pre-merge mirror: the `code-quality` job already fetches the base ref for
+`scripts/check_migration_rule.py`, and "the token changed relative to the base ref and the version
+did not" reproduces the gate's own rule at pull-request time. The reason is cost against
+frequency. Re-arm is reached only after a pre-tag failure, observed once, on 7.0.0; the format is
+the one line RELEASING.md spells out as a `printf`; AD-46 made that failure cost one merge; and a
+guard would be a third reader of the token rule, either importing a private regex from
+`release_gate.py` or duplicating it. A snapshot-only hook is worse than nothing on top of that,
+since a spent token naming a superseded version is deliberately valid resting state and the hook
+would reject it. Declining is recorded here rather than left undone, and this is the reason of
+record: not "no local context", which the base-ref fetch disproves.
+
+**What bounds it.** The gate reads the version under release from `__version__` rather than from
+the changelog, so it asks whether the version being shipped has notes and not whether the document
+leads with a nonempty section. It says nothing about the notes being *correct*, only present, and
+nothing about `## [Unreleased]` being empty at the bump commit, which no ordinary-path gate checks
+and which stays out of scope here because it is not a pre-tag check with a missing counterpart.
+The parser tests cannot tell whether the gate is wired, so the hook and the CI step are pinned
+directly, and so is the release job's continued use of the extraction rather than the check.
+
+**Consequences:** A heading-only changelog section fails on the pull request that promotes it, in
+the same job and hook that already fail a version mismatch, and RELEASING.md carries one fewer
+manual step. The release job's own steps are untouched, so the extraction remains the last word
+before the tag. The re-arm token stays a release-job concern; a typo in it is still discovered by
+a merge, which AD-46 made recoverable and this record declines to make less likely.

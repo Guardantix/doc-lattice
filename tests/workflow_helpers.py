@@ -255,3 +255,29 @@ def _invokes(argv: list[str], script: str) -> bool:
     if not argv or argv[0] not in {"uv", "uvx", "python", "python3"}:
         return False
     return script in argv[1:] and set(argv).isdisjoint({"-c", "-m"})
+
+
+def _hook_invocations(hook_id: str) -> list[list[str]]:
+    """Return the argument list of every command one local pre-commit hook runs.
+
+    The hook is required to be unique, ``always_run``, and to pass no filenames, because every
+    gate read through here catches a break the changed file does not carry: a rename in one
+    document invalidates a link written in another, and a version bump invalidates a rule about
+    a changelog section neither file mentions. A hook that ran only on the files it was handed
+    would go quiet in exactly those cases while still appearing wired.
+
+    Args:
+        hook_id: The ``id`` the hook is declared under in ``.pre-commit-config.yaml``.
+
+    Returns:
+        One argument list per command in the hook's ``entry``.
+    """
+    config = _load_workflow(_ROOT / ".pre-commit-config.yaml")
+    hooks = [
+        hook for repo in config["repos"] for hook in repo["hooks"] if hook.get("id") == hook_id
+    ]
+    assert len(hooks) == 1, f"expected one {hook_id} hook, found {len(hooks)}"
+    hook = hooks[0]
+    assert hook["always_run"] is True
+    assert hook["pass_filenames"] is False
+    return _invocations(hook["entry"])

@@ -399,3 +399,19 @@ def test_every_policy_document_is_a_maintained_document():
     names = set(_repository_documents())
     assert set(PIN_POLICY.manifest) <= names
     assert set(PIN_POLICY.historical) <= names
+
+
+def test_a_bare_heading_marker_does_not_bound_a_version_heading():
+    # A heading is one line, so `##` alone above a line starting with `[0.4.0]` is not the
+    # `## [0.4.0]` heading -- and `extract_release_notes.changelog_section`, which the release
+    # job extracts the notes with, reads it that way. Reading the two lines as one heading here
+    # is the disagreement this guard must not have with that reader: the bump would merge green
+    # and then fail in the release job with no section to extract, stranding the version. The
+    # top heading this changelog really declares is 0.3.0, so the guard reports the mismatch.
+    changelog = "# Changelog\n\n##\n[0.4.0] - 2026-07-01\n\n## [0.3.0] - 2026-06-28\n"
+
+    messages = _check({"README.md": _README}, changelog=changelog)
+
+    assert len(messages) == 1
+    assert "CHANGELOG.md" in messages[0]
+    assert "'0.3.0'" in messages[0]
