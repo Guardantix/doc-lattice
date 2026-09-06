@@ -17,11 +17,14 @@ for the shape it generated, never against a universal one-line diff, and syntax 
 is never required to be refused.
 """
 
+import functools
 import re
 from collections import Counter
+from collections.abc import Mapping
 from dataclasses import KW_ONLY, dataclass, replace
 from datetime import date
 from pathlib import Path
+from types import MappingProxyType
 from typing import Literal, get_args
 
 import pytest
@@ -385,9 +388,10 @@ class Document:
         footprint widens or narrows around the wrong lines, and ``flow_lines`` skips the entry
         outright rather than pinning it, because a span that is no longer one line long fails
         the test that decides a flow entry has a line to pin. ``_derives_from_document``
-        derives them for every shape sharing the plain block-mapping root, but the half-dozen
-        bespoke layouts beside it still write theirs by hand, one of them as a literal, so the
-        drift is a live possibility and it is the only silent-disable path the model has.
+        derives them for every shape whose entries hang under a block-mapping key as a block
+        sequence, but the four bespoke layouts beside it still write theirs by hand, three of
+        them as literals, so the drift is a live possibility and it is the only silent-disable
+        path the model has.
 
         What can be checked is containment: the text an entry is located by, and its flow
         source, have to occur inside the lines the span names. Not the line count, since a
@@ -1067,18 +1071,17 @@ def _block_sequence(
     return lines, spans
 
 
-def _member_lines(head: list[str], entries: tuple[Entry, ...], carrier: str, pad: int) -> list[str]:
-    """Render the ``derives_from`` member under ``head``, in the requested carrier shape.
+def _flow_member_lines(head: list[str], entries: tuple[Entry, ...]) -> list[str]:
+    """Render the ``derives_from`` member under ``head`` as a flow sequence on one line.
 
     The head is the key as its own lines, since layer 2 lets a root key be written either
-    plainly or as an explicit ``? key`` / ``: value`` pair, which spreads it over two. A flow
-    carrier is written onto the last of them, the line carrying the ``:`` its value follows.
+    plainly or as an explicit ``? key`` / ``: value`` pair, which spreads it over two. The flow
+    sequence is written onto the last of them, the line carrying the ``:`` its value follows.
+    A block carrier needs no counterpart here: ``_derives_from_document`` assembles that shape
+    along with the spans it implies.
     """
-    if carrier == "flow":
-        inlines = FLOW_SEPARATOR.join(entry.inline or "" for entry in entries)
-        return [*head[:-1], f"{head[-1]} [{inlines}]"]
-    body, _ = _block_sequence(entries, pad)
-    return [*head, *body]
+    inlines = FLOW_SEPARATOR.join(entry.inline or "" for entry in entries)
+    return [*head[:-1], f"{head[-1]} [{inlines}]"]
 
 
 def _derives_from_document(
@@ -1086,37 +1089,40 @@ def _derives_from_document(
     *,
     pad: int = 2,
     root_lines: tuple[str, ...] = ("id: doc",),
-    root: dict[str, object] | None = None,
-    key_order: tuple[str, ...] = ("id", "derives_from"),
+    key_lines: tuple[str, ...] = ("derives_from:",),
+    root: Mapping[str, object] = MappingProxyType({"id": "doc"}),
 ) -> Document:
-    """Wrap entries in a block sequence under a root mapping's plain ``derives_from`` key.
+    """Wrap entries in a block sequence under a root mapping's ``derives_from`` key.
 
-    Every shape whose root is a block mapping written down to a plain ``derives_from:`` line is
-    assembled here rather than spelling its own lines and spans out. The spans follow from the
-    rendered body, so the drift ``Document.__post_init__`` guards against cannot start here at
-    all, and the shapes that still write theirs by hand are the ones whose layout this cannot
-    express.
+    Every shape whose root is a block mapping carrying its entries as an indented block
+    sequence is assembled here rather than spelling its own lines and spans out. The spans
+    follow from the rendered body, so the drift ``Document.__post_init__`` guards against
+    cannot start here at all, and the shapes that still write theirs by hand are the ones whose
+    layout this cannot express.
 
     Args:
         entries: The entries the sequence carries, in order.
         pad: How far the sequence is indented under its key, which each caller keeps at
             whatever its own source was written with.
         root_lines: The root members written above the ``derives_from`` key, as source.
-        root: The mapping the root loads as, or None for the plain ``id`` on its own.
-        key_order: The root key order the reload has to show.
+        key_lines: The key the sequence hangs under, as source, which is a plain
+            ``derives_from:`` line unless the caller spells the key some other way.
+        root: The mapping the root loads as, written in source order, since the key order the
+            reload has to show is derived from it with ``derives_from`` appended.
 
     Returns:
         The assembled document, under the flat LF envelope. Its comments are read off the
-        entries, since no root line any caller writes carries one.
+        entries, so a caller whose root lines carry one of their own adds it to the notes
+        afterwards rather than passing it in.
     """
     body, spans = _block_sequence(entries, pad)
-    offset = len(root_lines) + 1
+    offset = len(root_lines) + len(key_lines)
     return Document(
-        (*root_lines, "derives_from:", *body),
+        (*root_lines, *key_lines, *body),
         entries,
         tuple((start + offset, stop + offset) for start, stop in spans),
-        {"id": "doc"} if root is None else root,
-        key_order,
+        dict(root),
+        (*root, "derives_from"),
         FLAT_ENVELOPE,
         tuple(note for entry in entries for note in entry.notes),
     )
@@ -1838,39 +1844,40 @@ def block_root_documents(draw) -> Document:
     members = _root_members(draw, count)
     comment = draw(st.sampled_from(("", "# root note")))
 
-    lines: list[str] = []
+    root_lines: list[str] = []
     if comment:
-        lines.append(comment)
-    lines.extend(id_lines)
+        root_lines.append(comment)
+    root_lines.extend(id_lines)
     for _, extra_lines, _ in members:
-        lines.extend(extra_lines)
-    body, spans = _block_sequence(entries, pad)
-    offset = len(lines) + len(key_lines)
+        root_lines.extend(extra_lines)
+    root: dict[str, object] = {"id": "doc"}
+    for key, _, value in members:
+        root[key] = value
+
     # A flow carrier shares its line with the entries it holds, so the whole line is inside the
     # allowed footprint and the flow-line assertion is what pins it. A block carrier sits on a
     # line of its own outside that footprint, which the footprint assertion already pins.
     if carrier == "flow":
-        lines.extend(_member_lines(key_lines, entries, "flow", pad))
-        spans = [(offset - 1, offset)] * count
+        offset = len(root_lines) + len(key_lines)
+        assembled = Document(
+            (*root_lines, *_flow_member_lines(key_lines, entries)),
+            entries,
+            ((offset - 1, offset),) * count,
+            root,
+            ("id", *(key for key, _, _ in members), "derives_from"),
+            FLAT_ENVELOPE,
+            tuple(note for entry in entries for note in entry.notes),
+        )
     else:
-        lines.extend(key_lines)
-        lines.extend(body)
-        spans = [(start + offset, stop + offset) for start, stop in spans]
-
-    root: dict[str, object] = {"id": "doc"}
-    for key, _, value in members:
-        root[key] = value
-    order = ("id", *(key for key, _, _ in members), "derives_from")
-    notes = [comment] if comment else []
-    for entry in entries:
-        notes.extend(entry.notes)
-    assembled = Document(
-        tuple(lines), entries, tuple(spans), root, order, FLAT_ENVELOPE, tuple(notes)
-    )
+        assembled = _derives_from_document(
+            entries, pad=pad, root_lines=tuple(root_lines), key_lines=tuple(key_lines), root=root
+        )
+    if comment:
+        assembled = replace(assembled, notes=(comment, *assembled.notes))
     return _finish(draw, assembled)
 
 
-def _finish(draw, document: Document, *, endings=("\n",), directives=(None,)) -> Document:
+def _finish(draw, document: Document, **envelope_options) -> Document:
     """Attach a drawn envelope to an assembled document, shifting spans past any directive.
 
     The envelope choices are forwarded to ``envelopes`` rather than drawn by the caller, so the
@@ -1881,13 +1888,13 @@ def _finish(draw, document: Document, *, endings=("\n",), directives=(None,)) ->
     Args:
         draw: The Hypothesis draw function.
         document: The assembled document, still carrying the flat envelope.
-        endings: The document line endings the envelope may be drawn in.
-        directives: The ``%YAML`` versions the block may declare, None for none.
+        envelope_options: ``envelopes``' own keyword arguments, passed straight through, so the
+            defaults stay declared there rather than restated here.
 
     Returns:
         The document under its drawn envelope, its spans shifted past any directive.
     """
-    envelope = draw(envelopes(endings=endings, directives=directives))
+    envelope = draw(envelopes(**envelope_options))
     lines, spans = document.meta_lines, document.spans
     if envelope.directive is not None:
         lines = (f"%YAML {envelope.directive}", "--- !!map", *lines)
@@ -1918,16 +1925,22 @@ def ordered_map_root_documents(draw) -> Document:
 
 
 def _ordered_map_block(draw, entries: tuple[Entry, ...]) -> Document:
-    """Assemble an ``!!omap`` root written in block style around the given entries."""
+    """Assemble an ``!!omap`` root written in block style around the given entries.
+
+    The root and its ``derives_from`` key are sequence items rather than plain mapping lines,
+    which the assembler writes as source like any others. The entries sit two columns further
+    right than their drawn padding, since the sequence they hang under is itself an item of the
+    ordered map.
+    """
     pad = draw(st.sampled_from((0, 2)))
-    body, spans = _block_sequence(entries, pad)
-    lines = ["!!omap", "- id: doc", "- derives_from:", *_indent(tuple(body), 2)]
-    offset = 3
-    spans = tuple((start + offset, stop + offset) for start, stop in spans)
-    notes = tuple(note for entry in entries for note in entry.notes)
-    order = ("id", "derives_from")
     return _finish(
-        draw, Document(tuple(lines), entries, spans, {"id": "doc"}, order, FLAT_ENVELOPE, notes)
+        draw,
+        _derives_from_document(
+            entries,
+            pad=pad + 2,
+            root_lines=("!!omap", "- id: doc"),
+            key_lines=("- derives_from:",),
+        ),
     )
 
 
@@ -1940,8 +1953,7 @@ def alias_and_merge_documents(draw) -> Document:
     boundary now pins the pure parser (AD-33), so the shape is strictly loadable on every leg
     and belongs here unconditionally.
     """
-    shape = draw(st.sampled_from(tuple(_ALIAS_BUILDERS)))
-    return _ALIAS_BUILDERS[shape](draw)
+    return draw(st.sampled_from(_ALIAS_BUILDERS))(draw)
 
 
 def _entry(
@@ -2142,9 +2154,15 @@ def _relocating_null_document(draw) -> Document:
 MERGE_KEYS = ("<<", "!!merge inherited")
 
 
-def _merge_document(draw) -> Document:
-    """A ``derives_from`` supplied by a merge key, in the plain and the tagged spelling."""
-    key = draw(st.sampled_from(MERGE_KEYS))
+def _merge_root(key: str) -> Document:
+    """A ``derives_from`` supplied by a merge key, in the plain or the tagged spelling.
+
+    Args:
+        key: The merge-key spelling the root is written with.
+
+    Returns:
+        The single-entry document, under the flat LF envelope.
+    """
     inner = "ref: up-0#s0, seen: old0000"
     inline = f"{{{inner}}}"
     lines = ["id: doc", f"{key}: {{derives_from: [{inline}]}}"]
@@ -2163,8 +2181,12 @@ def _merge_document(draw) -> Document:
         appends=False,
         pin=_flow_pin(inline, "none"),
     )
-    assembled = Document(tuple(lines), (merged,), ((1, 2),), {"id": "doc"}, None, FLAT_ENVELOPE, ())
-    return _finish(draw, assembled)
+    return Document(tuple(lines), (merged,), ((1, 2),), {"id": "doc"}, None, FLAT_ENVELOPE, ())
+
+
+def _merge_document(draw) -> Document:
+    """Draw one merge-key spelling and envelope the root it supplies."""
+    return _finish(draw, _merge_root(draw(st.sampled_from(MERGE_KEYS))))
 
 
 # One row per way an entry's members can be split between a merge key and the entry itself,
@@ -2174,7 +2196,8 @@ def _merge_document(draw) -> Document:
 # takes a line of its own past the entry. A merged `seen` is written to rather than edited in
 # place: the rewriter gives the entry a `seen` of its own that shadows the merge, which leaves
 # the merge source alone and so leaves every other entry reading it alone too.
-ENTRY_MERGE_SHAPES = (
+EntryMergeShape = tuple[str, tuple[str, ...], str | None, tuple[int, ...], bool]
+ENTRY_MERGE_SHAPES: tuple[EntryMergeShape, ...] = (
     ("own-seen", ("- {key}: {{ref: {ref}}}", "  seen: {old}"), "old0000", (1,), False),
     ("no-seen", ("- {key}: {{ref: {ref}}}",), None, (), True),
     ("merged-seen", ("- {key}: {{seen: {old}}}", "  ref: {ref}"), "old0000", (), True),
@@ -2189,7 +2212,7 @@ ENTRY_MERGE_SHAPES = (
 )
 
 
-def _entry_merge_document(draw) -> Document:
+def _entry_merge_pair(key: str, row: EntryMergeShape) -> Document:
     """An entry whose members arrive through a merge key, in either merge spelling.
 
     The merge line is the entry's own source and no part of what an update rewrites: the value
@@ -2198,13 +2221,20 @@ def _entry_merge_document(draw) -> Document:
     footprint is modelled that way rather than left to the whole-span allowance, which would
     let a rewrite restyle the merge key beside the edit with nothing here to see it.
 
-    Which members the merge supplies is drawn rather than fixed, since layer 2 declares both of
-    them at that row and they reach planning differently: an entry spelling its own ``seen`` is
-    edited where it stands, while one reading a merged ``seen`` is written a member that shadows
-    it. Generating only the first would leave the second's planning path unreached from here.
+    Which members the merge supplies is a dimension of its own rather than fixed, since layer 2
+    declares both of them at that row and they reach planning differently: an entry spelling
+    its own ``seen`` is edited where it stands, while one reading a merged ``seen`` is written a
+    member that shadows it. Covering only the first would leave the second's planning path
+    unreached.
+
+    Args:
+        key: The merge-key spelling the entry is written with.
+        row: The ``ENTRY_MERGE_SHAPES`` row saying how the members are split.
+
+    Returns:
+        The single-entry document, under the flat LF envelope.
     """
-    key = draw(st.sampled_from(MERGE_KEYS))
-    name, templates, seen, edits, appends = draw(st.sampled_from(ENTRY_MERGE_SHAPES))
+    name, templates, seen, edits, appends = row
     fields = _fields(0)
     entry_lines = tuple(line.format(key=key, **fields) for line in templates)
     entry = Entry(
@@ -2223,19 +2253,35 @@ def _entry_merge_document(draw) -> Document:
         site=fields["head"],
         written_lines=1,
     )
-    return _finish(draw, _derives_from_document((entry,)))
+    return _derives_from_document((entry,))
 
 
-def _inherited_seen_document(draw) -> Document:
+def _entry_merge_document(draw) -> Document:
+    """Draw one merge-key spelling and one member split, and envelope the entry they build."""
+    return _finish(
+        draw,
+        _entry_merge_pair(
+            draw(st.sampled_from(MERGE_KEYS)), draw(st.sampled_from(ENTRY_MERGE_SHAPES))
+        ),
+    )
+
+
+def _inherited_seen_pair(key: str) -> Document:
     """Two entries where the second reads the first's ``seen`` through a merge key.
 
     This is the one shape where writing a hash at one entry changes another, since the loader
     flattens a merge into a copy rather than sharing the object an alias would. Updating only
     the source therefore has to leave the second entry alone in source and still change what it
     loads as, while an update naming the second writes it a ``seen`` that shadows the merged one
-    from then on. Both are drawn, since ``_updates`` decides whether the second is named.
+    from then on. Both are reached, since ``test_alias_and_merge_shapes_round_trip`` draws the
+    entry it targets and whether to target every entry instead of that one.
+
+    Args:
+        key: The merge-key spelling the second entry reads the first through.
+
+    Returns:
+        The two-entry document, under the flat LF envelope.
     """
-    key = draw(st.sampled_from(MERGE_KEYS))
     source = Entry(
         "merge-source",
         ("- &source", "  ref: up-0#s0", "  seen: old0000"),
@@ -2269,26 +2315,40 @@ def _inherited_seen_document(draw) -> Document:
         written_lines=1,
         inherits="up-0#s0",
     )
-    return _finish(draw, _derives_from_document((source, inheritor)))
+    return _derives_from_document((source, inheritor))
 
 
-def _alias_spelled_key_document(draw) -> Document:
+def _inherited_seen_document(draw) -> Document:
+    """Draw one merge-key spelling and envelope the inheriting pair it builds."""
+    return _finish(draw, _inherited_seen_pair(draw(st.sampled_from(MERGE_KEYS))))
+
+
+# The four positions AD-31 declares an alias-spelled mapping key at. A tuple rather than the
+# frozenset the vocabularies above are written as, since nothing compares this to a set of used
+# values and both a Hypothesis ``sampled_from`` and a parametrized case want a sequence.
+AliasKeySite = Literal["entry-key", "ref-key", "root-key", "derives-key"]
+ALIAS_KEY_SITES: tuple[AliasKeySite, ...] = get_args(AliasKeySite)
+
+
+def _alias_spelled_key_pair(site: AliasKeySite, explicit: bool) -> Document:
     """A mapping key spelled through an alias, at every position AD-31 declares one at.
 
     The four positions are the entry's ``seen`` key, the entry's ``ref`` key, the root ``id``
-    key and the root ``derives_from`` key, each drawn in both spellings the subset admits: the
-    explicit ``? *name`` and ``: value`` pair, and ``*name : value`` with the space before the
-    colon. The bare ``*name:`` form does not scan and so is not generated.
-
-    Which of the four a document uses is drawn here rather than carried as four rows of the
-    shape table above, since the position is what this builder branches on and nothing outside
-    it reads the choice.
+    key and the root ``derives_from`` key, each written in either spelling the subset admits:
+    the explicit ``? *name`` and ``: value`` pair, and ``*name : value`` with the space before
+    the colon. The bare ``*name:`` form does not scan and so is not generated.
 
     The anchor a key alias reads has to be defined on a value ``NodeMeta`` allows, which is
     what keeps this spelling inside the strict column rather than the reread-only one.
+
+    Args:
+        site: Which of the four positions carries the alias-spelled key.
+        explicit: Whether that key is written as an explicit ``?``/``:`` pair.
+
+    Returns:
+        The single-entry document, under the flat LF envelope.
     """
-    site = draw(st.sampled_from(("entry-key", "ref-key", "root-key", "derives-key")))
-    explicit = draw(st.booleans())
+    key_lines = ("derives_from:",)
     if site == "entry-key":
         member = ["? *keyname", ": old0000"] if explicit else ["*keyname : old0000"]
         entry_lines = ("- ref: up-0#s0", *(f"  {line}" for line in member))
@@ -2312,12 +2372,8 @@ def _alias_spelled_key_document(draw) -> Document:
             # written on two lines afterwards the way any explicit pair is.
             written_lines=2 if explicit else 1,
         )
-        assembled = _derives_from_document(
-            (entry,),
-            root_lines=("id: doc", "title: &keyname seen"),
-            root={"id": "doc", "title": "seen"},
-            key_order=("id", "title", "derives_from"),
-        )
+        root_lines = ("id: doc", "title: &keyname seen")
+        root: dict[str, object] = {"id": "doc", "title": "seen"}
     elif site == "ref-key":
         entry_lines = (
             ("- ? *keyname", "  : up-0#s0", "  seen: old0000")
@@ -2341,53 +2397,56 @@ def _alias_spelled_key_document(draw) -> Document:
             site="up-0#s0",
             written_lines=1,
         )
-        assembled = _derives_from_document(
-            (entry,),
-            root_lines=("id: doc", "title: &keyname ref"),
-            root={"id": "doc", "title": "ref"},
-            key_order=("id", "title", "derives_from"),
-        )
+        root_lines = ("id: doc", "title: &keyname ref")
+        root = {"id": "doc", "title": "ref"}
     elif site == "root-key":
         entry = _entry(0, ("- ref: {ref}", "  seen: {old}"), "old0000", None)
         head = ("? *idkey", ": doc") if explicit else ("*idkey : doc",)
-        assembled = _derives_from_document(
-            (entry,),
-            root_lines=("title: &idkey id", *head),
-            root={"id": "doc", "title": "id"},
-            key_order=("title", "id", "derives_from"),
-        )
+        root_lines = ("title: &idkey id", *head)
+        root = {"title": "id", "id": "doc"}
     else:
         entry = _entry(0, ("- ref: {ref}", "  seen: {old}"), "old0000", None)
         # The block sequence hangs under the aliased key, so the entry is indented beneath it
-        # rather than sitting at the root column the plain spelling puts it at. That key is not
-        # the plain ``derives_from:`` line the assembler writes, so this branch spells its own.
+        # rather than sitting at the root column the plain spelling puts it at.
         head = ("? *dfkey", ":") if explicit else ("*dfkey :",)
-        lines = ("id: doc", "title: &dfkey derives_from", *head, *_indent(entry.lines, 2))
-        assembled = Document(
-            lines,
-            (entry,),
-            ((2 + len(head), len(lines)),),
-            {"id": "doc", "title": "derives_from"},
-            ("id", "title", "derives_from"),
-            FLAT_ENVELOPE,
-            (),
-        )
-    return _finish(draw, assembled)
+        root_lines = ("id: doc", "title: &dfkey derives_from")
+        key_lines = head
+        root = {"id": "doc", "title": "derives_from"}
+    return _derives_from_document((entry,), root_lines=root_lines, key_lines=key_lines, root=root)
 
 
-# One row per shape rather than one per spelling: the merge key and the aliased key's position
-# are dimensions their own builders draw, so adding a spelling there reaches this pool without a
-# row of its own. Built once at module level, since nothing in it varies from example to example.
-_ALIAS_BUILDERS = {
-    "aliased-entry": _aliased_entry_document,
-    "relocating-anchor": _relocating_anchor_document,
-    "relocating-null": _relocating_null_document,
-    "merge": _merge_document,
-    "entry-merge": _entry_merge_document,
-    "entry-inherits-seen": _inherited_seen_document,
-    "alias-spelled-key": _alias_spelled_key_document,
-    "reused-anchor": lambda draw: _finish(draw, _reused_anchor_pair()),
-}
+def _alias_spelled_key_document(draw) -> Document:
+    """Draw one alias-spelled key position and spelling, and envelope the pair it builds.
+
+    The position is drawn here rather than carried as four rows of the shape table below,
+    since it is what the builder branches on and nothing outside it reads the choice.
+    """
+    return _finish(
+        draw,
+        _alias_spelled_key_pair(draw(st.sampled_from(ALIAS_KEY_SITES)), draw(st.booleans())),
+    )
+
+
+def _reused_anchor_document(draw) -> Document:
+    """A reused anchor name under a drawn envelope."""
+    return _finish(draw, _reused_anchor_pair())
+
+
+# One builder per shape rather than one per spelling: the merge key and the aliased key's
+# position are dimensions their own builders draw, so adding a spelling there reaches this pool
+# without an entry of its own. The exhaustive tests below cover every cell of those dimensions
+# outright, so how often this pool happens to draw a given one no longer decides whether it is
+# reached. Built once at module level, since nothing in it varies from example to example.
+_ALIAS_BUILDERS = (
+    _aliased_entry_document,
+    _relocating_anchor_document,
+    _relocating_null_document,
+    _merge_document,
+    _entry_merge_document,
+    _inherited_seen_document,
+    _alias_spelled_key_document,
+    _reused_anchor_document,
+)
 
 
 # --------------------------------------------------------------------------------------------
@@ -2506,6 +2565,51 @@ def test_every_whole_entry_spelling_round_trips(form: WholeForm) -> None:
     """Cover every entry spelling that is written as one indivisible shape."""
     entry = _whole_entry(0, form)
     _assert_supported_round_trip(_derives_from_document((entry,)), {entry.ref: "new0000beef"})
+
+
+@pytest.mark.parametrize("explicit", [True, False], ids=("explicit", "inline"))
+@pytest.mark.parametrize("site", ALIAS_KEY_SITES)
+def test_every_alias_spelled_key_site_round_trips(site: AliasKeySite, explicit: bool) -> None:
+    """Cover every alias-spelled key position in both spellings, exhaustively.
+
+    The alias pool draws one cell per example, which sampling alone cannot promise reaches all
+    eight.
+    """
+    document = _alias_spelled_key_pair(site, explicit)
+    _assert_supported_round_trip(document, {"up-0#s0": "new0000beef"})
+
+
+@pytest.mark.parametrize("key", MERGE_KEYS)
+def test_every_merge_key_spelling_round_trips(key: str) -> None:
+    """Cover both merge-key spellings at a merged ``derives_from``, which sampling cannot."""
+    _assert_supported_round_trip(_merge_root(key), {"up-0#s0": "new0000beef"})
+
+
+@pytest.mark.parametrize("row", ENTRY_MERGE_SHAPES, ids=lambda row: row[0])
+@pytest.mark.parametrize("key", MERGE_KEYS)
+def test_every_entry_merge_shape_round_trips(key: str, row: EntryMergeShape) -> None:
+    """Cover every split of an entry's members across a merge key, in both spellings."""
+    _assert_supported_round_trip(_entry_merge_pair(key, row), {"up-0#s0": "new0000beef"})
+
+
+@pytest.mark.parametrize(
+    "updates",
+    [
+        {"up-0#s0": "new0000beef"},
+        {"up-1#s1": "new0001beef"},
+        {"up-0#s0": "new0000beef", "up-1#s1": "new0001beef"},
+    ],
+    ids=("source", "inheritor", "both"),
+)
+@pytest.mark.parametrize("key", MERGE_KEYS)
+def test_every_inherited_seen_update_round_trips(key: str, updates: dict[str, str]) -> None:
+    """Cover each way an update can name an inheriting pair, which sampling cannot promise.
+
+    Updating the source alone is what has to change the inheritor with nothing written at it,
+    updating the inheritor alone is what writes it a shadowing member, and updating both is the
+    pass where the two happen at once.
+    """
+    _assert_supported_round_trip(_inherited_seen_pair(key), updates)
 
 
 def _anchor_definitions(lines: tuple[str, ...]) -> list[str]:
@@ -2859,8 +2963,10 @@ def test_a_document_with_no_opening_fence_produces_no_rewrite(text: str) -> None
 # --------------------------------------------------------------------------------------------
 
 
-# The three outcomes the safe-outcome union admits, as the type a row is recorded with, so a
-# row cannot be recorded with an arm the union never named.
+# The three outcomes the safe-outcome union admits, as the type a row is recorded with. The
+# ``Literal`` lets ty reject an arm outside the union, which the pre-commit hook runs over this
+# file; CI type-checks the sources rather than the tests, so what holds the arm at runtime is
+# the recovery test's own ``observed == shape.arm`` comparison.
 Arm = Literal["rewrite", "refusal", "no-op"]
 
 
@@ -2889,8 +2995,12 @@ class RecoveryShape:
     arm: Arm
 
 
+@functools.cache
 def _recovery_shapes() -> tuple[RecoveryShape, ...]:
     """Build the reread-only shapes strict validation rejects, each with its own model.
+
+    Built once on first use and cached rather than at import, so a span drift in a hand-spanned
+    recovery builder fails the recovery tests rather than module collection.
 
     Every shape here is reread-only on every leg. A reused anchor name used to join this pool
     wherever the optional accelerator made the strict boundary refuse it; the strict boundary
@@ -2956,7 +3066,6 @@ def _recovery_extra_root_key() -> Document:
         (entry,),
         root_lines=("id: doc", "extra: kept"),
         root={"id": "doc", "extra": "kept"},
-        key_order=("id", "extra", "derives_from"),
     )
 
 
@@ -3115,7 +3224,6 @@ def _recovery_aliased_entry() -> Document:
         (entry,),
         root_lines=("id: doc", "shared: &edge {ref: up-0#s0, seen: old0000}"),
         root={"id": "doc", "shared": {"ref": "up-0#s0", "seen": "old0000"}},
-        key_order=("id", "shared", "derives_from"),
     )
 
 
@@ -3186,11 +3294,6 @@ def _recovery_null_member(written: str) -> Document:
     return _derives_from_document((entry,))
 
 
-# Built once, the way ``COMMENTED_PAIRS`` is, rather than per example. It sits here rather than
-# beside ``_recovery_shapes`` because the models it collects are written below that function.
-RECOVERY_SHAPES = _recovery_shapes()
-
-
 def _assert_not_strictly_tracked(text: str) -> None:
     """Assert the strict path rejects this shape, so it really is the reread-only column."""
     parts = split_frontmatter_parts(normalize_newlines(text), DOC)
@@ -3250,7 +3353,7 @@ def test_defensive_recovery_stays_inside_the_safe_outcome_union(data) -> None:
     admits, so without the record the strongest thing this file asserts could stop being
     asserted with nothing to show for it.
     """
-    shape = data.draw(st.sampled_from(RECOVERY_SHAPES))
+    shape = data.draw(st.sampled_from(_recovery_shapes()))
     updates = {shape.document.entries[0].ref: "new0000beef"}
     _assert_not_strictly_tracked(shape.document.render())
 
@@ -3264,15 +3367,14 @@ def test_defensive_recovery_stays_inside_the_safe_outcome_union(data) -> None:
     _CLAIMS["recovery-arm"] += 1
 
 
-def test_the_recovery_table_records_a_known_arm_for_every_shape() -> None:
-    """Keep the arm a real claim, with no shape left unrecorded and none answering for another.
+def test_the_recovery_pool_is_non_empty_and_its_names_are_distinct() -> None:
+    """Keep the arm a real claim: a pool with rows in it, and no row answering for another.
 
-    An arm outside the union is unrepresentable, since ``RecoveryShape.arm`` is typed as
-    ``Arm``. What is left to hold is the pool itself: that it is not empty, and that no two
-    rows share the name a failure would report them by.
+    A shared name would report one row's regression under another row's heading.
     """
-    assert RECOVERY_SHAPES, "the recovery pool must not be empty"
-    names = [shape.name for shape in RECOVERY_SHAPES]
+    shapes = _recovery_shapes()
+    assert shapes, "the recovery pool must not be empty"
+    names = [shape.name for shape in shapes]
     assert len(names) == len(set(names)), f"two recovery shapes share a name: {names}"
 
 
