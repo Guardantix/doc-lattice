@@ -457,10 +457,12 @@ grammar and are matched against the project-relative spellings `link_sources` al
 so a compatibility entry can add no file to the gate, and linking *to* a legacy document grants
 the source that linked nothing. It only ever adds accepted destinations, so a fragment an
 ordinary GitHub id already resolves keeps resolving for every source. A marker counts only where
-its heading is one a render actually shows: one written inside an HTML comment or a raw HTML
-block is not addressable and still fails. Matching is exact and case-sensitive against the
-decoded fragment, so `## Notes {#MixedCase}` answers to `#MixedCase` and to `#%4DixedCase`, and
-to neither `#mixedcase` nor `#%254DixedCase`.
+its heading is both rendered and addressable, which is narrower than either half alone: one
+written inside an HTML comment or a raw HTML block is shown by no render, and one carried by a
+setext, indented, quoted, or list-nested heading is rendered but sits outside the addressable
+subset the [frontmatter reference](#frontmatter-reference) defines. Neither resolves. Matching is
+exact and case-sensitive against the decoded fragment, so `## Notes {#MixedCase}` answers to
+`#MixedCase` and to `#%4DixedCase`, and to neither `#mixedcase` nor `#%254DixedCase`.
 
 It fails closed the way `link_sources` does, and every refusal lands before any document is
 parsed: the key written as null or as an empty list is a config error, as is an entry the grammar
@@ -831,12 +833,12 @@ names resolve a fragment through an explicit `{#marker}` as well. It is omitted 
 no file to the gate, and fails closed on a declaration that reaches nothing; the
 [`links`](#links) section owns what it means and what it does not claim.
 
-The key fails closed. It has no default and is not derived from `docs_roots`; `ignore_globs` does
-not apply to it, since that key is anchored to each docs root and a selector already says what it
-wants. With the key omitted or empty, or with any selector that matches no file, `links` exits 2
-rather than reporting a clean run over nothing. The generated config writes a selector per docs
-root, `docs/**/*.md` for the default, which therefore fails closed until that directory holds at
-least one Markdown file.
+`link_sources` fails closed. It has no default and is not derived from `docs_roots`;
+`ignore_globs` does not apply to it, since that key is anchored to each docs root and a selector
+already says what it wants. With that key omitted or empty, or with any selector that matches no
+file, `links` exits 2 rather than reporting a clean run over nothing. The generated config writes
+a selector per docs root, `docs/**/*.md` for the default, which therefore fails closed until that
+directory holds at least one Markdown file.
 
 For 2.0, `binding_layers` is unsupported. Delete it from 1.x configs; there is no replacement.
 `lint`'s fixed binding > derived > exploratory authority ladder is unchanged.
@@ -881,7 +883,7 @@ your documents, then run `doc-lattice reconcile --all` once before
 [enabling the gates](#enabling-the-gates):
 
 ```bash
-uvx --python 3.13 --from doc-lattice==7.1.0 doc-lattice reconcile --all
+uvx --python 3.13 --from doc-lattice==7.2.0 doc-lattice reconcile --all
 ```
 
 Commit the annotated input state and start from an otherwise clean working tree before running
@@ -913,7 +915,7 @@ Bootstrap config and the drift and authority-ladder gates for a repo whose docs 
 track:
 
 ```bash
-uvx --python 3.13 --from doc-lattice==7.1.0 doc-lattice init
+uvx --python 3.13 --from doc-lattice==7.2.0 doc-lattice init
 ```
 
 This writes `.doc-lattice.yml` (only if absent) and always prints the reconcile-artifact
@@ -1053,7 +1055,7 @@ runs on every commit and reports itself as passed or failed either way. The `che
 entries carry `files: \.md$`, so a commit staging no Markdown file reports those two as
 `Skipped`; that is still a working gate, and the `links` line beside them is the proof.
 
-The hook entries run `uvx --python 3.13 --from doc-lattice==7.1.0`, so the pinned release has to
+The hook entries run `uvx --python 3.13 --from doc-lattice==7.2.0`, so the pinned release has to
 resolve on every gated commit, out of uv's cache once it is warm and from PyPI when it is not.
 These gates are offline in the sense that matters for secrets, meaning they never require or
 receive `LINEAR_API_KEY`. That is not the same as running without a network.

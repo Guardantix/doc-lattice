@@ -6,6 +6,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [7.2.0] - 2026-09-08
+
 ### Added
 
 - `doc-lattice links` can now validate explicit `{#marker}` references from sources you name,
