@@ -484,8 +484,9 @@ Human findings go to stderr, one `'path':line: message` per finding in document 
 line for a finding about the document itself, and nothing is printed on success. `--format
 github` writes one annotation per finding to stdout instead, at the finding's line, so a dead link
 shows on the pull-request diff. The generated workflow runs that form. Exit 1 on any finding, 2
-when `link_sources` is missing or empty, a selector matches nothing, or the filesystem refuses the
-gate, and 0 otherwise.
+when `link_sources` is missing or empty, a selector matches nothing, a `legacy_marker_sources`
+declaration is empty or null or reaches no selected source, or the filesystem refuses the gate,
+and 0 otherwise.
 
 ### `reconcile`
 

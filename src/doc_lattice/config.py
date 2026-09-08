@@ -1,5 +1,5 @@
 """Load and validate .doc-lattice.yml, with project-root containment of docs_roots and
-lexical validation of link_sources."""
+lexical validation of the link source keys."""
 
 import re
 from collections.abc import Mapping
@@ -125,16 +125,18 @@ class Config(BaseModel):
 
     @field_validator("legacy_marker_sources")
     @classmethod
-    def _validate_legacy_marker_sources(cls, value: list[str] | None) -> list[str] | None:
+    def _validate_legacy_marker_sources(cls, value: list[str]) -> list[str]:
         """Reject a declared-but-empty compatibility list, and any entry the grammar cannot read.
+
+        Never reached with ``None``: an omitted key skips field validation entirely, and a key
+        written as null is refused by the before-validator above, so the only value that arrives
+        here is a list the author wrote.
 
         Lexical only, exactly as ``link_sources`` is: whether an entry matches a selected source
         is a question about the selection, which this boundary has not run and cannot see. The
         links command asks it before any document is parsed, so an entry matching nothing is
         still a config error rather than a silently ineffective policy.
         """
-        if value is None:
-            return None
         if not value:
             msg = (
                 f"{LEGACY_MARKER_SOURCES_KEY} is declared but names no selector; remove the key "

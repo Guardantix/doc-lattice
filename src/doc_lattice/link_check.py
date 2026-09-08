@@ -806,7 +806,7 @@ def select_link_sources(project_root: Path, selectors: Sequence[str]) -> list[Pa
     root = project_root.resolve()
     if not selectors:
         msg = (
-            f"link_sources names no selector for the project root "
+            f"{LINK_SOURCES_KEY} names no selector for the project root "
             f"{format_path_for_display(root)}; the links command refuses to run "
             "without a selector"
         )
@@ -821,9 +821,9 @@ def select_link_sources(project_root: Path, selectors: Sequence[str]) -> list[Pa
         found = _walk(root, segments)
         if not found:
             msg = (
-                f"link_sources entry {format_path_for_display(entry)} matches no file under "
-                f"the project root {format_path_for_display(root)}; the links command refuses "
-                "to run over a selector that selects nothing"
+                f"{LINK_SOURCES_KEY} entry {format_path_for_display(entry)} matches no file "
+                f"under the project root {format_path_for_display(root)}; the links command "
+                "refuses to run over a selector that selects nothing"
             )
             raise ConfigError(msg)
         matched.update(found)
@@ -927,7 +927,8 @@ def _scan(directory: Path) -> list[os.DirEntry[str]]:
         with os.scandir(directory) as entries:
             return list(entries)
     except OSError as exc:
-        msg = f"link_sources selection could not scan {format_path_for_display(directory)}: {exc}"
+        displayed = format_path_for_display(directory)
+        msg = f"{LINK_SOURCES_KEY} selection could not scan {displayed}: {exc}"
         raise ConfigError(msg) from exc
 
 
@@ -942,7 +943,7 @@ def _is_directory(entry: os.DirEntry[str]) -> bool:
         return entry.is_dir(follow_symlinks=False)
     except OSError as exc:
         displayed = format_path_for_display(entry.path)
-        msg = f"link_sources selection could not inspect {displayed}: {exc}"
+        msg = f"{LINK_SOURCES_KEY} selection could not inspect {displayed}: {exc}"
         raise ConfigError(msg) from exc
 
 

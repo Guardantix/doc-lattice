@@ -54,10 +54,12 @@ def _legacy_marker_sources(project: ProjectConfig, sources: list[Path]) -> froze
 
     Omission is the whole of the strict default and is answered here without reaching the engine,
     so a config that never asked for compatibility runs the code path it ran before the key
-    existed. Every other shape is the engine's question: a declared empty list, a malformed
-    entry, and an entry matching no selected source are all config errors it raises, and it does
-    so before any document is parsed, so an ineffective policy is never discovered halfway
-    through a run.
+    existed. Every other shape is a config error, and every one of them lands before any document
+    is parsed, so an ineffective policy is never discovered halfway through a run. Config load
+    already refused a declared empty list and a malformed entry by the time this runs; what
+    reaches the engine is the question load could not ask, whether each entry matches a selected
+    source, and the engine re-refuses the empty list on its own so a direct caller meets the same
+    rule.
     """
     declared = project.config.legacy_marker_sources
     if declared is None:

@@ -1,6 +1,7 @@
 """CLI integration tests for the links command."""
 
 import errno
+from collections.abc import Sequence
 from io import StringIO
 from pathlib import Path
 
@@ -17,9 +18,13 @@ from doc_lattice.orchestrate import load_lattice
 from .helpers import _RefusingStream, runner
 
 
+def _flow(values: Sequence[str]) -> str:
+    """Spell a selector list as the YAML flow sequence a config file carries."""
+    return "[" + ", ".join(f"'{value}'" for value in values) + "]"
+
+
 def _config(root: Path, *selectors: str) -> None:
-    listed = ", ".join(f"'{selector}'" for selector in selectors)
-    _write(root, ".doc-lattice.yml", f"lattice_format: 2\nlink_sources: [{listed}]\n")
+    _write(root, ".doc-lattice.yml", f"lattice_format: 2\nlink_sources: {_flow(selectors)}\n")
 
 
 def _witness(root: Path) -> None:
@@ -259,12 +264,13 @@ def test_links_human_findings_to_a_departed_stderr_keep_exit_1(tmp_path: Path):
     assert stderr.quiet is True
 
 
-def _compat_config(root: Path, selectors: str, compatibility: str) -> None:
-    """Write a config carrying both source keys, each as a literal YAML flow sequence."""
+def _compat_config(root: Path, selectors: Sequence[str], compatibility: Sequence[str]) -> None:
+    """Write a config carrying both source keys, spelled the way `_config` spells one."""
     _write(
         root,
         ".doc-lattice.yml",
-        f"lattice_format: 2\nlink_sources: {selectors}\nlegacy_marker_sources: {compatibility}\n",
+        f"lattice_format: 2\nlink_sources: {_flow(selectors)}\n"
+        f"legacy_marker_sources: {_flow(compatibility)}\n",
     )
 
 
@@ -294,7 +300,7 @@ def test_links_keeps_its_exit_code_contract_with_no_compatibility_declaration(
 
 
 def test_links_resolves_a_marker_only_for_the_declared_source(tmp_path: Path, monkeypatch):
-    _compat_config(tmp_path, "['*.md']", "['LEGACY.md']")
+    _compat_config(tmp_path, ["*.md"], ["LEGACY.md"])
     _marker_corpus(tmp_path)
     monkeypatch.chdir(tmp_path)
 
@@ -307,7 +313,7 @@ def test_links_resolves_a_marker_only_for_the_declared_source(tmp_path: Path, mo
 def test_links_exits_0_when_compatibility_covers_every_marker_reference(
     tmp_path: Path, monkeypatch
 ):
-    _compat_config(tmp_path, "['*.md']", "['LEGACY.md', 'STRICT.md']")
+    _compat_config(tmp_path, ["*.md"], ["LEGACY.md", "STRICT.md"])
     _marker_corpus(tmp_path)
     monkeypatch.chdir(tmp_path)
 
@@ -318,7 +324,7 @@ def test_links_exits_0_when_compatibility_covers_every_marker_reference(
 
 def test_links_annotates_a_strict_source_under_a_partial_policy(tmp_path: Path, monkeypatch):
     """The github form carries the policy too, since the workflow is what a consumer runs."""
-    _compat_config(tmp_path, "['*.md']", "['LEGACY.md']")
+    _compat_config(tmp_path, ["*.md"], ["LEGACY.md"])
     _marker_corpus(tmp_path)
     monkeypatch.chdir(tmp_path)
 
@@ -334,7 +340,7 @@ def test_links_refuses_a_compatibility_selector_that_matches_no_selected_source(
     tmp_path: Path, monkeypatch
 ):
     """Exit 2, not a quiet policy over nothing: an ineffective declaration is a config error."""
-    _compat_config(tmp_path, "['*.md']", "['docs/**']")
+    _compat_config(tmp_path, ["*.md"], ["docs/**"])
     _marker_corpus(tmp_path)
     _write(tmp_path, "docs/OTHER.md", "# Other\n")
     monkeypatch.chdir(tmp_path)
@@ -350,7 +356,7 @@ def test_links_refuses_an_ineffective_declaration_before_parsing_any_source(
     tmp_path: Path, monkeypatch
 ):
     """The refusal is not contingent on a source carrying a link the gate would have reported."""
-    _compat_config(tmp_path, "['*.md']", "['GONE.md']")
+    _compat_config(tmp_path, ["*.md"], ["GONE.md"])
     _write(tmp_path, "README.md", "# Readme\n")
     monkeypatch.chdir(tmp_path)
 
@@ -361,7 +367,7 @@ def test_links_refuses_an_ineffective_declaration_before_parsing_any_source(
 
 
 def test_links_refuses_a_declared_empty_compatibility_list(tmp_path: Path, monkeypatch):
-    _compat_config(tmp_path, "['*.md']", "[]")
+    _compat_config(tmp_path, ["*.md"], [])
     _write(tmp_path, "README.md", "# Readme\n")
     monkeypatch.chdir(tmp_path)
 
@@ -374,7 +380,7 @@ def test_links_refuses_a_declared_empty_compatibility_list(tmp_path: Path, monke
 def test_links_refuses_a_malformed_compatibility_entry_naming_its_own_key(
     tmp_path: Path, monkeypatch
 ):
-    _compat_config(tmp_path, "['*.md']", "['docs\\\\a.md']")
+    _compat_config(tmp_path, ["*.md"], ["docs\\\\a.md"])
     _write(tmp_path, "README.md", "# Readme\n")
     monkeypatch.chdir(tmp_path)
 
@@ -387,7 +393,7 @@ def test_links_refuses_a_malformed_compatibility_entry_naming_its_own_key(
 
 def test_links_applies_compatibility_to_a_recursive_selector(tmp_path: Path, monkeypatch):
     """Matching is against the retained spellings, so a `**` declaration reaches every depth."""
-    _compat_config(tmp_path, "['*.md', 'docs/**/*.md']", "['docs/**']")
+    _compat_config(tmp_path, ["*.md", "docs/**/*.md"], ["docs/**"])
     _write(tmp_path, "GUIDE.md", "# Guide\n\n## Topic {#legacy}\n")
     _write(tmp_path, "README.md", "# Readme\n\n[t](GUIDE.md#legacy)\n")
     _write(tmp_path, "docs/a.md", "# A\n\n[t](../GUIDE.md#legacy)\n")
