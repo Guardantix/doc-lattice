@@ -10,6 +10,7 @@ from markdown_it import MarkdownIt
 from doc_lattice.frontmatter_parser import parse_document
 from doc_lattice.markdown_compat import (
     SLUG_UNICODE_VERSION,
+    addressable_explicit_markers,
     anchor_ids,
     code_block_line_spans,
     collision_components,
@@ -220,3 +221,134 @@ def test_a_cross_inventory_collision_is_one_component():
 
 def test_a_document_with_no_repeated_slug_has_no_components():
     assert _components("# One\n\n# Two\n\n# Three\n") == []
+
+
+def test_a_marker_on_a_rendered_addressable_heading_is_returned():
+    assert addressable_explicit_markers("## Fingerprints {#fingerprints}\n") == {"fingerprints"}
+
+
+def test_the_accessor_returns_bare_marker_values_in_a_frozenset():
+    result = addressable_explicit_markers("## Notes {#n}\n")
+
+    assert isinstance(result, frozenset)
+    # No leading "#": the fragment's marker character belongs to the link, not to the value.
+    assert result == {"n"}
+
+
+def test_marker_case_survives_because_nothing_here_slugs():
+    assert addressable_explicit_markers("## Notes {#MixedCase}\n") == {"MixedCase"}
+
+
+def test_a_marker_before_an_atx_closing_sequence_is_returned():
+    assert addressable_explicit_markers("## Notes {#n} ##\n") == {"n"}
+
+
+def test_a_document_with_no_marked_heading_yields_nothing():
+    assert addressable_explicit_markers("# Plain\n\ntext\n") == frozenset()
+
+
+def test_a_malformed_marker_is_ordinary_heading_text():
+    # `Heading.anchor` already owns the marker grammar; a value that fails it never becomes a
+    # marker anywhere in the engine, so it must not become one here either.
+    assert addressable_explicit_markers("## Notes {#-bad}\n") == frozenset()
+    assert addressable_explicit_markers("## {#early} Notes\n") == frozenset()
+
+
+def test_repeated_eligible_markers_collapse_to_one_value():
+    # A set, not a sequence: this accessor reports membership and performs no uniqueness
+    # validation, which is the loader's job and reaches a different diagnostic.
+    assert addressable_explicit_markers("## First {#same}\n\n## Second {#same}\n") == {"same"}
+
+
+def test_a_marker_only_the_restricted_scanner_sees_inside_a_comment_is_not_returned():
+    body = "<!--\n## Hidden {#hidden}\n-->\n"
+
+    # The restricted scanner is not container-aware, so it reads the commented heading as one.
+    assert [(h.line, h.anchor) for h in extract_headings(body)] == [(2, "hidden")]
+    assert full_heading_inventory(body) == []
+    assert addressable_explicit_markers(body) == frozenset()
+
+    # The tension this accessor is specified to accept, pinned so it stays visible: the engine
+    # does address `hidden`, so a lattice ref to it resolves while this reports no marker at all.
+    # A consumer checking marker preservation is therefore blind to a commented heading losing
+    # its marker. That is the issue's stated contract ("rendered, addressable"), not an oversight
+    # here, but it is the consumer's problem to know about before relying on this set.
+    assert anchor_ids(extract_headings(body)) == ["hidden"]
+
+
+def test_a_marker_in_a_raw_html_block_the_render_swallows_is_not_returned():
+    # The tight form matters: a blank line would end the HTML block and make the heading
+    # genuinely rendered, which is a different document rather than a weaker version of this one.
+    body = "<div>\n## Boxed {#boxed}\n</div>\n"
+
+    assert [(h.line, h.anchor) for h in extract_headings(body)] == [(2, "boxed")]
+    assert full_heading_inventory(body) == []
+    assert addressable_explicit_markers(body) == frozenset()
+
+
+def test_a_blank_line_ends_the_html_block_and_the_marker_comes_back():
+    # The paired positive for the swallowed case above, which the tight form's comment names but
+    # nothing pinned: one blank line closes the raw HTML block, so the same heading is genuinely
+    # rendered and its marker qualifies. Without this, an over-exclusion on the rendered side
+    # would still pass every container test here.
+    assert addressable_explicit_markers("<div>\n\n## Boxed {#boxed}\n</div>\n") == {"boxed"}
+
+
+@pytest.mark.parametrize("newline", ["\n", "\r\n", "\r"])
+def test_the_source_position_join_survives_every_line_ending(newline: str):
+    # The join is only sound because both scanners read one normalized text. A lone CR is the
+    # sharp case: the restricted scanner's line map splits on "\n" alone while the pinned
+    # parser normalizes CR itself, so dropping the shared normalization would leave the two
+    # disagreeing about which line a heading sits on and the intersection would come back empty.
+    body = newline.join(["## A {#a}", "", "## B {#b}", ""])
+
+    assert addressable_explicit_markers(body) == {"a", "b"}
+
+
+def test_the_visible_occurrence_supplies_the_marker_and_the_hidden_one_does_not():
+    body = "## Shared {#visible}\n\n<!--\n## Shared {#hidden}\n-->\n"
+
+    assert addressable_explicit_markers(body) == {"visible"}
+
+
+def test_identical_visible_and_hidden_headings_cannot_validate_each_other():
+    # The negative witness for the source-position join. Three leading spaces keep the visible
+    # heading out of the addressable subset while leaving it rendered, so the two scanners see
+    # disjoint occurrences of the same text: an intersection joined on text alone would admit
+    # `shared` even though neither occurrence is both rendered and addressable.
+    body = "   ## Shared {#shared}\n\n<!--\n## Shared {#shared}\n-->\n"
+
+    assert [h.line for h in extract_headings(body)] == [4]
+    assert [h.line for h in full_heading_inventory(body)] == [1]
+    assert addressable_explicit_markers(body) == frozenset()
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        pytest.param("Shared {#shared}\n----------------\n", id="setext"),
+        pytest.param("   ## Shared {#shared}\n", id="indented_three_spaces"),
+        pytest.param("> ## Shared {#shared}\n", id="block_quoted"),
+        pytest.param("- ## Shared {#shared}\n", id="list_nested"),
+    ],
+)
+def test_a_marker_outside_the_addressable_subset_is_not_returned(body: str):
+    assert full_heading_inventory(body), "the form must still be a rendered heading"
+    assert addressable_explicit_markers(body) == frozenset()
+
+
+def test_a_marker_inside_a_fence_is_not_returned():
+    assert addressable_explicit_markers("```\n## Fenced {#fenced}\n```\n") == frozenset()
+
+
+def test_removing_a_marker_whose_value_equals_the_heading_slug_empties_the_result():
+    # The marker-free heading still allocates the GitHub id `fingerprints`, so asking link
+    # resolution whether `#fingerprints` resolves answers yes for both bodies. Only this
+    # accessor witnesses that the marker itself is gone, which is why a consumer's
+    # marker-preservation check cannot be reduced to a link-resolution check.
+    marked = "## Fingerprints {#fingerprints}\n"
+    unmarked = "## Fingerprints\n"
+
+    assert addressable_explicit_markers(marked) == {"fingerprints"}
+    assert addressable_explicit_markers(unmarked) == frozenset()
+    assert [record.github_id for record in full_heading_inventory(unmarked)] == ["fingerprints"]
