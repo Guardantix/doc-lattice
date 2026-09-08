@@ -96,6 +96,28 @@ def test_links_honors_a_configured_set_that_is_not_the_root(tmp_path: Path, monk
     assert result.stderr == "'spec/a.md':3: fragment '#b' matches no heading in 'spec/deep/b.md'\n"
 
 
+def test_links_selects_sources_from_the_explicit_config_not_the_working_directory(
+    tmp_path: Path, monkeypatch
+):
+    # Forwarding --config and rooting selection at that config's parent are separate steps, so
+    # both projects declare the same '*.md' selector and only the explicit one carries a broken
+    # link: the finding names the source that was read, which is what says where the run rooted.
+    default_root = tmp_path / "default"
+    explicit_root = tmp_path / "explicit"
+    _config(default_root, "*.md")
+    _write(default_root, "README.md", "# Readme\n")
+    _config(explicit_root, "*.md")
+    _write(explicit_root, "EXPLICIT.md", "# Explicit\n\n[a](ONLY-IN-EXPLICIT.md)\n")
+    monkeypatch.chdir(default_root)
+
+    assert runner.invoke(app, ["links"]).exit_code == 0
+
+    result = runner.invoke(app, ["links", "--config", str(explicit_root / ".doc-lattice.yml")])
+
+    assert result.exit_code == 1
+    assert result.stderr == "'EXPLICIT.md':3: link target 'ONLY-IN-EXPLICIT.md' does not exist\n"
+
+
 def test_links_prints_a_markup_shaped_filename_literally(tmp_path: Path, monkeypatch):
     # A complete Rich markup pair needs the '/' of its closing tag, so the shape under test can
     # only ever be a path, never a single filename: '[bold]red[' is a directory. The selector is

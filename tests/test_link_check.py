@@ -16,7 +16,9 @@ from doc_lattice.link_check import (
     _anchor_hrefs,
     _is_directory,
     _links_in,
+    _resolved,
     _split_destination,
+    _stat_mode,
     check_links,
     select_legacy_marker_sources,
     select_link_sources,
@@ -1005,6 +1007,47 @@ def test_a_target_that_cannot_be_inspected_is_a_tool_error(tmp_path):
             check_links(tmp_path, _root_sources(tmp_path))
     finally:
         locked.chmod(0o755)
+
+
+def test_a_path_the_filesystem_will_not_resolve_is_a_tool_error(tmp_path, monkeypatch):
+    # Injected at the seam rather than staged as a symlink loop: `_resolved` calls non-strict
+    # `Path.resolve`, which resolves a loop to a name instead of raising, so no loop on disk
+    # reaches this arm. What is pinned is the taxonomy -- the refusal becomes a tool error
+    # carrying the path it was asked about and the OSError that caused it, not a finding.
+    target = tmp_path / "GUIDE.md"
+    refusal = OSError(errno.EIO, "Input/output error")
+
+    def refusing_resolve(_self, **_kwargs: bool) -> Path:
+        raise refusal
+
+    monkeypatch.setattr(Path, "resolve", refusing_resolve)
+
+    with pytest.raises(UnreadableDocError) as info:
+        _resolved(target)
+
+    assert info.value.source == target
+    assert info.value.__cause__ is refusal
+    assert "could not be resolved" in str(info.value)
+
+
+def test_a_symlink_loop_on_a_target_is_a_tool_error_rather_than_an_absence(tmp_path, monkeypatch):
+    # ELOOP is deliberately outside `_ABSENT_ERRNOS`: the loop names a target the gate cannot
+    # inspect, and classifying it as absence would put "does not exist" on a link that may well
+    # be correct. Admitting ELOOP to that set turns this into a silent None and fails here.
+    target = tmp_path / "GUIDE.md"
+    refusal = OSError(errno.ELOOP, "Too many levels of symbolic links")
+
+    def refusing_stat(_self, **_kwargs: bool):
+        raise refusal
+
+    monkeypatch.setattr(Path, "stat", refusing_stat)
+
+    with pytest.raises(UnreadableDocError) as info:
+        _stat_mode(target)
+
+    assert info.value.source == target
+    assert info.value.__cause__ is refusal
+    assert "could not be inspected" in str(info.value)
 
 
 def test_a_parser_invariant_failure_propagates(tmp_path, monkeypatch):

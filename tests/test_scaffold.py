@@ -288,15 +288,13 @@ def test_build_scaffold_requires_the_branch_as_a_keyword():
         build_scaffold(("docs",), ("docs/**/*.md",), None, "0.3.0")  # ty: ignore[missing-argument]
 
 
-def test_ci_runs_both_commands_in_one_step():
-    # A second GitHub Actions run step would be skipped after check exits nonzero,
-    # so both commands share one step that captures each exit code and fails if
-    # either failed.
+def test_ci_runs_all_three_commands_in_one_step():
+    # A later GitHub Actions run step would be skipped once an earlier command exits nonzero,
+    # so all three share one step that captures each exit code and fails if any failed. The
+    # single step is the whole claim here; the exit codes and their conjunction are asserted in
+    # test_generated_gates_run_links_as_an_always_run_hook_and_an_annotated_ci_step.
     ci = build_scaffold(("docs",), ("docs/**/*.md",), None, "0.3.0", default_branch="main").ci_text
     assert ci.count("- run:") == 1
-    assert "rc_check=$?" in ci
-    assert "rc_lint=$?" in ci
-    assert '[ "$rc_check" -eq 0 ] && [ "$rc_lint" -eq 0 ]' in ci
 
 
 @pytest.mark.parametrize(
