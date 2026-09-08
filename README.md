@@ -441,6 +441,40 @@ a Markdown destination; write it as a Markdown link. And a heading whose text is
 link slugs from raw source on both sides, so `## [Guide](target.md)` answers to `#guidetargetmd`
 here where GitHub renders `#guide`.
 
+Legacy marker sources are opt-in. A corpus written before GitHub heading ids may address its
+sections by an explicit `{#marker}` instead, and `legacy_marker_sources` names the sources
+allowed to resolve a fragment that way, so such a corpus can be gated rather than excluded from
+the gate outright:
+
+```yaml
+link_sources: ['*.md', 'docs/**/*.md']
+legacy_marker_sources: ['ARCHITECTURE.md', 'docs/legacy/**']
+```
+
+The key is omitted by default, and with it omitted every source is strict and the gate behaves
+exactly as it does above. It selects sources, never targets: entries use the same selector
+grammar and are matched against the project-relative spellings `link_sources` already retained,
+so a compatibility entry can add no file to the gate, and linking *to* a legacy document grants
+the source that linked nothing. It only ever adds accepted destinations, so a fragment an
+ordinary GitHub id already resolves keeps resolving for every source. A marker counts only where
+its heading is one a render actually shows: one written inside an HTML comment or a raw HTML
+block is not addressable and still fails. Matching is exact and case-sensitive against the
+decoded fragment, so `## Notes {#MixedCase}` answers to `#MixedCase` and to `#%4DixedCase`, and
+to neither `#mixedcase` nor `#%254DixedCase`.
+
+It fails closed the way `link_sources` does, and every refusal lands before any document is
+parsed: the key written as null or as an empty list is a config error, as is an entry the grammar
+cannot read and an entry that matches no selected source. Selection collapses aliases of one file
+onto the first spelling in sorted order, so an entry naming only the discarded alias matches
+nothing and is refused rather than quietly granted to the surviving spelling.
+
+What a compatibility pass does not claim: a marker is literal heading text to GitHub, so
+`## Topic {#legacy}` answers to `#topic-legacy` there and `#legacy` does not navigate. The pass
+says the reference is coherent within the corpus, not that a browser will follow it. Nor does it
+help you notice a marker's removal: deleting `{#fingerprints}` from `## Fingerprints` leaves
+`#fingerprints` resolving against the marker-free heading's own id, so the pinned identity is
+gone while the link is still green.
+
 Containment binds both ends. A selected file that leaves the project root through a symlink is
 reported rather than read, and a file that will not decode as UTF-8 or that the parser refuses is
 reported and stepped over, so one document cannot end the run. A filesystem the gate cannot
@@ -790,6 +824,11 @@ all selectors. Expansion never enters a symlinked directory, whether `**` reache
 names it, and a symlinked file is selected by its spelling and judged for containment afterward.
 Matches are unioned across selectors, sorted by their project-relative spelling, and deduplicated
 by resolved target, so YAML order and overlapping selectors cannot change the output.
+
+`legacy_marker_sources` is an opt-in policy over that same selected set, letting the sources it
+names resolve a fragment through an explicit `{#marker}` as well. It is omitted by default, adds
+no file to the gate, and fails closed on a declaration that reaches nothing; the
+[`links`](#links) section owns what it means and what it does not claim.
 
 The key fails closed. It has no default and is not derived from `docs_roots`; `ignore_globs` does
 not apply to it, since that key is anchored to each docs root and a selector already says what it
@@ -1164,7 +1203,7 @@ documented migration surface.
 
 | Code | Raised when |
 |------|-------------|
-| `CONFIG_ERROR` | An explicit `--config PATH` names a file that does not exist, or the selected `.doc-lattice.yml` is unreadable, fails to parse as YAML, fails its schema, or names a `docs_roots` entry that escapes the project root or exists as something other than a directory or a regular `.md` file. A `linear_team` *in that file* that is not a valid team key lands here too; the same value passed to `init --linear-team` does not, because `init` writes a config and never reads one. `links` adds its own selection-time causes: a `link_sources` list that is omitted or empty, an entry the selector grammar cannot read, an entry that matches no file, and a directory the selection walk cannot scan or an entry it cannot inspect. An absent default config is not an error; it is zero-config mode, except under `links`, which has no zero-config mode to fall back to. |
+| `CONFIG_ERROR` | An explicit `--config PATH` names a file that does not exist, or the selected `.doc-lattice.yml` is unreadable, fails to parse as YAML, fails its schema, or names a `docs_roots` entry that escapes the project root or exists as something other than a directory or a regular `.md` file. A `linear_team` *in that file* that is not a valid team key lands here too; the same value passed to `init --linear-team` does not, because `init` writes a config and never reads one. `links` adds its own selection-time causes: a `link_sources` list that is omitted or empty, an entry the selector grammar cannot read, an entry that matches no file, and a directory the selection walk cannot scan or an entry it cannot inspect. A `legacy_marker_sources` declaration adds three more, all refused before any document is parsed: the key written as null or as an empty list, an entry the grammar cannot read, and an entry that matches no selected source. An absent default config is not an error; it is zero-config mode, except under `links`, which has no zero-config mode to fall back to. |
 | `VALIDATION_ERROR` | A value parsed cleanly but failed domain validation: an impact token that resolves to no id (from `impact` or from `linear`), a `reconcile` node id that names no node, a `reconcile --ref` matching no edge on the node it named, or any input `init` checks before it writes anything (enumerated below). Command-shape and parser usage failures are *not* this; they stay uncoded. |
 | `DUPLICATE_ID` | Two files claim the same `id`, or two headings within one file resolve to the same anchor id. The error names both registration sites. |
 | `BROKEN_REF` | An operation that requires a resolved edge was aimed at one that does not resolve, in practice a single-node `reconcile` whose `--ref` names the broken edge. This is *not* the ordinary unresolved ref: that is the coherent `BROKEN` finding `check` reports with exit 1, and a broad `reconcile` skips it rather than failing. |

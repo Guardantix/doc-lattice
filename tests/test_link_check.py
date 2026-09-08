@@ -18,6 +18,7 @@ from doc_lattice.link_check import (
     _links_in,
     _split_destination,
     check_links,
+    select_legacy_marker_sources,
     select_link_sources,
 )
 from doc_lattice.path_utils import format_path_for_display
@@ -1266,3 +1267,327 @@ def test_recursive_segments_scan_each_directory_a_bounded_number_of_times(tmp_pa
     segments = 6  # five recursive segments plus the trailing "*.md"
     assert calls <= directories * segments
     assert _relative(tmp_path, selected) == ["/".join(parts) + "/leaf.md"]
+
+
+# --- legacy marker compatibility -------------------------------------------------------------
+#
+# The policy is a property of the source, so every case below fixes one corpus and varies which
+# sources carry it. `_checked` is the whole run: select, apply the declaration, check.
+
+_MARKER_TARGET = "# Guide\n\n## Topic {#legacy}\n"
+
+
+def _checked(root: Path, compat: list[str] | None = None) -> list[str]:
+    """Run the gate over the root Markdown files, optionally under a compatibility declaration."""
+    sources = select_link_sources(root, ["*.md"])
+    legacy = () if compat is None else select_legacy_marker_sources(root, sources, compat)
+    return [_line(finding) for finding in check_links(root, sources, legacy)]
+
+
+def test_with_no_declaration_a_marker_only_destination_still_fails(tmp_path):
+    """The strict default is the whole of the behavior an existing config keeps."""
+    _write(tmp_path, "README.md", "# Readme\n\n[t](GUIDE.md#legacy)\n")
+    _write(tmp_path, "GUIDE.md", _MARKER_TARGET)
+
+    assert _checked(tmp_path) == [
+        "'README.md':3: fragment '#legacy' matches no heading in 'GUIDE.md'"
+    ]
+    # And the same run under an empty policy set, which is what a caller passing the engine
+    # default gets: the parameter's absence and its emptiness are one behavior.
+    assert check_links(tmp_path, select_link_sources(tmp_path, ["*.md"])) == check_links(
+        tmp_path, select_link_sources(tmp_path, ["*.md"]), frozenset()
+    )
+
+
+def test_a_legacy_source_resolves_a_marker_the_same_destination_fails_from_a_strict_one(tmp_path):
+    _write(tmp_path, "LEGACY.md", "# Legacy\n\n[t](GUIDE.md#legacy)\n")
+    _write(tmp_path, "STRICT.md", "# Strict\n\n[t](GUIDE.md#legacy)\n")
+    _write(tmp_path, "GUIDE.md", _MARKER_TARGET)
+
+    assert _checked(tmp_path, ["LEGACY.md"]) == [
+        "'STRICT.md':3: fragment '#legacy' matches no heading in 'GUIDE.md'"
+    ]
+
+
+def test_both_destination_forms_receive_the_policy(tmp_path):
+    """A fragment-only link and a file-plus-fragment link are one permission, not two.
+
+    They reach the target cache by different branches -- one resolves against the source's own
+    already-read text and the other against a file read here -- so a policy applied at only one
+    of them would look correct in half the corpus.
+    """
+    _write(
+        tmp_path,
+        "LEGACY.md",
+        "# Legacy\n\n## Own {#mine}\n\n[self](#mine)\n[t](GUIDE.md#legacy)\n",
+    )
+    _write(tmp_path, "GUIDE.md", _MARKER_TARGET)
+
+    assert _checked(tmp_path, ["LEGACY.md"]) == []
+    assert _checked(tmp_path) == [
+        "'LEGACY.md':5: fragment '#mine' matches no heading in 'LEGACY.md'",
+        "'LEGACY.md':5: fragment '#legacy' matches no heading in 'GUIDE.md'",
+    ]
+
+
+def test_an_ineligible_marker_never_vetoes_a_github_id(tmp_path):
+    """Compatibility only adds accepted destinations; membership in the inventory is sufficient.
+
+    The target carries a rendered `## Visible` and a comment-only `## Other {#visible}`, so the
+    id and the ineligible marker collide. Both kinds of source must accept the fragment, and
+    removing the rendered heading must fail both.
+    """
+    _write(tmp_path, "LEGACY.md", "# Legacy\n\n[t](GUIDE.md#visible)\n")
+    _write(tmp_path, "STRICT.md", "# Strict\n\n[t](GUIDE.md#visible)\n")
+    _write(tmp_path, "GUIDE.md", "# Guide\n\n<!--\n## Other {#visible}\n-->\n\n## Visible\n")
+
+    assert _checked(tmp_path, ["LEGACY.md"]) == []
+
+    _write(tmp_path, "GUIDE.md", "# Guide\n\n<!--\n## Other {#visible}\n-->\n")
+
+    assert _checked(tmp_path, ["LEGACY.md"]) == [
+        "'LEGACY.md':3: fragment '#visible' matches no heading in 'GUIDE.md'",
+        "'STRICT.md':3: fragment '#visible' matches no heading in 'GUIDE.md'",
+    ]
+
+
+@pytest.mark.parametrize(
+    ("target", "fragment"),
+    [
+        # A marker that is not there at all.
+        (_MARKER_TARGET, "#absent"),
+        # A marker candidate the grammar refuses: a value may not lead with a hyphen, so this
+        # heading carries none and the text is slugged as ordinary heading text instead.
+        ("# Guide\n\n## Notes {#-leading}\n", "#-leading"),
+        # A marker only the restricted scanner sees, inside an HTML comment. Consuming the
+        # accessor rather than re-deriving eligibility here is what keeps this failing.
+        ("# Guide\n\n<!--\n## Hidden {#hidden}\n-->\n", "#hidden"),
+    ],
+)
+def test_a_marker_candidate_that_is_not_addressable_still_fails_a_legacy_source(
+    tmp_path, target, fragment
+):
+    _write(tmp_path, "LEGACY.md", f"# Legacy\n\n[t](GUIDE.md{fragment})\n")
+    _write(tmp_path, "GUIDE.md", target)
+
+    assert _checked(tmp_path, ["LEGACY.md"]) == [
+        f"'LEGACY.md':3: fragment '{fragment}' matches no heading in 'GUIDE.md'"
+    ]
+
+
+def test_a_missing_file_still_fails_a_legacy_source(tmp_path):
+    """Compatibility is about fragments; it says nothing about whether the target is there."""
+    _write(tmp_path, "LEGACY.md", "# Legacy\n\n[t](GONE.md#legacy)\n")
+
+    assert _checked(tmp_path, ["LEGACY.md"]) == [
+        "'LEGACY.md':3: link target 'GONE.md#legacy' does not exist"
+    ]
+
+
+@pytest.mark.parametrize(
+    ("fragment", "resolves"),
+    [
+        ("#MixedCase", True),
+        # The same value written encoded: the caller decodes once, and this is that one decode.
+        ("#%4DixedCase", True),
+        # Case is load-bearing, because the accessor preserves it.
+        ("#mixedcase", False),
+        # A second decode would turn this into `#MixedCase` and accept a fragment nobody wrote.
+        ("#%254DixedCase", False),
+    ],
+)
+def test_marker_membership_is_exact_against_the_fragment_already_decoded(
+    tmp_path, fragment, resolves
+):
+    _write(tmp_path, "LEGACY.md", f"# Legacy\n\n[t](GUIDE.md{fragment})\n")
+    _write(tmp_path, "GUIDE.md", "# Guide\n\n## Notes {#MixedCase}\n")
+
+    findings = _checked(tmp_path, ["LEGACY.md"])
+
+    assert (findings == []) is resolves
+    # Strict rejects every one of them: the only id this target allocates is `notes-mixedcase`.
+    assert _checked(tmp_path) != []
+
+
+@pytest.mark.parametrize("legacy", ["A.md", "B.md"])
+def test_two_sources_sharing_a_target_do_not_depend_on_processing_order(tmp_path, legacy):
+    """`check_links` sorts its sources, so the order is varied by swapping which one opts in."""
+    _write(tmp_path, "A.md", "# A\n\n[t](GUIDE.md#legacy)\n")
+    _write(tmp_path, "B.md", "# B\n\n[t](GUIDE.md#legacy)\n")
+    _write(tmp_path, "GUIDE.md", _MARKER_TARGET)
+
+    strict = "B.md" if legacy == "A.md" else "A.md"
+
+    assert _checked(tmp_path, [legacy]) == [
+        f"'{strict}':3: fragment '#legacy' matches no heading in 'GUIDE.md'"
+    ]
+
+
+@pytest.mark.parametrize("legacy_first", [True, False])
+def test_a_legacy_source_that_is_also_the_shared_target_grants_nothing_to_its_reader(
+    tmp_path, legacy_first
+):
+    """The permission is the source's, never the target's, and never the cache entry's.
+
+    A source read for its own self-link fills the target cache from text already in hand, which
+    is a different route in than a file read. Both orders are exercised so neither can leave the
+    strict source resolving a marker it was never granted.
+    """
+    legacy_name, strict_name = ("A.md", "B.md") if legacy_first else ("Z.md", "A.md")
+    # The title is deliberately not "Legacy": that H1 slugs to `legacy` itself, and the
+    # fragment would then resolve through an ordinary GitHub id for every source, saying
+    # nothing about the policy.
+    _write(tmp_path, legacy_name, "# Notes\n\n## Topic {#legacy}\n\n[self](#legacy)\n")
+    _write(tmp_path, strict_name, f"# Strict\n\n[t]({legacy_name}#legacy)\n")
+
+    assert _checked(tmp_path, [legacy_name]) == [
+        f"'{strict_name}':3: fragment '#legacy' matches no heading in '{legacy_name}'"
+    ]
+
+
+def test_removing_a_marker_leaves_the_link_resolving_which_is_why_the_gate_is_not_the_check(
+    tmp_path,
+):
+    """The GTX-557 witness, exercised rather than assumed.
+
+    Deleting `{#fingerprints}` from `## Fingerprints` moves the fragment from the marker set to
+    the heading's own GitHub id, so the link resolves in both revisions and under both policies.
+    A link-resolution gate is therefore not a marker-preservation check, and this gate does not
+    claim to be one.
+    """
+    _write(tmp_path, "LEGACY.md", "# Legacy\n\n[t](GUIDE.md#fingerprints)\n")
+    _write(tmp_path, "GUIDE.md", "# Guide\n\n## Fingerprints {#fingerprints}\n")
+
+    assert _checked(tmp_path, ["LEGACY.md"]) == []
+    # Strict fails while the marker is what carries the fragment: the id here is
+    # `fingerprints-fingerprints`, because the marker is literal heading text to GitHub.
+    assert _checked(tmp_path) != []
+
+    _write(tmp_path, "GUIDE.md", "# Guide\n\n## Fingerprints\n")
+
+    assert _checked(tmp_path, ["LEGACY.md"]) == []
+    assert _checked(tmp_path) == []
+
+
+def test_an_undecodable_target_stays_a_finding_under_compatibility(tmp_path):
+    """An empty marker set is a successful extraction; this is the failed read, still a finding."""
+    _write(tmp_path, "LEGACY.md", "# Legacy\n\n[x](docs/BIN.md#legacy)\n")
+    (tmp_path / "docs").mkdir()
+    (tmp_path / "docs" / "BIN.md").write_bytes(b"# T\n\xff\xfe\x00binary\n")
+    _write(tmp_path, "ZZZ.md", "# Z\n\n[later](ALSO-MISSING.md)\n")
+
+    findings = _checked(tmp_path, ["LEGACY.md"])
+
+    assert len(findings) == 2
+    assert findings[0] == (
+        "'LEGACY.md':3: link target 'docs/BIN.md' could not be read for its headings"
+    )
+    assert findings[1].startswith("'ZZZ.md':3:")
+
+
+@_requires_permission_enforcement
+def test_an_unreadable_target_stays_a_tool_error_under_compatibility(tmp_path):
+    _write(tmp_path, "LEGACY.md", "# Legacy\n\n[t](docs/GUIDE.md#legacy)\n")
+    target = tmp_path / "docs" / "GUIDE.md"
+    _write(tmp_path, "docs/GUIDE.md", _MARKER_TARGET)
+    target.chmod(0)
+    try:
+        with pytest.raises(UnreadableDocError) as info:
+            _checked(tmp_path, ["LEGACY.md"])
+    finally:
+        target.chmod(0o644)
+    assert info.value.source == target
+
+
+def test_the_accessors_parser_invariant_failure_propagates(tmp_path, monkeypatch):
+    """The marker side answers to the same invariant the inventory side does."""
+    _write(tmp_path, "LEGACY.md", "# Legacy\n\n[t](GUIDE.md#legacy)\n")
+    _write(tmp_path, "GUIDE.md", _MARKER_TARGET)
+
+    def broken(_text: str):
+        msg = "malformed heading token pair"
+        raise RuntimeError(msg)
+
+    monkeypatch.setattr(link_check_module, "addressable_explicit_markers", broken)
+    with pytest.raises(RuntimeError, match="malformed"):
+        _checked(tmp_path, ["LEGACY.md"])
+
+
+def test_markers_are_not_extracted_at_all_without_a_declaration(tmp_path, monkeypatch):
+    """The accessor parses the body twice, so a strict run must not reach it even once."""
+    _write(tmp_path, "README.md", "# Readme\n\n[t](GUIDE.md#topic-legacy)\n")
+    _write(tmp_path, "GUIDE.md", _MARKER_TARGET)
+
+    def refuse(_text: str):
+        msg = "the accessor was reached on a run with no compatibility policy"
+        raise AssertionError(msg)
+
+    monkeypatch.setattr(link_check_module, "addressable_explicit_markers", refuse)
+
+    assert _checked(tmp_path) == []
+
+
+def test_a_declaration_matching_no_selected_source_is_a_config_error(tmp_path):
+    """A compatibility selector grants a policy to gated files and can never add one."""
+    _write(tmp_path, "README.md", "# Readme\n")
+    _write(tmp_path, "docs/OTHER.md", "# Other\n")
+    sources = select_link_sources(tmp_path, ["*.md"])
+
+    with pytest.raises(ConfigError, match=r"matches no link_sources file"):
+        select_legacy_marker_sources(tmp_path, sources, ["docs/OTHER.md"])
+
+
+def test_a_valid_entry_never_conceals_an_unmatched_one(tmp_path):
+    _write(tmp_path, "README.md", "# Readme\n")
+    sources = select_link_sources(tmp_path, ["*.md"])
+
+    with pytest.raises(ConfigError, match=r"'GONE\.md'"):
+        select_legacy_marker_sources(tmp_path, sources, ["README.md", "GONE.md"])
+
+
+def test_a_declaration_naming_only_a_discarded_alias_is_a_config_error(tmp_path):
+    """Selection collapses aliases onto the first sorted spelling; only that spelling is matchable.
+
+    `real.md` is a selected file's other name, and selection kept `alias.md`. Granting the
+    surviving spelling a policy written for a name that is not in the gate would be inventing
+    the author's intent.
+    """
+    _write(tmp_path, "real.md", "# r\n")
+    (tmp_path / "alias.md").symlink_to(tmp_path / "real.md")
+    sources = select_link_sources(tmp_path, ["*.md"])
+    assert _relative(tmp_path, sources) == ["alias.md"]
+
+    with pytest.raises(ConfigError, match=r"'real\.md'"):
+        select_legacy_marker_sources(tmp_path, sources, ["real.md"])
+    assert select_legacy_marker_sources(tmp_path, sources, ["alias.md"]) == frozenset(sources)
+
+
+def test_a_declared_empty_compatibility_list_is_refused_by_the_engine_too(tmp_path):
+    """Both halves of the fail-closed rule again: the adapter's precondition is not the only one."""
+    _write(tmp_path, "README.md", "# Readme\n")
+    sources = select_link_sources(tmp_path, ["*.md"])
+
+    with pytest.raises(ConfigError, match="names no selector"):
+        select_legacy_marker_sources(tmp_path, sources, [])
+
+
+def test_a_malformed_compatibility_entry_names_its_own_key(tmp_path):
+    """The defect message must send the reader to the list that actually carried the entry."""
+    _write(tmp_path, "README.md", "# Readme\n")
+    sources = select_link_sources(tmp_path, ["*.md"])
+
+    with pytest.raises(ConfigError, match="backslash") as info:
+        select_legacy_marker_sources(tmp_path, sources, ["docs\\a.md"])
+    assert str(info.value).startswith("legacy_marker_sources entry")
+
+
+def test_a_recursive_compatibility_selector_matches_at_every_depth(tmp_path):
+    _write(tmp_path, "docs/a.md", "# a\n\n[t](../GUIDE.md#legacy)\n")
+    _write(tmp_path, "docs/deep/b.md", "# b\n\n[t](../../GUIDE.md#legacy)\n")
+    _write(tmp_path, "GUIDE.md", _MARKER_TARGET)
+    sources = select_link_sources(tmp_path, ["*.md", "docs/**/*.md"])
+
+    legacy = select_legacy_marker_sources(tmp_path, sources, ["docs/**"])
+
+    assert check_links(tmp_path, sources, legacy) == []
+    assert check_links(tmp_path, sources) != []

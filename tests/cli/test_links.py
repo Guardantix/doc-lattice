@@ -257,3 +257,144 @@ def test_links_human_findings_to_a_departed_stderr_keep_exit_1(tmp_path: Path):
 
     assert result.exit_code == 1
     assert stderr.quiet is True
+
+
+def _compat_config(root: Path, selectors: str, compatibility: str) -> None:
+    """Write a config carrying both source keys, each as a literal YAML flow sequence."""
+    _write(
+        root,
+        ".doc-lattice.yml",
+        f"lattice_format: 2\nlink_sources: {selectors}\nlegacy_marker_sources: {compatibility}\n",
+    )
+
+
+def _marker_corpus(root: Path) -> None:
+    """A legacy source and a strict one, both linking to one marker-only destination."""
+    _write(root, "LEGACY.md", "# Legacy\n\n[t](GUIDE.md#legacy)\n")
+    _write(root, "STRICT.md", "# Strict\n\n[t](GUIDE.md#legacy)\n")
+    _write(root, "GUIDE.md", "# Guide\n\n## Topic {#legacy}\n")
+
+
+def test_links_keeps_its_exit_code_contract_with_no_compatibility_declaration(
+    tmp_path: Path, monkeypatch
+):
+    """The default path is the one an existing config runs, exit code and output included."""
+    _config(tmp_path, "*.md")
+    _marker_corpus(tmp_path)
+    monkeypatch.chdir(tmp_path)
+
+    result = runner.invoke(app, ["links"])
+
+    assert result.exit_code == 1
+    assert result.stdout == ""
+    assert result.stderr == (
+        "'LEGACY.md':3: fragment '#legacy' matches no heading in 'GUIDE.md'\n"
+        "'STRICT.md':3: fragment '#legacy' matches no heading in 'GUIDE.md'\n"
+    )
+
+
+def test_links_resolves_a_marker_only_for_the_declared_source(tmp_path: Path, monkeypatch):
+    _compat_config(tmp_path, "['*.md']", "['LEGACY.md']")
+    _marker_corpus(tmp_path)
+    monkeypatch.chdir(tmp_path)
+
+    result = runner.invoke(app, ["links"])
+
+    assert result.exit_code == 1
+    assert result.stderr == ("'STRICT.md':3: fragment '#legacy' matches no heading in 'GUIDE.md'\n")
+
+
+def test_links_exits_0_when_compatibility_covers_every_marker_reference(
+    tmp_path: Path, monkeypatch
+):
+    _compat_config(tmp_path, "['*.md']", "['LEGACY.md', 'STRICT.md']")
+    _marker_corpus(tmp_path)
+    monkeypatch.chdir(tmp_path)
+
+    result = runner.invoke(app, ["links"])
+
+    assert (result.exit_code, result.stdout, result.stderr) == (0, "", "")
+
+
+def test_links_annotates_a_strict_source_under_a_partial_policy(tmp_path: Path, monkeypatch):
+    """The github form carries the policy too, since the workflow is what a consumer runs."""
+    _compat_config(tmp_path, "['*.md']", "['LEGACY.md']")
+    _marker_corpus(tmp_path)
+    monkeypatch.chdir(tmp_path)
+
+    result = runner.invoke(app, ["links", "--format", "github"])
+
+    assert result.exit_code == 1
+    assert result.stdout.startswith("::error ")
+    assert "STRICT.md" in result.stdout
+    assert "LEGACY.md" not in result.stdout
+
+
+def test_links_refuses_a_compatibility_selector_that_matches_no_selected_source(
+    tmp_path: Path, monkeypatch
+):
+    """Exit 2, not a quiet policy over nothing: an ineffective declaration is a config error."""
+    _compat_config(tmp_path, "['*.md']", "['docs/**']")
+    _marker_corpus(tmp_path)
+    _write(tmp_path, "docs/OTHER.md", "# Other\n")
+    monkeypatch.chdir(tmp_path)
+
+    result = runner.invoke(app, ["links"])
+
+    assert result.exit_code == 2
+    assert "legacy_marker_sources" in result.stderr
+    assert "matches no link_sources file" in result.stderr
+
+
+def test_links_refuses_an_ineffective_declaration_before_parsing_any_source(
+    tmp_path: Path, monkeypatch
+):
+    """The refusal is not contingent on a source carrying a link the gate would have reported."""
+    _compat_config(tmp_path, "['*.md']", "['GONE.md']")
+    _write(tmp_path, "README.md", "# Readme\n")
+    monkeypatch.chdir(tmp_path)
+
+    result = runner.invoke(app, ["links"])
+
+    assert result.exit_code == 2
+    assert "'GONE.md'" in result.stderr
+
+
+def test_links_refuses_a_declared_empty_compatibility_list(tmp_path: Path, monkeypatch):
+    _compat_config(tmp_path, "['*.md']", "[]")
+    _write(tmp_path, "README.md", "# Readme\n")
+    monkeypatch.chdir(tmp_path)
+
+    result = runner.invoke(app, ["links"])
+
+    assert result.exit_code == 2
+    assert "names no selector" in result.stderr
+
+
+def test_links_refuses_a_malformed_compatibility_entry_naming_its_own_key(
+    tmp_path: Path, monkeypatch
+):
+    _compat_config(tmp_path, "['*.md']", "['docs\\\\a.md']")
+    _write(tmp_path, "README.md", "# Readme\n")
+    monkeypatch.chdir(tmp_path)
+
+    result = runner.invoke(app, ["links"])
+
+    assert result.exit_code == 2
+    assert "legacy_marker_sources entry" in result.stderr
+    assert "backslash" in result.stderr
+
+
+def test_links_applies_compatibility_to_a_recursive_selector(tmp_path: Path, monkeypatch):
+    """Matching is against the retained spellings, so a `**` declaration reaches every depth."""
+    _compat_config(tmp_path, "['*.md', 'docs/**/*.md']", "['docs/**']")
+    _write(tmp_path, "GUIDE.md", "# Guide\n\n## Topic {#legacy}\n")
+    _write(tmp_path, "README.md", "# Readme\n\n[t](GUIDE.md#legacy)\n")
+    _write(tmp_path, "docs/a.md", "# A\n\n[t](../GUIDE.md#legacy)\n")
+    _write(tmp_path, "docs/deep/b.md", "# B\n\n[t](../../GUIDE.md#legacy)\n")
+    monkeypatch.chdir(tmp_path)
+
+    result = runner.invoke(app, ["links"])
+
+    assert result.exit_code == 1
+    assert result.stderr == ("'README.md':3: fragment '#legacy' matches no heading in 'GUIDE.md'\n")
