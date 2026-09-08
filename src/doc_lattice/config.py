@@ -1,5 +1,5 @@
 """Load and validate .doc-lattice.yml, with project-root containment of docs_roots and
-lexical validation of link_sources."""
+lexical validation of the link source keys."""
 
 import re
 from collections.abc import Mapping
@@ -10,7 +10,12 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_valida
 
 from .constants import LATTICE_FORMAT_VERSION
 from .error_types import ConfigError
-from .link_selectors import selector_defect_message, validate_link_selector
+from .link_selectors import (
+    LEGACY_MARKER_SOURCES_KEY,
+    LINK_SOURCES_KEY,
+    selector_defect_message,
+    validate_link_selector,
+)
 from .path_utils import format_path_for_display, safe_resolve
 from .validation_render import format_validation_error
 from .yaml_boundary import YAML_LOAD_ERRORS, SafeYamlLoader
@@ -52,6 +57,13 @@ class Config(BaseModel):
     docs_roots: list[str] = Field(default_factory=lambda: ["docs"])
     ignore_globs: list[str] = Field(default_factory=list)
     link_sources: list[str] = Field(default_factory=list)
+    # Omitted and declared-empty are told apart here where link_sources does not tell them apart,
+    # because the two shapes mean opposite things for this key. Omitted is the strict default and
+    # the only shape an existing config has; a declared empty list is an author asking for a
+    # compatibility policy and naming nothing, which is refused rather than read as the default
+    # they did not write. link_sources needs no such distinction: both of its shapes are the same
+    # refusal, since the gate has no file set without it.
+    legacy_marker_sources: list[str] | None = None
     linear_team: str | None = None
     cache_key: str | None = None
     cache_trust_stat: bool = False
@@ -90,12 +102,48 @@ class Config(BaseModel):
         selector that names a symlink out of the project survives load and becomes an exit-1
         finding when the links command selects it, which is the contract the gate documents.
         """
-        for entry in value:
-            try:
-                validate_link_selector(entry)
-            except ValueError as exc:
-                msg = selector_defect_message(entry, exc)
-                raise ValueError(msg) from exc
+        _validate_selectors(LINK_SOURCES_KEY, value)
+        return value
+
+    @field_validator("legacy_marker_sources", mode="before")
+    @classmethod
+    def _reject_a_written_null(cls, value: object) -> object:
+        """Refuse ``legacy_marker_sources:`` with nothing after it.
+
+        A before-validator runs only on a value the config actually carried, so ``None`` here is
+        a key written as null rather than a key omitted. Absent means strict and is the default;
+        null means an author wrote the key, and reading that as the default they did not write is
+        the shape ``link_sources`` already refuses under strict mode for the same reason.
+        """
+        if value is None:
+            msg = (
+                f"{LEGACY_MARKER_SOURCES_KEY} is written as null; remove the key to keep the "
+                "strict default, or name the sources that carry legacy markers"
+            )
+            raise ValueError(msg)
+        return value
+
+    @field_validator("legacy_marker_sources")
+    @classmethod
+    def _validate_legacy_marker_sources(cls, value: list[str]) -> list[str]:
+        """Reject a declared-but-empty compatibility list, and any entry the grammar cannot read.
+
+        Never reached with ``None``: an omitted key skips field validation entirely, and a key
+        written as null is refused by the before-validator above, so the only value that arrives
+        here is a list the author wrote.
+
+        Lexical only, exactly as ``link_sources`` is: whether an entry matches a selected source
+        is a question about the selection, which this boundary has not run and cannot see. The
+        links command asks it before any document is parsed, so an entry matching nothing is
+        still a config error rather than a silently ineffective policy.
+        """
+        if not value:
+            msg = (
+                f"{LEGACY_MARKER_SOURCES_KEY} is declared but names no selector; remove the key "
+                "to keep the strict default, or name the sources that carry legacy markers"
+            )
+            raise ValueError(msg)
+        _validate_selectors(LEGACY_MARKER_SOURCES_KEY, value)
         return value
 
     @model_validator(mode="after")
@@ -108,6 +156,16 @@ class Config(BaseModel):
             )
             raise ValueError(msg)
         return self
+
+
+def _validate_selectors(key: str, entries: list[str]) -> None:
+    """Raise ``ValueError`` naming the first entry of ``key`` the selector grammar refuses."""
+    for entry in entries:
+        try:
+            validate_link_selector(entry)
+        except ValueError as exc:
+            msg = selector_defect_message(key, entry, exc)
+            raise ValueError(msg) from exc
 
 
 @dataclass(frozen=True, slots=True)

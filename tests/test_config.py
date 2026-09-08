@@ -137,7 +137,7 @@ def test_binding_layers_is_rejected_with_the_migration_sentence_and_accepted_key
     assert "there is no replacement" in message
     assert (
         "accepted keys: cache_key, cache_trust_stat, docs_roots, ignore_globs, lattice_format, "
-        "linear_team"
+        "legacy_marker_sources, linear_team, link_sources"
     ) in message
 
 
@@ -675,3 +675,88 @@ def test_an_escaping_link_source_is_not_rejected_at_load(tmp_path: Path):
         "lattice_format: 2\nlink_sources: [escape.md]\n", encoding="utf-8"
     )
     assert load_config(None, tmp_path).config.link_sources == ["escape.md"]
+
+
+def test_legacy_marker_sources_is_absent_by_default(tmp_path: Path):
+    """Omitted is the strict default, and it is a distinct value from a declared empty list."""
+    assert load_config(None, tmp_path).config.legacy_marker_sources is None
+
+    (tmp_path / ".doc-lattice.yml").write_text(
+        "lattice_format: 2\nlink_sources: ['*.md']\n", encoding="utf-8"
+    )
+    assert load_config(None, tmp_path).config.legacy_marker_sources is None
+
+
+def test_legacy_marker_sources_are_loaded_verbatim(tmp_path: Path):
+    (tmp_path / ".doc-lattice.yml").write_text(
+        "lattice_format: 2\nlink_sources: ['*.md']\n"
+        "legacy_marker_sources:\n  - ARCHITECTURE.md\n  - docs/**\n",
+        encoding="utf-8",
+    )
+    project = load_config(None, tmp_path)
+    assert project.config.legacy_marker_sources == ["ARCHITECTURE.md", "docs/**"]
+
+
+@pytest.mark.parametrize(
+    ("declaration", "reason"),
+    [
+        # A declared empty list is an author asking for a policy and naming nothing.
+        ("legacy_marker_sources: []\n", "names no selector"),
+        # Null is the same mistake with different punctuation, and link_sources refuses it too.
+        ("legacy_marker_sources:\n", "written as null"),
+    ],
+)
+def test_an_empty_or_null_compatibility_declaration_is_a_config_error(
+    tmp_path: Path, declaration, reason
+):
+    (tmp_path / ".doc-lattice.yml").write_text(
+        f"lattice_format: 2\nlink_sources: ['*.md']\n{declaration}", encoding="utf-8"
+    )
+    with pytest.raises(ConfigError, match=reason):
+        load_config(None, tmp_path)
+
+
+@pytest.mark.parametrize("value", ["'ARCHITECTURE.md'", "3", "{a: b}"])
+def test_a_compatibility_declaration_that_is_not_a_list_is_a_schema_error(tmp_path: Path, value):
+    (tmp_path / ".doc-lattice.yml").write_text(
+        f"lattice_format: 2\nlink_sources: ['*.md']\nlegacy_marker_sources: {value}\n",
+        encoding="utf-8",
+    )
+    with pytest.raises(ConfigError, match="legacy_marker_sources"):
+        load_config(None, tmp_path)
+
+
+@pytest.mark.parametrize(
+    ("entry", "reason"),
+    [
+        ("docs\\\\guide.md", "backslash"),
+        ("/etc/passwd", "absolute"),
+        ("docs/", "separator"),
+        ("../up.md", "'..'"),
+        ("notes[1.md", "unclosed"),
+    ],
+)
+def test_a_malformed_compatibility_entry_is_a_config_error_naming_its_own_key(
+    tmp_path: Path, entry, reason
+):
+    # The grammar is shared with link_sources, so the defect text is the same; what must not be
+    # shared is the subject, since the reader has two lists to look in.
+    (tmp_path / ".doc-lattice.yml").write_text(
+        f"lattice_format: 2\nlink_sources: ['*.md']\nlegacy_marker_sources: ['{entry}']\n",
+        encoding="utf-8",
+    )
+    with pytest.raises(ConfigError) as info:
+        load_config(None, tmp_path)
+    assert "legacy_marker_sources entry" in str(info.value)
+    assert reason in str(info.value)
+
+
+def test_a_compatibility_entry_matching_nothing_is_not_rejected_at_load(tmp_path: Path):
+    # Whether an entry matches a selected source is a question about the selection, which this
+    # boundary has not run. The links command asks it, and still refuses; a load-time rejection
+    # here would make every command that only loads config fail on the links gate's business.
+    (tmp_path / ".doc-lattice.yml").write_text(
+        "lattice_format: 2\nlink_sources: ['*.md']\nlegacy_marker_sources: ['nowhere/**']\n",
+        encoding="utf-8",
+    )
+    assert load_config(None, tmp_path).config.legacy_marker_sources == ["nowhere/**"]

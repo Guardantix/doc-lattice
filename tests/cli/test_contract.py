@@ -943,7 +943,8 @@ def test_multi_line_config_diagnostic_survives_the_stderr_renderer(tmp_path: Pat
     # parenthetical rather than as a property of the error.
     assert lines[2] == (
         "  bogus: Extra inputs are not permitted (accepted keys: cache_key, cache_trust_stat, "
-        "docs_roots, ignore_globs, lattice_format, linear_team, link_sources)"
+        "docs_roots, ignore_globs, lattice_format, legacy_marker_sources, linear_team, "
+        "link_sources)"
     )
 
 

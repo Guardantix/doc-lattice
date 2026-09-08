@@ -7,7 +7,12 @@ import typer
 from ...config import DEFAULT_CONFIG_NAME, ProjectConfig
 from ...constants import VALID_LINK_REPORT_FORMATS
 from ...error_types import ConfigError
-from ...link_check import LinkFinding, check_links, select_link_sources
+from ...link_check import (
+    LinkFinding,
+    check_links,
+    select_legacy_marker_sources,
+    select_link_sources,
+)
 from ...path_utils import format_path_for_display
 from ..errors import EXIT_FINDING, exit_on_project_error
 from ..github import Annotation, write_annotations
@@ -42,6 +47,24 @@ def _require_link_sources(project: ProjectConfig) -> list[str]:
             "['docs/**/*.md'] or whichever files you want checked"
         )
     raise ConfigError(msg)
+
+
+def _legacy_marker_sources(project: ProjectConfig, sources: list[Path]) -> frozenset[Path]:
+    """Return the sources the config opts into marker resolution, empty when it declares none.
+
+    Omission is the whole of the strict default and is answered here without reaching the engine,
+    so a config that never asked for compatibility runs the code path it ran before the key
+    existed. Every other shape is a config error, and every one of them lands before any document
+    is parsed, so an ineffective policy is never discovered halfway through a run. Config load
+    already refused a declared empty list and a malformed entry by the time this runs; what
+    reaches the engine is the question load could not ask, whether each entry matches a selected
+    source, and the engine re-refuses the empty list on its own so a direct caller meets the same
+    rule.
+    """
+    declared = project.config.legacy_marker_sources
+    if declared is None:
+        return frozenset()
+    return select_legacy_marker_sources(project.project_root, sources, declared)
 
 
 def format_finding(finding: LinkFinding) -> str:
@@ -92,7 +115,8 @@ def register_links(app: typer.Typer) -> None:
             project = runtime.project(config)
             selectors = _require_link_sources(project)
             sources = select_link_sources(project.project_root, selectors)
-            findings = check_links(project.project_root, sources)
+            legacy = _legacy_marker_sources(project, sources)
+            findings = check_links(project.project_root, sources, legacy)
         if selection.annotates:
             write_annotations(runtime, _annotations(project.project_root, findings))
         else:

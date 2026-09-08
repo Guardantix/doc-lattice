@@ -2413,7 +2413,7 @@ weighed and declined on its own terms.
 ### AD-45: The link gate is its own command over its own source set, reading the engine's inventory
 
 **Date:** 2026-09-02
-**Status:** Accepted
+**Status:** Accepted; extended by AD-49
 **Context:** `scripts/check_doc_links.py` was a complete Markdown link gate that reached nobody:
 excluded from the wheel, hardcoded to this repository's root, and callable only by being this
 repository. colinear ran `check` and `lint` green over hundreds of dead fragment links, which is
@@ -2688,3 +2688,72 @@ the same job and hook that already fail a version mismatch, and RELEASING.md car
 manual step. The release job's own steps are untouched, so the extraction remains the last word
 before the tag. The re-arm token stays a release-job concern; a typo in it is still discovered by
 a merge, which AD-46 made recoverable and this record declines to make less likely.
+
+### AD-49: Marker compatibility is a source-selected permission over separately cached target facts
+
+**Date:** 2026-09-08
+**Status:** Accepted; extends AD-45
+**Context:** AD-45 gave the gate one heading inventory, the ids GitHub allocates, and a corpus that
+addresses its sections by an explicit `{#marker}` therefore fails it wholesale. colinear's
+`ARCHITECTURE.md` is that corpus, and GTX-547 proposed excluding the file from the gate to make
+the gate adoptable, which trades every real dead link in it for the marker references the gate
+cannot read. The alternatives were both worse: a second fragment resolver would be a parallel
+answer to "which ids exist", the thing AD-45 exists to have one of, and widening the inventory to
+allocate marker ids would change what GitHub-id membership means for every consumer.
+
+**Decision:** An opt-in `legacy_marker_sources` config key names sources that may resolve a
+fragment through `markdown_compat.addressable_explicit_markers` as well as through the GitHub
+inventory. `link_check` caches the two sets separately per target and applies the source's
+permission at fragment resolution.
+
+**A source permission, never a target property.** The question a fragment asks is "may *this
+document* address a section this way", which is a fact about the corpus a document belongs to.
+Making it a target property would mean a strict source inherits compatibility by linking into a
+legacy file, so one legacy document would silently relax the gate across every consumer of it.
+That is why the cache holds `github_ids` and `markers` side by side rather than a pre-unioned
+accepted set: the union differs per source, and computing it at resolution is what lets one read
+answer both kinds of source.
+
+**Order independence is a property of the flag, not of care at each call site.** Whether markers
+are collected is fixed for the run, not decided by whichever source reaches a target first, so a
+strict source arriving first cannot leave a half-filled entry a later legacy source would read as
+empty. The alternative -- filling markers lazily when a legacy source first needs them -- makes
+the gate's verdict depend on the sort order of the source list, which is the class of bug the
+selection ordering rules in AD-45 exist to prevent.
+
+**Consuming the accessor rather than re-deriving eligibility.** `addressable_explicit_markers`
+intersects the rendered parse with the addressable scanner by source position, so a marker on a
+heading only the restricted scanner sees -- inside an HTML comment or a raw HTML block -- is not
+in the set. Re-deriving marker eligibility here would either reproduce that intersection or, more
+likely, reach for `anchor_ids`, which answers doc-lattice's own addressing question and does
+report a commented-out marker. The gate asks a rendering question; being pinned to the accessor
+is what keeps it asking that one.
+
+**Matched against retained spellings, not expanded against the filesystem.** A compatibility
+declaration is matched by `link_selectors.selector_matches_path` over the project-relative
+spellings selection already fixed, so it cannot add a file to the gate however it is written --
+a policy key that could widen the checked set would be a second, quieter `link_sources`. The
+matcher is a sibling of the walk's `segment_matches` rather than an `fnmatch` call, because the
+two have to agree about what `**` means, and it advances a set of positions rather than
+backtracking so a repository deeper than the recursion limit does not reach the ceiling the walk
+keeps its own stack to avoid. An entry naming only an alias selection discarded matches nothing
+and is refused: granting the surviving spelling a policy written for a name the gate does not
+carry would be inventing the author's intent.
+
+**Fails closed per entry, and off the default path.** Omitted is the strict default and the only
+shape an existing config has; null and a declared empty list are an author asking for a policy and
+naming nothing, and are refused at config load, which is where `link_sources` refuses the same
+punctuation. Every entry must match at least one selected source, checked before any document is
+parsed, so an ineffective policy is a config error rather than a green run over a corpus nobody
+covered. With the key absent the accessor is never called, so its second parse is not a cost the
+default path pays.
+
+**Consequences:** A consumer can gate a frozen marker-based corpus instead of excluding it, which
+is what GTX-547 needs and what unblocks retiring colinear's local `github_slug` under GTX-532. The
+key is opt-in and generated by no `init` mode, so no adopter surface changes and the migration
+guard sees nothing; an adopter still has to upgrade its hook, workflow, and installed-tool pins
+before writing the key, because an older schema rejects an unknown one. Compatibility validates
+marker references and does not make them navigate on GitHub, where a marker is literal heading
+text, and it is not a marker-preservation check: deleting `{#fingerprints}` from
+`## Fingerprints` leaves `#fingerprints` resolving against that heading's own id, so the pinned
+identity can be lost with the gate still green.

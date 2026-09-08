@@ -1,8 +1,15 @@
-"""The ``link_sources`` selector grammar: lexical validation, segment matching, literal escaping.
+"""The selector grammar the source keys share: lexical validation, matching, literal escaping.
 
 Pure and filesystem-free, so ``config`` can validate a selector at load without reaching the
 walk that expands it, and ``scaffold`` can spell one for a literal root without reaching the
 filesystem at all. The walk itself lives in ``link_check``.
+
+Two config keys are written in this grammar and are matched by different means. ``link_sources``
+is expanded against the filesystem by that walk, which is what turns a selector into files.
+``legacy_marker_sources`` is matched against the spellings the walk already retained, by
+``selector_matches_path`` here, so a compatibility declaration can never add a file to the gate;
+the two therefore have to agree about what a selector means, which is why the matcher is a
+sibling of the walk's own ``segment_matches`` rather than an ``fnmatch`` call at the call site.
 
 A selector is project-relative and POSIX on every platform: ``/`` is the only separator, and a
 backslash is refused rather than read as one, so a config is accepted or rejected identically
@@ -22,6 +29,10 @@ from .text_utils import strip_control_chars
 
 SELECTOR_SEPARATOR = "/"
 RECURSIVE_SEGMENT = "**"
+# The config keys written in this grammar, named here because a diagnostic about a rejected entry
+# has to say which key carried it and both keys' refusals are built by one function below.
+LINK_SOURCES_KEY = "link_sources"
+LEGACY_MARKER_SOURCES_KEY = "legacy_marker_sources"
 _DOT_SEGMENTS = frozenset({".", ".."})
 # One pass over the text, because each replacement introduces a bracket of its own: a sequence
 # of per-character replacements is correct only while ``[`` is handled first, and that ordering
@@ -79,22 +90,27 @@ def validate_link_selector(entry: str) -> tuple[str, ...]:
     return segments
 
 
-def selector_defect_message(entry: str, defect: ValueError) -> str:
-    """Return the user-facing diagnostic for one rejected ``link_sources`` entry.
+def selector_defect_message(key: str, entry: str, defect: ValueError) -> str:
+    """Return the user-facing diagnostic for one rejected selector entry.
 
     ``validate_link_selector`` raises a subjectless predicate, so the subject is supplied here
     rather than at each call site. Both callers that reject an entry -- config load and the
     selection walk -- report the same defect about the same value, and a reader who meets one
     message should not have to recognize the other as the same refusal.
 
+    ``key`` is a parameter rather than the literal ``link_sources`` because a second key is
+    written in this grammar: a compatibility entry rejected under the name of the key that did
+    not carry it sends the reader to the wrong list to repair it.
+
     Args:
-        entry: The ``link_sources`` entry as written.
+        key: The config key the entry was written under.
+        entry: The entry as written.
         defect: The ``ValueError`` ``validate_link_selector`` raised for it.
 
     Returns:
         The full diagnostic, ready to carry whatever error type the caller raises.
     """
-    return f"link_sources entry {format_path_for_display(entry)} {defect}"
+    return f"{key} entry {format_path_for_display(entry)} {defect}"
 
 
 def _has_unclosed_bracket(segment: str) -> bool:
@@ -133,6 +149,72 @@ def segment_matches(name: str, pattern: str) -> bool:
         True when ``fnmatch`` matches them case-sensitively.
     """
     return fnmatchcase(name, pattern)
+
+
+def _recursive_closure(positions: set[int], segments: tuple[str, ...]) -> set[int]:
+    """Return ``positions`` plus every position reachable by consuming no directory.
+
+    ``**`` matches zero or more directories, so a position on one is also a position on the
+    segment after it. Adjacent ``**`` segments are valid grammar, so the step is taken to a
+    fixpoint rather than once. The last segment is never stepped past: a position beyond it has
+    consumed the whole selector and can match nothing further.
+    """
+    end = len(segments) - 1
+    closed = set(positions)
+    pending = list(positions)
+    while pending:
+        position = pending.pop()
+        if segments[position] != RECURSIVE_SEGMENT or position >= end:
+            continue
+        if position + 1 not in closed:
+            closed.add(position + 1)
+            pending.append(position + 1)
+    return closed
+
+
+def selector_matches_path(segments: tuple[str, ...], path: str) -> bool:
+    """Report whether one validated selector matches one project-relative POSIX spelling.
+
+    The lexical half of what ``link_check``'s walk does against the filesystem, and it has to
+    agree with it: the selector is anchored at the project root, every part but the last is a
+    directory the walk would have descended into, and only the last part can satisfy the last
+    segment. ``**`` consumes zero or more directories, and as the final segment it also matches
+    the file itself, which is what makes ``docs/**`` cover everything beneath ``docs``.
+
+    Positions are advanced as a set rather than by backtracking, so the cost is the parts times
+    the segments and the interpreter's stack is never spent: matching is reached from a mandatory
+    gate, and a repository deeper than the recursion limit is the case the walk already keeps its
+    own stack for. Recursing here would put that ceiling back on the same paths from the other
+    side.
+
+    Args:
+        segments: The selector's segments, already through ``validate_link_selector``.
+        path: A project-relative POSIX spelling naming a file, with ``/`` as its only separator.
+
+    Returns:
+        True when the selector matches that spelling.
+    """
+    parts = path.split(SELECTOR_SEPARATOR)
+    end = len(segments) - 1
+    positions = {0}
+    for part in parts[:-1]:
+        advanced: set[int] = set()
+        for position in _recursive_closure(positions, segments):
+            if segments[position] == RECURSIVE_SEGMENT:
+                advanced.add(position)
+            elif position < end and segment_matches(part, segments[position]):
+                advanced.add(position + 1)
+        if not advanced:
+            return False
+        positions = advanced
+    return any(
+        position == end
+        and (
+            segments[position] == RECURSIVE_SEGMENT
+            or segment_matches(parts[-1], segments[position])
+        )
+        for position in _recursive_closure(positions, segments)
+    )
 
 
 def escape_selector_literal(text: str) -> str:

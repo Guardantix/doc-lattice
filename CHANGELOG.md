@@ -6,6 +6,24 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added
+
+- `doc-lattice links` can now validate explicit `{#marker}` references from sources you name,
+  through the new opt-in `legacy_marker_sources` config key. A corpus written before GitHub
+  heading ids can be gated instead of excluded from the gate outright, without a second fragment
+  resolver and without changing what GitHub-id membership means anywhere else. The key is omitted
+  by default and every source stays strict; it selects sources rather than targets, so it can add
+  no file to the gate and linking to a legacy document grants the linking source nothing. It only
+  adds accepted destinations, so a fragment an ordinary heading id already resolves keeps
+  resolving everywhere, and a marker on a heading no render shows -- one inside an HTML comment or
+  a raw HTML block -- is still not addressable. It fails closed like `link_sources`: the key
+  written as null or as an empty list, an entry the selector grammar cannot read, and an entry
+  matching no selected source are all config errors, refused before any document is parsed.
+  Compatibility says a marker reference is coherent within the corpus, not that it navigates on
+  GitHub, where a marker is literal heading text. README.md owns the contract and
+  ARCHITECTURE.md's AD-49 owns the decisions. Adopters upgrade their hook, workflow, and
+  installed-tool pins before adding the key, since an older schema rejects an unknown one.
+
 ## [7.1.0] - 2026-09-07
 
 ### Added

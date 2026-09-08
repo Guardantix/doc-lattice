@@ -28,6 +28,17 @@ Rendered inline heading text is the one form still out of reach: heading ids are
 inline source on both sides, so ``## [Guide](target.md)`` yields ``guidetargetmd`` against
 GitHub's ``guide``.
 
+``legacy_marker_sources`` opts explicitly named sources into resolving a fragment through an
+explicit ``{#marker}`` as well, for a frozen marker-based corpus a consumer would otherwise have
+to exclude from the gate outright. It is a property of the *source*, never of the target: the
+selectors are matched by ``link_selectors.selector_matches_path`` against the spellings selection
+already retained, so a compatibility declaration can add no file to the gate, and linking to a
+legacy document confers nothing on the source that linked. It only ever adds accepted
+destinations, so a GitHub id keeps resolving a fragment for every source either way. What it does
+not do is make those links navigate: a marker is literal heading text to GitHub, so a
+compatibility pass says the reference is coherent within the corpus and not that a browser will
+follow it.
+
 Destinations are read from Markdown link tokens. A destination written as a raw HTML anchor is
 reported rather than resolved. Markdown-it normalizes a Markdown destination -- percent-encoding
 separators and brackets, trimming surrounding whitespace -- and an attribute value arrives with
@@ -55,7 +66,7 @@ carry a path the diff has nothing to attach to.
 import errno
 import os
 import stat
-from collections.abc import Sequence
+from collections.abc import Collection, Sequence
 from dataclasses import dataclass
 from html.parser import HTMLParser
 from pathlib import Path, PurePosixPath, PureWindowsPath
@@ -66,13 +77,16 @@ from markdown_it.token import Token
 
 from .error_types import ConfigError, UnreadableDocError
 from .link_selectors import (
+    LEGACY_MARKER_SOURCES_KEY,
+    LINK_SOURCES_KEY,
     RECURSIVE_SEGMENT,
     SELECTOR_SEPARATOR,
     segment_matches,
     selector_defect_message,
+    selector_matches_path,
     validate_link_selector,
 )
-from .markdown_compat import full_heading_inventory
+from .markdown_compat import addressable_explicit_markers, full_heading_inventory
 from .path_utils import format_path_for_display
 
 _PARSER = MarkdownIt("commonmark")
@@ -113,6 +127,41 @@ class Link:
 
     href: str
     line: int
+
+
+@dataclass(frozen=True, slots=True)
+class _TargetHeadings:
+    """What one Markdown target offers a fragment, as two sets a source's policy chooses between.
+
+    ``github_ids`` is what every source may resolve against. ``markers`` is the explicit
+    ``{#marker}`` values a legacy source may resolve against as well, and is empty on a run with
+    no compatibility policy, where nothing reads it. They are separate rather than pre-unioned
+    because the union differs per source, and a target read by a legacy source is read once and
+    then answered for a strict one.
+    """
+
+    github_ids: frozenset[str]
+    markers: frozenset[str]
+
+
+@dataclass(frozen=True, slots=True)
+class _Targets:
+    """The whole-run context a fragment is resolved in: the root, the memo, and the marker flag.
+
+    One object rather than three parameters, because every one of them is fixed for the run
+    while the source and the link are not: keeping them together is what leaves room for the
+    per-link permission the resolution actually turns on.
+
+    ``reads_markers`` is a property of the run and not of any one target, which is what makes
+    the memo order-independent: whichever source reaches a target first fills both sets under
+    the same flag, so a strict source arriving first cannot leave a half-filled entry for a
+    legacy source to read. It is false whenever no source has compatibility, which is what keeps
+    the extra parse the accessor costs off the default path entirely.
+    """
+
+    root: Path
+    entries: dict[Path, _TargetHeadings]
+    reads_markers: bool
 
 
 @dataclass(frozen=True, slots=True)
@@ -354,21 +403,29 @@ def _contained_parts(base: PurePosixPath, raw_path: str) -> tuple[str, ...] | No
     return tuple(parts)
 
 
-def _heading_ids(
-    document: Path, cache: dict[Path, frozenset[str]], *, text: str | None = None
-) -> frozenset[str] | None:
-    """Return the link-target GitHub heading ids of a Markdown document, memoized.
+def _target_headings(
+    document: Path, targets: _Targets, *, text: str | None = None
+) -> _TargetHeadings | None:
+    """Return the heading facts a fragment is resolved against for one Markdown target, memoized.
 
     The ids are the engine's own: ``full_heading_inventory`` reads every heading a GitHub render
     assigns an id to and allocates through the pinned document-order collision rule, so this is
     the one inventory rather than a parallel copy of it. The module docstring records why it is
     wider than the addressable subset.
 
+    The markers beside them are ``markdown_compat.addressable_explicit_markers``, read only when
+    the run has a compatibility policy. Consuming that accessor rather than re-deriving marker
+    eligibility here is what keeps a marker on a heading no render shows -- one inside an HTML
+    comment or a raw HTML block -- out of the set, since the accessor intersects the two scanners
+    by source position and this module would have no reason to.
+
     A target is read here rather than where the sources are, so it needs a refusal of its own,
     and bytes that will not decode as UTF-8 are the whole of it: the inventory parses blocks
     only, so no character reference reaches an entity decoder and the parse itself has no content
     failure to report. An undecodable target is a finding on the link rather than a tool error,
-    and it is not memoized, because nothing was learned to memoize.
+    and it is not memoized, because nothing was learned to memoize. An empty marker set is not
+    that case: it is a successful extraction from a target that carries no eligible marker, and
+    it memoizes like any other answer.
 
     That is the narrower half of the source refusal, deliberately: a source is parsed inline as
     well, which is where a character reference wider than the interpreter's integer-conversion
@@ -380,19 +437,21 @@ def _heading_ids(
     that carries so much as a table of contents.
 
     Args:
-        document: The Markdown target whose heading ids are wanted.
-        cache: Heading ids already read, keyed by target path.
+        document: The Markdown target whose heading facts are wanted.
+        targets: The run's resolution context: the root, the memo keyed by target path, and
+            whether markers are collected at all.
         text: The document's content when the caller already read it, else None to read here.
 
     Returns:
-        The target's link-target heading ids, or None when the file would not decode.
+        The target's heading facts, or None when the file would not decode.
 
     Raises:
         UnreadableDocError: If the filesystem refused the read.
         RuntimeError: If the pinned parser returned a malformed heading token pair; that is a
-            parser invariant failure, not bad content, and is deliberately not caught.
+            parser invariant failure, not bad content, and is deliberately not caught. Both
+            scanners answer to it, so a compatibility run propagates it from either one.
     """
-    if document not in cache:
+    if document not in targets.entries:
         if text is None:
             try:
                 text = document.read_text(encoding="utf-8")
@@ -401,32 +460,45 @@ def _heading_ids(
             except OSError as exc:
                 msg = f"link target {format_path_for_display(document)} could not be read: {exc}"
                 raise UnreadableDocError(msg, source=document) from exc
-        cache[document] = frozenset(record.github_id for record in full_heading_inventory(text))
-    return cache[document]
+        targets.entries[document] = _TargetHeadings(
+            github_ids=frozenset(record.github_id for record in full_heading_inventory(text)),
+            markers=addressable_explicit_markers(text) if targets.reads_markers else frozenset(),
+        )
+    return targets.entries[document]
 
 
 def _fragment_message(
     fragment: str,
     target: Path,
-    root: Path,
-    cache: dict[Path, frozenset[str]],
+    targets: _Targets,
     *,
+    legacy: bool,
     text: str | None = None,
 ) -> str | None:
-    """Return a diagnostic when a fragment matches no heading in a Markdown target.
+    """Return a diagnostic when a fragment matches no heading a source may resolve against.
+
+    ``legacy`` is the permission of the *source* the link was written in, applied here rather
+    than folded into the cached target, so two sources under different policies reading one
+    target get different answers from one read. A GitHub id resolves the fragment for either
+    kind of source: compatibility only adds accepted destinations, so an ineligible marker can
+    never veto an id that resolves on its own.
+
+    Comparison is exact against the fragment the caller already decoded, so a marker's case is
+    load-bearing and a second decode never happens: ``{#MixedCase}`` answers to ``#MixedCase``
+    and to ``#%4DixedCase``, and to neither ``#mixedcase`` nor ``#%254DixedCase``.
 
     Both interpolations are neutralized: the target is a repo-controlled filename, and the
     fragment carries whatever the destination percent-encoded, so ``#%1b`` would otherwise put
     a live ESC on stderr. See AD-34.
 
-    ``text`` is passed only for the target that is the source document itself; ``_heading_ids``
+    ``text`` is passed only for the target that is the source document itself; ``_target_headings``
     records why.
     """
-    heading_ids = _heading_ids(target, cache, text=text)
-    displayed_target = format_path_for_display(target.relative_to(root).as_posix())
-    if heading_ids is None:
+    headings = _target_headings(target, targets, text=text)
+    displayed_target = format_path_for_display(target.relative_to(targets.root).as_posix())
+    if headings is None:
         return f"link target {displayed_target} could not be read for its headings"
-    if fragment in heading_ids:
+    if fragment in headings.github_ids or (legacy and fragment in headings.markers):
         return None
     displayed_fragment = format_path_for_display("#" + fragment)
     return f"fragment {displayed_fragment} matches no heading in {displayed_target}"
@@ -557,9 +629,10 @@ def _selects_plain_view(query: str) -> bool:
 def _link_message(
     link: Link,
     document: Path,
-    root: Path,
-    cache: dict[Path, frozenset[str]],
+    targets: _Targets,
     source_text: str,
+    *,
+    legacy: bool,
 ) -> str | None:
     """Return a diagnostic for one link, or None when it resolves.
 
@@ -573,10 +646,14 @@ def _link_message(
     Args:
         link: The link to resolve.
         document: The source document the link was written in.
-        root: The project root every target must stay inside.
-        cache: Heading ids already read, keyed by target path.
+        targets: The run's resolution context, carrying the project root every target must
+            stay inside and the target-heading memo.
         source_text: The source document's already-read content, handed on for the one target
             that is the source itself so it is not read a second time.
+        legacy: Whether this source may resolve a fragment through an explicit marker. It
+            travels with the link rather than with the target, and reaches both destination
+            forms alike: a ``#fragment`` resolving against the source's own text and a
+            ``file.md#fragment`` resolving against another document are one permission.
 
     Returns:
         The diagnostic text without its ``file:line`` prefix, or None.
@@ -590,25 +667,29 @@ def _link_message(
     fragment = "" if _selects_plain_view(parts.query) else unquote(parts.fragment)
     if not parts.path:
         return (
-            _fragment_message(fragment, document, root, cache, text=source_text)
+            _fragment_message(fragment, document, targets, legacy=legacy, text=source_text)
             if fragment
             else None
         )
-    target = _resolve_target(parts.path, document, root)
+    target = _resolve_target(parts.path, document, targets.root)
     displayed = format_path_for_display(href)
     if target is None:
         return f"link target {displayed} does not resolve inside the repository"
-    if _escapes_by_symlink(target, root):
+    if _escapes_by_symlink(target, targets.root):
         return f"link target {displayed} leaves the repository through a symlink"
     mode = _stat_mode(target)
     if mode is None:
         return f"link target {displayed} does not exist"
     renders_as_markdown = target.suffix.lower() in _MARKDOWN_TARGET_SUFFIXES
     checkable = bool(fragment) and renders_as_markdown and stat.S_ISREG(mode)
-    return _fragment_message(fragment, target, root, cache) if checkable else None
+    return _fragment_message(fragment, target, targets, legacy=legacy) if checkable else None
 
 
-def check_links(project_root: Path, sources: Sequence[Path]) -> list[LinkFinding]:
+def check_links(
+    project_root: Path,
+    sources: Sequence[Path],
+    legacy_marker_sources: Collection[Path] = (),
+) -> list[LinkFinding]:
     """Return one finding per unresolvable link, raw anchor, or unreadable source.
 
     The sources are normally what ``select_link_sources`` returned, but this upholds its own
@@ -616,9 +697,18 @@ def check_links(project_root: Path, sources: Sequence[Path]) -> list[LinkFinding
     (a copy, the input is untouched) and every source is containment-checked immediately before
     it is read.
 
+    ``legacy_marker_sources`` is normally what ``select_legacy_marker_sources`` returned, and is
+    empty by default, which is the strict behavior every existing caller keeps: no marker is
+    extracted from any target and every fragment answers to a GitHub id alone.
+
     Args:
         project_root: The project root every source and target must stay inside.
         sources: Unresolved paths under ``project_root``, one per document to check.
+        legacy_marker_sources: The subset of ``sources`` that may also resolve a fragment
+            through an explicit ``{#marker}`` on a rendered, addressable heading. Membership is
+            by the same unresolved path the source is listed under; a path outside ``sources``
+            selects nothing and is not an error here, since this function is handed a policy
+            rather than asked to derive one.
 
     Returns:
         Findings in document order, sources sorted by the project-relative POSIX spelling each
@@ -636,7 +726,8 @@ def check_links(project_root: Path, sources: Sequence[Path]) -> list[LinkFinding
             rather than a document defect.
     """
     root = project_root.resolve()
-    cache: dict[Path, frozenset[str]] = {}
+    legacy = frozenset(legacy_marker_sources)
+    targets = _Targets(root=root, entries={}, reads_markers=bool(legacy))
     findings: list[LinkFinding] = []
     # Ordered by the spelling each finding is reported under, which is what a reader scans and
     # what select_link_sources already sorted by. Sorting the paths themselves would order by
@@ -671,8 +762,9 @@ def check_links(project_root: Path, sources: Sequence[Path]) -> list[LinkFinding
             findings.append(LinkFinding(relative, None, UNPARSEABLE_SOURCE_MESSAGE))
             continue
         found: list[tuple[int, str]] = []
+        source_is_legacy = document in legacy
         for link in links:
-            message = _link_message(link, document, root, cache, text)
+            message = _link_message(link, document, targets, text, legacy=source_is_legacy)
             if message is not None:
                 found.append((link.line, message))
         found.extend((line, HTML_ANCHOR_MESSAGE) for line in anchors)
@@ -714,7 +806,7 @@ def select_link_sources(project_root: Path, selectors: Sequence[str]) -> list[Pa
     root = project_root.resolve()
     if not selectors:
         msg = (
-            f"link_sources names no selector for the project root "
+            f"{LINK_SOURCES_KEY} names no selector for the project root "
             f"{format_path_for_display(root)}; the links command refuses to run "
             "without a selector"
         )
@@ -724,14 +816,14 @@ def select_link_sources(project_root: Path, selectors: Sequence[str]) -> list[Pa
         try:
             segments = validate_link_selector(entry)
         except ValueError as exc:
-            msg = selector_defect_message(entry, exc)
+            msg = selector_defect_message(LINK_SOURCES_KEY, entry, exc)
             raise ConfigError(msg) from exc
         found = _walk(root, segments)
         if not found:
             msg = (
-                f"link_sources entry {format_path_for_display(entry)} matches no file under "
-                f"the project root {format_path_for_display(root)}; the links command refuses "
-                "to run over a selector that selects nothing"
+                f"{LINK_SOURCES_KEY} entry {format_path_for_display(entry)} matches no file "
+                f"under the project root {format_path_for_display(root)}; the links command "
+                "refuses to run over a selector that selects nothing"
             )
             raise ConfigError(msg)
         matched.update(found)
@@ -749,6 +841,68 @@ def select_link_sources(project_root: Path, selectors: Sequence[str]) -> list[Pa
         seen.add(resolved)
         sources.append(candidate)
     return sources
+
+
+def select_legacy_marker_sources(
+    project_root: Path, sources: Sequence[Path], selectors: Sequence[str]
+) -> frozenset[Path]:
+    """Return the selected sources a compatibility declaration opts into marker resolution.
+
+    Matching is lexical against the project-relative POSIX spelling each source is listed under,
+    which is the spelling ``select_link_sources`` retained. Two consequences follow and both are
+    deliberate. A compatibility selector can never add a file to the gate, because it is matched
+    against a set the filesystem walk already fixed. And a declaration naming only an alias that
+    selection discarded -- selection collapses aliases of one file onto the first spelling in
+    sorted order -- matches nothing and is refused, rather than silently granting the surviving
+    spelling a policy nobody wrote for it.
+
+    Every entry must match at least one selected source, and every entry is checked: a valid
+    entry never conceals an unmatched one, because a policy that quietly covers less than it
+    names is the same silent green the source key's own fail-closed rule exists to prevent.
+
+    Args:
+        project_root: The project root the spellings are relative to.
+        sources: The selected sources, as ``select_link_sources`` returned them.
+        selectors: The ``legacy_marker_sources`` entries. Never omitted: a caller with no
+            declaration does not call this, and an empty sequence is the declared-empty shape.
+
+    Returns:
+        The subset of ``sources`` the declaration selects, as the same path objects.
+
+    Raises:
+        ConfigError: If ``selectors`` is empty, or an entry is malformed or matches no selected
+            source. Every refusal here is about the declaration rather than about a document, so
+            all of them are config errors, which is the same taxonomy ``select_link_sources``
+            applies to a selector that reaches nothing.
+    """
+    root = project_root.resolve()
+    if not selectors:
+        msg = (
+            f"{LEGACY_MARKER_SOURCES_KEY} names no selector for the project root "
+            f"{format_path_for_display(root)}; remove the key to keep the strict default, or "
+            "name the sources that carry legacy markers"
+        )
+        raise ConfigError(msg)
+    spelled = [(document.relative_to(root).as_posix(), document) for document in sources]
+    selected: set[Path] = set()
+    for entry in selectors:
+        try:
+            segments = validate_link_selector(entry)
+        except ValueError as exc:
+            msg = selector_defect_message(LEGACY_MARKER_SOURCES_KEY, entry, exc)
+            raise ConfigError(msg) from exc
+        matched = [
+            document for relative, document in spelled if selector_matches_path(segments, relative)
+        ]
+        if not matched:
+            msg = (
+                f"{LEGACY_MARKER_SOURCES_KEY} entry {format_path_for_display(entry)} matches no "
+                f"{LINK_SOURCES_KEY} file; a compatibility selector grants a policy to files the "
+                "gate already checks and cannot add one"
+            )
+            raise ConfigError(msg)
+        selected.update(matched)
+    return frozenset(selected)
 
 
 def _require_regular_file(candidate: Path) -> None:
@@ -773,7 +927,8 @@ def _scan(directory: Path) -> list[os.DirEntry[str]]:
         with os.scandir(directory) as entries:
             return list(entries)
     except OSError as exc:
-        msg = f"link_sources selection could not scan {format_path_for_display(directory)}: {exc}"
+        displayed = format_path_for_display(directory)
+        msg = f"{LINK_SOURCES_KEY} selection could not scan {displayed}: {exc}"
         raise ConfigError(msg) from exc
 
 
@@ -788,7 +943,7 @@ def _is_directory(entry: os.DirEntry[str]) -> bool:
         return entry.is_dir(follow_symlinks=False)
     except OSError as exc:
         displayed = format_path_for_display(entry.path)
-        msg = f"link_sources selection could not inspect {displayed}: {exc}"
+        msg = f"{LINK_SOURCES_KEY} selection could not inspect {displayed}: {exc}"
         raise ConfigError(msg) from exc
 
 
