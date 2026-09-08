@@ -543,6 +543,55 @@ def anchor_ids(headings: list[Heading]) -> list[str]:
     ]
 
 
+def addressable_explicit_markers(body: str) -> frozenset[str]:
+    """Return the explicit ``{#marker}`` values a reader can actually address.
+
+    A marker qualifies only where its heading is both *rendered* and *addressable*, which is
+    the intersection of the two heading scanners this module already owns and is a set neither
+    of them reports alone. ``extract_headings`` is not container-aware, so it reads a
+    column-zero ``#`` line inside an HTML comment or a raw HTML block as a heading that no
+    render shows; ``full_heading_inventory`` reads the pinned parser's unrestricted stream, so
+    it sees setext, indented, quoted, and nested headings the engine does not address. Only a
+    heading both report is one a reader can reach by the marker it carries.
+
+    The intersection is taken **by source position**, never by heading text. Identical visible
+    and hidden heading text is the case that separates the two: joining on text would let a
+    hidden occurrence be validated by a visible one that is itself unaddressable, so the two
+    scanners' disjoint occurrences would report a marker neither of them makes reachable. Both
+    scanners read the same ``body`` through the same normalization, so their 1-based line
+    numbers describe one text snapshot and a line is a sound join key.
+
+    This is deliberately not ``anchor_ids``, which answers a different question: that function
+    substitutes a generated id wherever a heading carries no marker, so its output cannot say
+    whether any particular id was written down or derived. It is not the GitHub inventory
+    either, which slugs a marker as literal heading text. Marker membership is what a caller
+    checking marker preservation across two revisions needs, because losing a marker does not
+    reliably break a link: deleting ``{#fingerprints}`` from ``## Fingerprints`` leaves the
+    fragment ``#fingerprints`` resolving against the marker-free heading's own slug, so a
+    link-resolution check stays silent while the pinned identity is gone.
+
+    No slug generation, suffix allocation, or uniqueness validation happens here. Duplicate
+    marker values collapse, since this reports membership rather than occurrences, and a
+    duplicate marker is a collision the loader diagnoses against the whole lattice.
+
+    Args:
+        body: Markdown document text.
+
+    Returns:
+        Every explicit marker value, without the fragment's leading ``#`` and with its case
+        preserved, belonging to a heading that is both rendered and addressable.
+
+    Raises:
+        RuntimeError: If the pinned parser returns a malformed heading token pair.
+    """
+    rendered_lines = {record.line for record in full_heading_inventory(body)}
+    return frozenset(
+        heading.anchor
+        for heading in extract_headings(body)
+        if heading.anchor is not None and heading.line in rendered_lines
+    )
+
+
 def strip_heading_anchor(text: str) -> str:
     """Remove a valid trailing explicit anchor from one raw heading line.
 
