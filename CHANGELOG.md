@@ -6,6 +6,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [7.1.0] - 2026-09-07
+
 ### Added
 
 - `doc-lattice links`, the Markdown link gate, shipped as a command. It validates every relative
