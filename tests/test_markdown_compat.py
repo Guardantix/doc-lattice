@@ -268,6 +268,13 @@ def test_a_marker_only_the_restricted_scanner_sees_inside_a_comment_is_not_retur
     assert full_heading_inventory(body) == []
     assert addressable_explicit_markers(body) == frozenset()
 
+    # The tension this accessor is specified to accept, pinned so it stays visible: the engine
+    # does address `hidden`, so a lattice ref to it resolves while this reports no marker at all.
+    # A consumer checking marker preservation is therefore blind to a commented heading losing
+    # its marker. That is the issue's stated contract ("rendered, addressable"), not an oversight
+    # here, but it is the consumer's problem to know about before relying on this set.
+    assert anchor_ids(extract_headings(body)) == ["hidden"]
+
 
 def test_a_marker_in_a_raw_html_block_the_render_swallows_is_not_returned():
     # The tight form matters: a blank line would end the HTML block and make the heading
@@ -277,6 +284,25 @@ def test_a_marker_in_a_raw_html_block_the_render_swallows_is_not_returned():
     assert [(h.line, h.anchor) for h in extract_headings(body)] == [(2, "boxed")]
     assert full_heading_inventory(body) == []
     assert addressable_explicit_markers(body) == frozenset()
+
+
+def test_a_blank_line_ends_the_html_block_and_the_marker_comes_back():
+    # The paired positive for the swallowed case above, which the tight form's comment names but
+    # nothing pinned: one blank line closes the raw HTML block, so the same heading is genuinely
+    # rendered and its marker qualifies. Without this, an over-exclusion on the rendered side
+    # would still pass every container test here.
+    assert addressable_explicit_markers("<div>\n\n## Boxed {#boxed}\n</div>\n") == {"boxed"}
+
+
+@pytest.mark.parametrize("newline", ["\n", "\r\n", "\r"])
+def test_the_source_position_join_survives_every_line_ending(newline: str):
+    # The join is only sound because both scanners read one normalized text. A lone CR is the
+    # sharp case: the restricted scanner's line map splits on "\n" alone while the pinned
+    # parser normalizes CR itself, so dropping the shared normalization would leave the two
+    # disagreeing about which line a heading sits on and the intersection would come back empty.
+    body = newline.join(["## A {#a}", "", "## B {#b}", ""])
+
+    assert addressable_explicit_markers(body) == {"a", "b"}
 
 
 def test_the_visible_occurrence_supplies_the_marker_and_the_hidden_one_does_not():
@@ -298,17 +324,17 @@ def test_identical_visible_and_hidden_headings_cannot_validate_each_other():
 
 
 @pytest.mark.parametrize(
-    ("name", "body"),
+    "body",
     [
-        ("setext", "Shared {#shared}\n----------------\n"),
-        ("indented_three_spaces", "   ## Shared {#shared}\n"),
-        ("block_quoted", "> ## Shared {#shared}\n"),
-        ("list_nested", "- ## Shared {#shared}\n"),
+        pytest.param("Shared {#shared}\n----------------\n", id="setext"),
+        pytest.param("   ## Shared {#shared}\n", id="indented_three_spaces"),
+        pytest.param("> ## Shared {#shared}\n", id="block_quoted"),
+        pytest.param("- ## Shared {#shared}\n", id="list_nested"),
     ],
 )
-def test_a_marker_outside_the_addressable_subset_is_not_returned(name: str, body: str):
-    assert full_heading_inventory(body), f"{name} must still be a rendered heading"
-    assert addressable_explicit_markers(body) == frozenset(), name
+def test_a_marker_outside_the_addressable_subset_is_not_returned(body: str):
+    assert full_heading_inventory(body), "the form must still be a rendered heading"
+    assert addressable_explicit_markers(body) == frozenset()
 
 
 def test_a_marker_inside_a_fence_is_not_returned():

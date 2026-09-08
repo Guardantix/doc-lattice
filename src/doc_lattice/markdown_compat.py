@@ -7,7 +7,7 @@ the local state adapter builds only the source maps those rules require. Generat
 """
 
 import re
-from collections.abc import Iterable
+from collections.abc import Iterable, Iterator
 from dataclasses import dataclass
 
 from markdown_it import MarkdownIt
@@ -391,6 +391,36 @@ def github_heading_ids(headings: list[Heading]) -> list[str]:
     return github_ids_for_texts(heading.text for heading in headings)
 
 
+def _rendered_headings(body: str) -> Iterator[tuple[int, int, str]]:
+    """Walk the pinned parser's unrestricted stream, yielding one entry per rendered heading.
+
+    The single owner of the full-parse heading walk and of its malformed-token-pair check, so a
+    consumer needing only part of a heading record pays for only that part. Slug allocation stays
+    outside it deliberately: a caller after source positions alone would otherwise run
+    github-slugger over every heading in the document to reach them and discard every id.
+
+    Args:
+        body: Markdown document text.
+
+    Yields:
+        ``(line, level, text)`` per heading in document order, the line 1-based.
+
+    Raises:
+        RuntimeError: If the pinned parser returns a malformed heading token pair.
+    """
+    tokens = _BLOCK_PARSER.parse(_normalize_for_parse(body))
+    for index, token in enumerate(tokens):
+        if token.type != "heading_open":
+            continue
+        content = tokens[index + 1] if index + 1 < len(tokens) else None
+        if content is None or content.type != "inline" or token.map is None:
+            msg = f"{MARKDOWN_COMPAT_VERSION} returned a malformed heading token pair"
+            raise RuntimeError(msg)
+        # ``token.markup`` is ``=`` or ``-`` for a setext heading, so only ``tag`` carries the
+        # level uniformly across every heading form.
+        yield token.map[0] + 1, int(token.tag[1:]), content.content
+
+
 def full_heading_inventory(
     body: str, base_cache: dict[str, str] | None = None
 ) -> list[SluggedHeading]:
@@ -416,25 +446,15 @@ def full_heading_inventory(
     Raises:
         RuntimeError: If the pinned parser returns a malformed heading token pair.
     """
-    normalized = _normalize_for_parse(body)
-    tokens = _BLOCK_PARSER.parse(normalized)
     slugger = _Slugger(base_cache)
     inventory: list[SluggedHeading] = []
-    for index, token in enumerate(tokens):
-        if token.type != "heading_open":
-            continue
-        content = tokens[index + 1] if index + 1 < len(tokens) else None
-        if content is None or content.type != "inline" or token.map is None:
-            msg = f"{MARKDOWN_COMPAT_VERSION} returned a malformed heading token pair"
-            raise RuntimeError(msg)
-        github_id, probes = slugger.slug_with_probes(content.content)
+    for line, level, text in _rendered_headings(body):
+        github_id, probes = slugger.slug_with_probes(text)
         inventory.append(
             SluggedHeading(
-                text=content.content,
-                # ``token.markup`` is ``=`` or ``-`` for a setext heading, so only ``tag``
-                # carries the level uniformly across every heading form.
-                level=int(token.tag[1:]),
-                line=token.map[0] + 1,
+                text=text,
+                level=level,
+                line=line,
                 github_id=github_id,
                 probes=probes,
             )
@@ -550,9 +570,10 @@ def addressable_explicit_markers(body: str) -> frozenset[str]:
     the intersection of the two heading scanners this module already owns and is a set neither
     of them reports alone. ``extract_headings`` is not container-aware, so it reads a
     column-zero ``#`` line inside an HTML comment or a raw HTML block as a heading that no
-    render shows; ``full_heading_inventory`` reads the pinned parser's unrestricted stream, so
-    it sees setext, indented, quoted, and nested headings the engine does not address. Only a
-    heading both report is one a reader can reach by the marker it carries.
+    render shows; the pinned parser's unrestricted stream, which ``full_heading_inventory``
+    reports over and this reads source positions from, carries setext, indented, quoted, and
+    nested headings the engine does not address. Only a heading both report is one a reader can
+    reach by the marker it carries.
 
     The intersection is taken **by source position**, never by heading text. Identical visible
     and hidden heading text is the case that separates the two: joining on text would let a
@@ -570,9 +591,12 @@ def addressable_explicit_markers(body: str) -> frozenset[str]:
     fragment ``#fingerprints`` resolving against the marker-free heading's own slug, so a
     link-resolution check stays silent while the pinned identity is gone.
 
-    No slug generation, suffix allocation, or uniqueness validation happens here. Duplicate
-    marker values collapse, since this reports membership rather than occurrences, and a
-    duplicate marker is a collision the loader diagnoses against the whole lattice.
+    No slug generation, suffix allocation, or uniqueness validation happens here, which is why
+    the rendered side reads the shared full-parse walk rather than ``full_heading_inventory``
+    itself: source positions are all this needs, and allocating a github-slugger id for every
+    heading to reach them is work it would throw away. Duplicate marker values collapse, since
+    this reports membership rather than occurrences, and a duplicate marker is a collision the
+    loader diagnoses against the whole lattice.
 
     Args:
         body: Markdown document text.
@@ -584,7 +608,7 @@ def addressable_explicit_markers(body: str) -> frozenset[str]:
     Raises:
         RuntimeError: If the pinned parser returns a malformed heading token pair.
     """
-    rendered_lines = {record.line for record in full_heading_inventory(body)}
+    rendered_lines = {line for line, _level, _text in _rendered_headings(body)}
     return frozenset(
         heading.anchor
         for heading in extract_headings(body)
