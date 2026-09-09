@@ -20,12 +20,14 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 - Internal: the ban on reading the clock outside `datetime_utils.py` is now enforced over
   `scripts/` as well as `src/`. It was stated without qualification in CLAUDE.md and checked over
-  `src/` alone, so a script could open a second time boundary unnoticed. `tests/test_conventions.py`
-  now compares every file that reads the clock, under either root, against a manifest keyed by
-  root-relative path and carrying each file's permitted call count, which fails an unlisted
-  reader, a second clock inside an exempt file, and an entry whose file has moved or gone alike.
-  The audit script above is the one entry beside AD-2's boundary, because it runs under
-  `uv run --no-project` and cannot import the boundary it would otherwise call.
+  `src/` alone, so a script could open a second time boundary unnoticed. Each root now compares
+  every file that reads the clock against a manifest keyed by root-relative path and carrying
+  each file's permitted call count, which fails an unlisted reader, a second clock inside an
+  exempt file, and an entry whose file has moved or gone alike. The audit script above is the one
+  entry beside AD-2's boundary, because it runs under `uv run --no-project` and cannot import the
+  boundary it would otherwise call. The `scripts/` half is a new repository-only suite,
+  `tests/test_script_conventions.py`, since `tests/test_conventions.py` ships in the sdist and
+  `scripts/` does not.
 
 ## [7.2.0] - 2026-09-08
 

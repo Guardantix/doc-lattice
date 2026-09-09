@@ -36,6 +36,7 @@ _REPOSITORY_ONLY_TESTS = (
     "tests/test_release_gate.py",
     "tests/test_release_target.py",
     "tests/test_release_workflow.py",
+    "tests/test_script_conventions.py",
     "tests/test_script_loader.py",
     "tests/test_slugger_generator.py",
     "tests/test_workflow_pinning.py",
