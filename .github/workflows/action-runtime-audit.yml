@@ -36,4 +36,15 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           RUN_ID: ${{ github.event.workflow_run.id || inputs.run_id }}
-        run: uv run --no-project python scripts/audit_action_runtimes.py --run-id "${RUN_ID}"
+          # The horizon applies to the run GitHub chose, not to one a maintainer named. A
+          # `workflow_run` fires whenever a run reaches `completed`, however long after it
+          # started: a job left awaiting a deployment approval is expired after thirty days and
+          # completes then, and its annotations name the pins its own workflow file carried, so
+          # a red default branch would be pointing at a bump already made. A dispatch is the
+          # opposite case, since the run someone names by hand is usually an old one.
+          STALE_GUARD: ${{ github.event_name == 'workflow_run' && '--skip-stale-runs' || '' }}
+        # Unquoted on purpose: the variable holds either one flag or nothing, and quoting it
+        # would pass an empty argument on the dispatch path.
+        run: >-
+          uv run --no-project python scripts/audit_action_runtimes.py
+          --run-id "${RUN_ID}" ${STALE_GUARD}

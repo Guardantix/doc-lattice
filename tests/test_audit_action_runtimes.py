@@ -13,6 +13,7 @@ them: which lines it renders, and how its exit ladder reads a failed report.
 import subprocess
 import sys
 import types
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pytest
@@ -29,11 +30,13 @@ _REPORT_FAILED = load_script(script_path("_ci_report.py"))["REPORT_FAILED"]
 Finding = _SCRIPT["Finding"]
 Job = _SCRIPT["Job"]
 Run = _SCRIPT["Run"]
+MAX_AUDITABLE_AGE = _SCRIPT["MAX_AUDITABLE_AGE"]
 collect_findings = _SCRIPT["collect_findings"]
 fetch_json = _SCRIPT["fetch_json"]
 is_deprecation = _SCRIPT["is_deprecation"]
 main = _SCRIPT["main"]
 paginate = _SCRIPT["paginate"]
+render_stale_summary = _SCRIPT["render_stale_summary"]
 render_summary = _SCRIPT["render_summary"]
 
 _REPOSITORY = "Guardantix/doc-lattice"
@@ -51,6 +54,12 @@ _CACHE_MESSAGE = (
     "another job may be creating this cache."
 )
 
+# The run's own start, in the spelling the API uses. Every age below is measured from here, so
+# the tests never read a real clock: an audit whose answer moved with the calendar would go from
+# green to red on its own, which is the failure the horizon exists to prevent.
+_RUN_STARTED_AT = "2026-09-08T23:14:51Z"
+_STARTED = datetime(2026, 9, 8, 23, 14, 51, tzinfo=UTC)
+
 _RUN_PAYLOAD = {
     "id": _RUN_ID,
     "name": "CI",
@@ -58,7 +67,13 @@ _RUN_PAYLOAD = {
     "event": "push",
     "head_branch": "main",
     "run_attempt": 1,
+    "run_started_at": _RUN_STARTED_AT,
 }
+
+
+def _clock(age: timedelta):
+    """Return a clock reading exactly `age` after the fixture run started."""
+    return lambda: _STARTED + age
 
 
 def _job_payload(
@@ -106,6 +121,7 @@ def _run_fixture():
         event="push",
         head_branch="main",
         run_attempt=1,
+        run_started_at=_STARTED,
     )
 
 
@@ -365,6 +381,117 @@ def test_main_reads_a_job_that_ran_and_failed(monkeypatch, capsys):
 
     assert code == 1
     assert "Jobs audited: 1." in capsys.readouterr().out
+
+
+def test_main_does_not_audit_a_run_that_started_before_the_horizon(monkeypatch, capsys):
+    # The `workflow_run` trigger fires on completion, and completion can arrive long after the
+    # run started: a job parked awaiting a deployment approval is expired after thirty days, and
+    # the run reaches `completed` then. Its annotations name the pins that workflow file carried
+    # at the time, which the default branch has since bumped, so reporting them is a red default
+    # branch over an edit that is already made. Auditing it also spends a request per job to
+    # learn that.
+    monkeypatch.delenv("GITHUB_STEP_SUMMARY", raising=False)
+    fetch, calls = _fake_api(
+        jobs=[_job_payload(1, "Build release distributions")],
+        annotations={1: [_annotation_payload("warning", _NODE_20_MESSAGE)]},
+    )
+
+    code = main(
+        ["--repository", _REPOSITORY, "--run-id", str(_RUN_ID), "--skip-stale-runs"],
+        fetch,
+        _clock(timedelta(days=30)),
+    )
+
+    assert code == 0
+    assert not any("/jobs" in call for call in calls)
+    assert not any("/check-runs/" in call for call in calls)
+    captured = capsys.readouterr()
+    assert "| [Build release distributions]" not in captured.out
+    assert "RELEASING.md" not in captured.out
+    assert "30 days" in captured.err
+    # The skipped report has to be the skipped report. Rendering this through the clean summary
+    # would write "Jobs audited: 0" and "No deprecation annotations." over a run whose jobs were
+    # never read, which is the one reading of the summary tab that is worse than saying nothing.
+    assert "Not audited." in captured.out
+    assert "No deprecation annotations." not in captured.out
+    assert "Jobs audited:" not in captured.out
+
+
+def test_main_audits_a_run_that_started_exactly_on_the_horizon(monkeypatch, capsys):
+    # The boundary is "older than", not "at least as old as". A run is skipped for having
+    # outlived its workflow file, and a run of exactly the horizon's age has not: pushing the
+    # comparison one day early would drop a live finding on the quietest week of the year.
+    monkeypatch.delenv("GITHUB_STEP_SUMMARY", raising=False)
+    fetch, _calls = _fake_api(
+        jobs=[_job_payload(1, "Build release distributions")],
+        annotations={1: [_annotation_payload("warning", _NODE_20_MESSAGE)]},
+    )
+
+    code = main(
+        ["--repository", _REPOSITORY, "--run-id", str(_RUN_ID), "--skip-stale-runs"],
+        fetch,
+        _clock(MAX_AUDITABLE_AGE),
+    )
+
+    assert code == 1
+    assert "| [Build release distributions]" in capsys.readouterr().out
+
+
+def test_main_audits_a_run_of_any_age_when_the_horizon_is_not_asked_for(monkeypatch, capsys):
+    # The guard is opt-in because a hand dispatch names its run id deliberately, and the run a
+    # maintainer names is usually an old one -- replaying a missed audit, or reading a release
+    # run after the fact. A horizon that applied there too would answer every such dispatch with
+    # "not audited" and exit 0, which reads exactly like a clean run.
+    monkeypatch.delenv("GITHUB_STEP_SUMMARY", raising=False)
+    fetch, calls = _fake_api(
+        jobs=[_job_payload(1, "Build release distributions")],
+        annotations={1: [_annotation_payload("warning", _NODE_20_MESSAGE)]},
+    )
+
+    code = main(
+        ["--repository", _REPOSITORY, "--run-id", str(_RUN_ID)],
+        fetch,
+        _clock(timedelta(days=365)),
+    )
+
+    assert code == 1
+    assert any("/check-runs/1/annotations" in call for call in calls)
+    assert "| [Build release distributions]" in capsys.readouterr().out
+
+
+def test_render_stale_summary_names_the_run_and_reports_nothing_as_audited():
+    # A skipped audit still writes a summary, for the reason a clean one does: the run tab has
+    # to say which of the three things happened. This one must not read as a clean audit, so it
+    # carries neither the clean line nor a job count that would imply one.
+    summary = render_stale_summary(_run_fixture(), timedelta(days=30, hours=4))
+
+    assert summary.startswith(f"## Action runtime audit: CI run {_RUN_ID}\n")
+    assert f"[View the source run]({_RUN_PAYLOAD['html_url']})" in summary
+    assert "event `push`, branch `main`, attempt 1." in summary
+    assert "30 days" in summary
+    assert "Jobs audited:" not in summary
+    assert "No deprecation annotations." not in summary
+    assert "| Job | Level | Annotation |" not in summary
+    assert "RELEASING.md" not in summary
+    assert summary.endswith("\n")
+
+
+def test_main_reports_a_start_timestamp_it_cannot_read_as_a_failed_audit(monkeypatch, capsys):
+    # `datetime.fromisoformat` raises `ValueError`, which is neither of the two exceptions `main`
+    # answers in its exit code. Unguarded it escapes as a traceback carrying the interpreter's
+    # exit 1 -- this script's *findings* code -- so a run whose timestamp could not be parsed
+    # would report as a deprecated runtime.
+    monkeypatch.delenv("GITHUB_STEP_SUMMARY", raising=False)
+    fetch, _calls = _fake_api(
+        jobs=[_job_payload(1, "Tests (3.13)")],
+        annotations={1: []},
+        run={**_RUN_PAYLOAD, "run_started_at": "the day before yesterday"},
+    )
+
+    code = main(["--repository", _REPOSITORY, "--run-id", str(_RUN_ID), "--skip-stale-runs"], fetch)
+
+    assert code == 2
+    assert "::error::" in capsys.readouterr().err
 
 
 def test_main_reports_an_uninterpretable_payload_as_a_failed_audit(monkeypatch, capsys):

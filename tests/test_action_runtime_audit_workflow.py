@@ -37,9 +37,15 @@ _UPSTREAM_ACTIONS = frozenset(
 _AUDIT_IF = (
     "github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion != 'skipped'"
 )
+# Copied verbatim for the reason the condition above is. This is the whole of what keeps the
+# staleness horizon off a hand dispatch, and an expression that looks equivalent -- matching on
+# the dispatch event instead, say -- inverts it silently: both halves of the ternary are strings
+# a shell accepts, so the wrong one costs nothing until a maintainer replays an old run.
+_STALE_GUARD = "${{ github.event_name == 'workflow_run' && '--skip-stale-runs' || '' }}"
 _AUDIT_ENV = {
     "GH_TOKEN": "${{ github.token }}",
     "RUN_ID": "${{ github.event.workflow_run.id || inputs.run_id }}",
+    "STALE_GUARD": _STALE_GUARD,
 }
 
 
@@ -112,6 +118,24 @@ def test_audit_step_runs_the_auditor_against_the_triggering_run():
     invocations = [argv for argv in _invocations(step["run"]) if _invokes(argv, _SCRIPT)]
     assert invocations
     assert "${RUN_ID}" in invocations[0]
+
+
+def test_audit_applies_the_staleness_horizon_only_where_github_chose_the_run():
+    """A horizon on the dispatch path would answer a deliberate replay with "not audited".
+
+    `workflow_run` takes whatever run GitHub hands it, and completion can arrive weeks after the
+    run started -- an expired pending deployment reaches `completed` thirty days on -- so those
+    annotations name pins the default branch has since bumped. A dispatch names its run id by
+    hand, and the runs worth naming are the old ones. The argument therefore has to reach the
+    script on one trigger and not the other; passing it unconditionally, or dropping it from the
+    invocation, collapses the two cases back together in opposite directions.
+    """
+    job = _load_workflow(_AUDIT_PATH)["jobs"]["audit"]
+    step = _named_step(job, "Audit the completed run")
+
+    invocations = [argv for argv in _invocations(step["run"]) if _invokes(argv, _SCRIPT)]
+    assert invocations
+    assert "${STALE_GUARD}" in invocations[0]
 
 
 def test_audit_workflow_pins_the_same_action_fragments_this_repository_ships():
