@@ -6,6 +6,29 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Fixed
+
+- Internal: the `Action runtime audit` workflow no longer reports a run whose workflow file the
+  default branch has moved past. `workflow_run` fires when a run *completes*, however long after
+  it started, and a job left awaiting a deployment approval completes when GitHub expires it
+  thirty days on: the 4.0.0 release run reached `completed` on 2026-09-09 and the audit reported
+  three action pins as targeting Node.js 20 that had all been bumped to Node.js 24 weeks earlier.
+  Under the new `--skip-stale-runs`, which the workflow passes on the automatic trigger alone, a
+  run that started more than seven days ago is reported as `Not audited.` and read no further.
+  A hand dispatch still audits the run id it names at any age, so replaying a missed audit or
+  reading a release run after the fact is unchanged. ARCHITECTURE.md's AD-50 owns the decision.
+
+- Internal: the ban on reading the clock outside `datetime_utils.py` is now enforced over
+  `scripts/` as well as `src/`. It was stated without qualification in CLAUDE.md and checked over
+  `src/` alone, so a script could open a second time boundary unnoticed. Each root now compares
+  every file that reads the clock against a manifest keyed by root-relative path and carrying
+  each file's permitted call count, which fails an unlisted reader, a second clock inside an
+  exempt file, and an entry whose file has moved or gone alike. The audit script above is the one
+  entry beside AD-2's boundary, because it runs under `uv run --no-project` and cannot import the
+  boundary it would otherwise call. The `scripts/` half is a new repository-only suite,
+  `tests/test_script_conventions.py`, since `tests/test_conventions.py` ships in the sdist and
+  `scripts/` does not.
+
 ## [7.2.0] - 2026-09-08
 
 ### Added

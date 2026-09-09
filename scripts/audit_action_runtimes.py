@@ -9,6 +9,11 @@ annotations through ``gh api``, writes a job summary, and exits non-zero when an
 a deprecation. AD-42 in ARCHITECTURE.md records why this runs alongside Dependabot rather than
 instead of it.
 
+Under ``--skip-stale-runs`` a run that started longer ago than `MAX_AUDITABLE_AGE` is reported
+and not read. The trigger, not this script, decides that a run may be stale: the automatic
+`workflow_run` half takes whatever run GitHub hands it, while a hand dispatch names a run id
+deliberately and audits it at any age.
+
 The script is deliberately stdlib-only and imports nothing from ``doc_lattice``, so the auditing
 workflow can run it under ``uv run --no-project`` without resolving or installing the project. Its
 one local import is the sibling ``scripts/_ci_report.py``, which owns the guarded reporting
@@ -25,6 +30,7 @@ import os
 import subprocess
 import sys
 from dataclasses import dataclass
+from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING
 
 from _ci_report import emit, guarded_write
@@ -45,6 +51,15 @@ DEPRECATION_MARKER = "deprecat"
 # The conclusion of a job the runner never started. Its check run exists and reports as
 # completed, so only the conclusion separates it from a job that ran and passed.
 _SKIPPED = "skipped"
+# How long after a run starts its annotations are still worth reading, under `--skip-stale-runs`.
+# A run normally completes in minutes, but `workflow_run` fires on completion however late that
+# is: a job awaiting a deployment approval sits pending until GitHub expires it after thirty
+# days, and the run reaches `completed` then. The annotations it carries name the pins its own
+# workflow file held, so past this horizon the audit would report a bump the default branch has
+# already made. Seven days is chosen against the one legitimate long tail -- a release approval
+# that waits over a weekend -- and stays well inside the thirty-day expiry that produces the
+# stale case.
+MAX_AUDITABLE_AGE = timedelta(days=7)
 
 # Spelled out rather than imported from `doc_lattice.constants`, which this script cannot reach
 # under `--no-project`. These are the two pins `constants.py` ships to adopters, so a bump of
@@ -56,6 +71,10 @@ _POINTER = (
 )
 _TABLE_HEADER = ("| Job | Level | Annotation |", "| --- | --- | --- |")
 _NO_FINDINGS = "No deprecation annotations."
+# What a skipped audit says instead of a job count. It has to be unmistakable for the clean
+# report: three outcomes reach the same summary tab, and "found nothing" and "read nothing" are
+# the two a reader would otherwise conflate.
+_NOT_AUDITED = "Not audited."
 
 
 class AuditError(RuntimeError):
@@ -73,6 +92,9 @@ class Run:
         event: The event that triggered the run.
         head_branch: Branch the run was dispatched against, or None when it has none.
         run_attempt: Which attempt of the run this is, counting from one.
+        run_started_at: When this attempt began, as an aware datetime. Read rather than
+            ``created_at`` because a re-run restarts the clock the horizon measures: the
+            annotations belong to the attempt that produced them.
     """
 
     name: str
@@ -81,6 +103,7 @@ class Run:
     event: str
     head_branch: str | None
     run_attempt: int
+    run_started_at: datetime
 
 
 @dataclass(frozen=True)
@@ -209,6 +232,24 @@ def _require_int(payload: dict[str, object], key: str, context: str) -> int:
     return value
 
 
+def _require_timestamp(payload: dict[str, object], key: str, context: str) -> datetime:
+    """Return a timestamp field as an aware datetime, or raise when it is not one.
+
+    The raise is what keeps a malformed timestamp inside `main`'s error ladder. ``ValueError``
+    is neither exception that ladder answers, so letting `fromisoformat` raise its own would end
+    the run on a traceback carrying the interpreter's exit 1 -- which is this script's findings
+    code, and would report an unreadable payload as a deprecated runtime.
+    """
+    value = _require_str(payload, key, context)
+    try:
+        moment = datetime.fromisoformat(value)
+    except ValueError as error:
+        raise AuditError(f"{context}: field {key!r} is not a timestamp: {error}") from error
+    if moment.tzinfo is None:
+        raise AuditError(f"{context}: field {key!r} carries no time zone: {value!r}")
+    return moment
+
+
 def parse_run(payload: object) -> Run:
     """Narrow a run payload into a `Run`.
 
@@ -229,6 +270,7 @@ def parse_run(payload: object) -> Run:
         event=_require_str(run, "event", "run"),
         head_branch=_optional_str(run, "head_branch", "run"),
         run_attempt=_require_int(run, "run_attempt", "run"),
+        run_started_at=_require_timestamp(run, "run_started_at", "run"),
     )
 
 
@@ -379,6 +421,73 @@ def describe(finding: Finding) -> str:
     )
 
 
+def _started(run: Run) -> str:
+    """Return the run's start as a plain UTC minute.
+
+    The reports name this instead of an elapsed count. An age in whole days is floored, so every
+    run between seven and eight days old would read as "started 7 days ago, more than the 7 days"
+    -- a report contradicting itself on precisely the runs the horizon has only just caught --
+    and rounding the other way would overstate an age instead. A timestamp rounds nothing, and
+    it is the more useful half anyway: it is what identifies the run in a log.
+    """
+    return f"{run.run_started_at.astimezone(UTC):%Y-%m-%d %H:%M UTC}"
+
+
+def describe_stale(run: Run) -> str:
+    """Return a one-line rendering of a skipped audit for the workflow log.
+
+    Args:
+        run: Identity of the run that was not audited.
+
+    Returns:
+        A plain line naming the run and when it started, in the shape `describe` uses for a
+        finding, so a reader of the log alone sees why the step found nothing.
+    """
+    return (
+        f"{run.name} run {run.run_id}: not audited: it started {_started(run)}, "
+        f"more than {MAX_AUDITABLE_AGE.days} days ago"
+    )
+
+
+def _heading(run: Run) -> list[str]:
+    """Return the summary lines naming the run, shared by every outcome.
+
+    Both reports open with the same identification, and a reader lands on one without knowing
+    which. Composing it once is what keeps the skipped report from drifting into a shape that
+    reads like a different workflow's.
+    """
+    branch = run.head_branch or "no branch"
+    return [
+        f"## Action runtime audit: {run.name} run {run.run_id}",
+        "",
+        f"[View the source run]({run.html_url}) -- event `{run.event}`, branch `{branch}`, "
+        f"attempt {run.run_attempt}.",
+        "",
+    ]
+
+
+def render_stale_summary(run: Run) -> str:
+    """Render the job summary for a run too old to audit.
+
+    Args:
+        run: Identity of the run that was not audited.
+
+    Returns:
+        GitHub-flavored Markdown, ending in a newline. It carries no job count and no findings
+        table, because neither was established: nothing was read.
+    """
+    lines = [
+        *_heading(run),
+        _NOT_AUDITED,
+        "",
+        f"This run started {_started(run)}, more than the {MAX_AUDITABLE_AGE.days} days a "
+        "run's annotations are read for. They name the pins its own workflow file carried, "
+        "which a later commit may already have bumped. Dispatch this workflow against the run "
+        "id to audit it at any age.",
+    ]
+    return "\n".join(lines) + "\n"
+
+
 def render_summary(run: Run, findings: Sequence[Finding], jobs_audited: int) -> str:
     """Render the job summary for one audited run.
 
@@ -390,13 +499,8 @@ def render_summary(run: Run, findings: Sequence[Finding], jobs_audited: int) -> 
     Returns:
         GitHub-flavored Markdown, ending in a newline.
     """
-    branch = run.head_branch or "no branch"
     lines = [
-        f"## Action runtime audit: {run.name} run {run.run_id}",
-        "",
-        f"[View the source run]({run.html_url}) -- event `{run.event}`, branch `{branch}`, "
-        f"attempt {run.run_attempt}.",
-        "",
+        *_heading(run),
         f"Jobs audited: {jobs_audited}.",
         "",
     ]
@@ -412,6 +516,18 @@ def render_summary(run: Run, findings: Sequence[Finding], jobs_audited: int) -> 
         )
         lines.extend(("", _POINTER))
     return "\n".join(lines) + "\n"
+
+
+def utc_now() -> datetime:
+    """Return the current moment, in UTC.
+
+    The one reading of the clock, injected into `main` the way `fetch_json` is, so the horizon
+    is testable against fixed inputs and every other function here stays pure. This spells the
+    call out rather than importing ``doc_lattice.datetime_utils``, the AD-2 time boundary the
+    engine routes through: the auditing workflow runs this file under ``uv run --no-project``,
+    where no part of the package is importable.
+    """
+    return datetime.now(UTC)
 
 
 def _parse_args(argv: Sequence[str] | None) -> argparse.Namespace:
@@ -430,16 +546,24 @@ def _parse_args(argv: Sequence[str] | None) -> argparse.Namespace:
         required=True,
         help="Id of the completed run to audit.",
     )
+    parser.add_argument(
+        "--skip-stale-runs",
+        action="store_true",
+        help=(
+            f"Report a run that started more than {MAX_AUDITABLE_AGE.days} days ago as stale "
+            "and read nothing. Off by default, so a run named by hand is audited at any age."
+        ),
+    )
     args = parser.parse_args(argv)
     if not args.repository:
         parser.error("--repository is required when GITHUB_REPOSITORY is not set")
     return args
 
 
-def _audit(
+def _read_findings(
     fetch: Callable[[str], object], repository: str, run_id: int
-) -> tuple[Run, list[Finding], int]:
-    """Read one run and return its identity, its findings, and how many jobs were audited.
+) -> tuple[list[Finding], int]:
+    """Read one run's jobs and return its findings and how many jobs were audited.
 
     Two kinds of job are passed over rather than read, because each costs a request that cannot
     produce a finding. A job that has not completed has no settled annotations: the
@@ -449,7 +573,6 @@ def _audit(
     source run, one layer down. A `cancelled` or `failure` conclusion is read normally: those
     jobs ran steps, and a deprecation warning from one of them is exactly what this looks for.
     """
-    run = parse_run(fetch(f"/repos/{repository}/actions/runs/{run_id}"))
     jobs = [
         parse_job(entry)
         for entry in paginate(fetch, f"/repos/{repository}/actions/runs/{run_id}/jobs", "jobs")
@@ -465,25 +588,40 @@ def _audit(
         )
         for job in readable
     ]
-    return run, collect_findings(audited), len(readable)
+    return collect_findings(audited), len(readable)
 
 
-def main(argv: Sequence[str] | None = None, fetch: Callable[[str], object] = fetch_json) -> int:
+def main(
+    argv: Sequence[str] | None = None,
+    fetch: Callable[[str], object] = fetch_json,
+    now: Callable[[], datetime] = utc_now,
+) -> int:
     """Audit one completed run and report its deprecation annotations.
+
+    The run itself is read first and on its own, because under ``--skip-stale-runs`` its start
+    decides whether the jobs are read at all: a run past `MAX_AUDITABLE_AGE` costs no request
+    per job to reach an answer that is already known.
 
     Args:
         argv: Command-line arguments, or None to read ``sys.argv``.
         fetch: The transport to read the API through.
+        now: The clock the run's age is measured against.
 
     Returns:
         1 when any deprecation annotation was found, 2 when none was but the audit could not be
-        performed or its report could not be written, and 0 otherwise. A finding outranks both:
-        the deprecated runtime is actionable now, and letting a failed write of a report that
-        already reached the log mask it would report the weaker of the two answers.
+        performed or its report could not be written, and 0 otherwise -- a run skipped as stale
+        included, since a run that was never read established no finding. A finding outranks
+        both: the deprecated runtime is actionable now, and letting a failed write of a report
+        that already reached the log mask it would report the weaker of the two answers.
     """
     args = _parse_args(argv)
     try:
-        run, findings, jobs_audited = _audit(fetch, args.repository, args.run_id)
+        run = parse_run(fetch(f"/repos/{args.repository}/actions/runs/{args.run_id}"))
+        age = now() - run.run_started_at
+        if args.skip_stale_runs and age > MAX_AUDITABLE_AGE:
+            skipped = emit(render_stale_summary(run), [describe_stale(run)])
+            return 0 if skipped else 2
+        findings, jobs_audited = _read_findings(fetch, args.repository, args.run_id)
     except (AuditError, OSError) as error:
         guarded_write(print, f"::error::{error}", file=sys.stderr)
         return 2

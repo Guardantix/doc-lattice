@@ -89,6 +89,18 @@ it before committing.
 - Do not call `datetime.now()` or `datetime.utcnow()` outside `datetime_utils.py`, the AD-2
   impure time boundary. Call `datetime_utils.utc_now()` instead, so the pure modules stay
   testable against fixed inputs and a deterministic clock has one function to substitute.
+  `scripts/` cannot reach that boundary, since the auditing workflow runs its scripts under
+  `uv run --no-project` where nothing in the package imports, so a script that needs the clock
+  spells the call itself in a single function its `main` takes as an argument.
+  Each root compares every file that reads the clock against a manifest keyed by root-relative
+  path and carrying the number of readings each may make: `tests/test_conventions.py` over
+  `src/`, `tests/test_script_conventions.py` over `scripts/`, both scanning through the shared
+  `tests/clock_scan.py`. Paths rather than names, since both roots nest and a boundary is an
+  edit someone makes rather than one a file earns by being named a certain way; counts because
+  the rule is a single substitutable clock, so a second reading in an exempt file fails, and an
+  entry whose file is gone or moved fails with it. Adding one is a manifest edit. The two suites
+  are separate because only one ships: `scripts/` is repository-only, so its suite is named in
+  the sdist exclude list and the archive denial set both.
 - Keep `src/doc_lattice/__init__.py`, `pyproject.toml`, the first versioned CHANGELOG heading,
   and the exact install pins in README.md and MANAGED_CI.md synchronized. Run
   `scripts/check_version_sync.py` for every documentation or release change that can affect those

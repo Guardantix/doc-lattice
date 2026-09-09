@@ -2065,7 +2065,7 @@ in the import graph.
 ### AD-42: A stale action pin is noticed by two stock signals, not by an auditor
 
 **Date:** 2026-08-22
-**Status:** Accepted; amended by AD-43
+**Status:** Accepted; amended by AD-43 and AD-50
 **Context:** GTX-170 moved the two shipped action pins off Node.js 20 releases, and it existed
 only because someone read `Node.js 20 is deprecated` in a live job log while doing unrelated
 work. Nothing in this repository would have said it otherwise. A deliberately frozen SHA cannot
@@ -2757,3 +2757,83 @@ marker references and does not make them navigate on GitHub, where a marker is l
 text, and it is not a marker-preservation check: deleting `{#fingerprints}` from
 `## Fingerprints` leaves `#fingerprints` resolving against that heading's own id, so the pinned
 identity can be lost with the gate still green.
+
+### AD-50: The runtime audit reads a run GitHub chose only while its workflow file can still be edited
+
+**Date:** 2026-09-09
+**Status:** Accepted; amends AD-42
+**Context:** AD-42 reads the runner's annotations because they are a verdict about the actions
+that actually executed, and takes `workflow_run` on `completed` as the moment they have settled.
+That is the right moment for the annotations and the wrong one for the pins: what fires the event
+is a run's completion, and completion can arrive a long way from its start. A job held in a
+pending deployment is expired by GitHub after thirty days, and the run reaches `completed` then.
+On 2026-09-09 the audit read run 31429553210, a duplicate CI run for the `release!: 4.0.0` merge
+of 2026-08-10 whose `Publish to PyPI` job was never approved, and reported
+`actions/checkout@11d5960a`, `astral-sh/setup-uv@d0cc045d` and
+`actions/upload-artifact@ea165f8d` as targeting Node.js 20. Every finding was true of that run
+and none was actionable here: all three pins had been bumped to Node.js 24 releases weeks
+earlier. A default branch red over an edit already made is worse than no notice, because the
+signal this audit exists to make readable is the first thing a maintainer learns to discount.
+**Decision:** The audit reads a run only within `MAX_AUDITABLE_AGE`, seven days measured from
+the run's start, and only on the trigger that did not choose the run. Past the horizon the run
+is reported as `Not audited.` with its age and exits 0, having read neither the jobs nor an
+annotation.
+
+*The gate lives in the script, not in the job condition.* Workflow expressions have no date
+arithmetic, so nothing in an `if:` can subtract two timestamps; a condition could test the event
+but not the age. Keeping the decision in `audit_action_runtimes.py` also puts it where the
+horizon and its reasoning are one constant, and where a suite can drive it against fixed input.
+
+*Seven days, measured from `run_started_at`.* The horizon is set against the one legitimate long
+tail, a release approval that waits over a weekend, and sits well inside the thirty-day expiry
+that produces the stale case. `run_started_at` is the attempt's own start, where `created_at`
+stays with the run's first attempt: a re-run therefore reads as fresh and is audited, which is
+the answer that belongs with the carve-out below, since a re-run is a person naming that run.
+
+*The horizon is opt-in, and the workflow asks for it on one trigger.* `workflow_run` takes
+whatever run GitHub hands it, so it passes `--skip-stale-runs`. A `workflow_dispatch` names a run
+id by hand and passes nothing, because the runs worth naming are the old ones: replaying an audit
+that was missed, or reading a release run after the fact, which is the procedure AD-42's record
+and the 5.0.0 changelog entry both document. A horizon applied there would answer every such
+dispatch with `Not audited.` and exit 0, which reads exactly like a clean run.
+
+*A skipped audit renders as its own report.* Three outcomes now reach one summary tab, and the
+two that are easy to confuse are "found nothing" and "read nothing", so the skipped report
+carries neither the clean line nor a job count. Neither report states an elapsed age: whole days
+are floored, so a run between seven and eight days old would read as "started 7 days ago, more
+than the 7 days" on exactly the runs the horizon has only just caught, and rounding the other way
+overstates instead. They name the run's own start, which rounds nothing, and leave the comparison
+as the inequality `main` evaluated.
+
+*The clock is a second time boundary, and it is enforced as one.* It reaches `main` as an
+argument the way the transport does, which is AD-2's reasoning applied where AD-2's module
+cannot be called: the workflow runs this file under `uv run --no-project`, where no part of the
+package imports. That makes CLAUDE.md's unqualified ban on a current-time call outside
+`datetime_utils.py` false as written, and `tests/test_conventions.py` scanned only `src/`, so
+the exception would have been invisible. Both are corrected here rather than left to a docstring:
+the rule names the carve-out, and each root now compares every file that reads the clock against
+a manifest keyed by root-relative path and carrying each file's permitted call count. One
+equality then carries all three ways the rule breaks -- an unlisted reader, a second clock inside
+an exempt file, and an entry whose file has moved or gone, which a per-file check keyed on a
+basename would never visit. The `scripts/` half is its own suite rather than a branch in
+`tests/test_conventions.py`, because that module ships in the sdist and `scripts/` does not: a
+shipped module reading a repository-only root is exactly the shape AD-47's unpacked-archive leg
+exists to catch, and it caught this one.
+
+An alternative was rejected. **Matching the actions named in the annotation against the
+checked-out workflows** would answer the sharper question, whether the reported pin still exists
+to be edited, and would need no clock. It was refused because it reads the message: AD-42 chose a
+level plus the stem `deprecat` precisely so no upstream wording is parsed, and a runner-image
+deprecation names no action at all, so the absence of a parsable pin could not be told from a
+pin that is gone. Reconstructing structure from prose the record already declined to depend on
+is the same trade AD-42 made against a closure walk.
+**Consequences:** A run that outlives the horizon costs one green job and two lines of summary
+instead of a red default branch, and the request per job it would have spent. The trade is a
+real finding lost in one shape: a deprecation that appears only on a run taking more than seven
+days to complete goes unreported until the next run executes that path, which for the release
+path is the next release. A re-run of an old run is audited and will report that commit's pins,
+by the same reading that keeps a dispatch unguarded, so a maintainer re-running a month-old run
+sees findings about a workflow file `main` has moved past. The horizon is a property of this
+repository's release cadence, not of GitHub: a project that leaves approvals pending for longer
+has to raise it, and `tests/test_audit_action_runtimes.py` pins the boundary as "older than"
+rather than "at least", so a run of exactly seven days is still read.
