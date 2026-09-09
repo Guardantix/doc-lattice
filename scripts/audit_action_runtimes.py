@@ -421,18 +421,32 @@ def describe(finding: Finding) -> str:
     )
 
 
-def describe_stale(run: Run, age: timedelta) -> str:
+def _started(run: Run) -> str:
+    """Return the run's start as a plain UTC minute.
+
+    The reports name this instead of an elapsed count. An age in whole days is floored, so every
+    run between seven and eight days old would read as "started 7 days ago, more than the 7 days"
+    -- a report contradicting itself on precisely the runs the horizon has only just caught --
+    and rounding the other way would overstate an age instead. A timestamp rounds nothing, and
+    it is the more useful half anyway: it is what identifies the run in a log.
+    """
+    return f"{run.run_started_at.astimezone(UTC):%Y-%m-%d %H:%M UTC}"
+
+
+def describe_stale(run: Run) -> str:
     """Return a one-line rendering of a skipped audit for the workflow log.
 
     Args:
         run: Identity of the run that was not audited.
-        age: How long before now the run started.
 
     Returns:
-        A plain line naming the run and how old it is, in the shape `describe` uses for a
+        A plain line naming the run and when it started, in the shape `describe` uses for a
         finding, so a reader of the log alone sees why the step found nothing.
     """
-    return f"{run.name} run {run.run_id}: not audited: it started {age.days} days ago"
+    return (
+        f"{run.name} run {run.run_id}: not audited: it started {_started(run)}, "
+        f"more than {MAX_AUDITABLE_AGE.days} days ago"
+    )
 
 
 def _heading(run: Run) -> list[str]:
@@ -452,12 +466,11 @@ def _heading(run: Run) -> list[str]:
     ]
 
 
-def render_stale_summary(run: Run, age: timedelta) -> str:
+def render_stale_summary(run: Run) -> str:
     """Render the job summary for a run too old to audit.
 
     Args:
         run: Identity of the run that was not audited.
-        age: How long before now the run started.
 
     Returns:
         GitHub-flavored Markdown, ending in a newline. It carries no job count and no findings
@@ -467,7 +480,7 @@ def render_stale_summary(run: Run, age: timedelta) -> str:
         *_heading(run),
         _NOT_AUDITED,
         "",
-        f"This run started {age.days} days ago, more than the {MAX_AUDITABLE_AGE.days} days a "
+        f"This run started {_started(run)}, more than the {MAX_AUDITABLE_AGE.days} days a "
         "run's annotations are read for. They name the pins its own workflow file carried, "
         "which a later commit may already have bumped. Dispatch this workflow against the run "
         "id to audit it at any age.",
@@ -606,7 +619,7 @@ def main(
         run = parse_run(fetch(f"/repos/{args.repository}/actions/runs/{args.run_id}"))
         age = now() - run.run_started_at
         if args.skip_stale_runs and age > MAX_AUDITABLE_AGE:
-            skipped = emit(render_stale_summary(run, age), [describe_stale(run, age)])
+            skipped = emit(render_stale_summary(run), [describe_stale(run)])
             return 0 if skipped else 2
         findings, jobs_audited = _read_findings(fetch, args.repository, args.run_id)
     except (AuditError, OSError) as error:

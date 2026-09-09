@@ -408,13 +408,40 @@ def test_main_does_not_audit_a_run_that_started_before_the_horizon(monkeypatch, 
     captured = capsys.readouterr()
     assert "| [Build release distributions]" not in captured.out
     assert "RELEASING.md" not in captured.out
-    assert "30 days" in captured.err
+    assert "2026-09-08 23:14 UTC" in captured.err
+    assert "more than 7 days ago" in captured.err
     # The skipped report has to be the skipped report. Rendering this through the clean summary
     # would write "Jobs audited: 0" and "No deprecation annotations." over a run whose jobs were
     # never read, which is the one reading of the summary tab that is worse than saying nothing.
     assert "Not audited." in captured.out
     assert "No deprecation annotations." not in captured.out
     assert "Jobs audited:" not in captured.out
+
+
+def test_the_skipped_report_never_states_an_age_that_contradicts_the_horizon(monkeypatch, capsys):
+    # An age in whole days is floored, so every run between seven and eight days old rendered as
+    # "started 7 days ago, more than the 7 days" -- a report contradicting itself in one
+    # sentence, on exactly the runs the horizon has only just caught. The run's own start carries
+    # no rounding, and "more than the horizon" is the comparison `main` just evaluated, so the
+    # two cannot disagree whatever the age is.
+    monkeypatch.delenv("GITHUB_STEP_SUMMARY", raising=False)
+    fetch, _calls = _fake_api(jobs=[], annotations={})
+
+    code = main(
+        ["--repository", _REPOSITORY, "--run-id", str(_RUN_ID), "--skip-stale-runs"],
+        fetch,
+        _clock(MAX_AUDITABLE_AGE + timedelta(hours=1)),
+    )
+
+    assert code == 0
+    captured = capsys.readouterr()
+    contradiction = f"started {MAX_AUDITABLE_AGE.days} days ago"
+    assert contradiction not in captured.out
+    assert contradiction not in captured.err
+    assert "2026-09-08 23:14 UTC" in captured.out
+    # "more than N days ago" is the comparison that was just evaluated, so it stays true at
+    # every age past the horizon and is not the claim this test forbids.
+    assert f"more than {MAX_AUDITABLE_AGE.days} days ago" in captured.err
 
 
 def test_main_audits_a_run_that_started_exactly_on_the_horizon(monkeypatch, capsys):
@@ -463,12 +490,13 @@ def test_render_stale_summary_names_the_run_and_reports_nothing_as_audited():
     # A skipped audit still writes a summary, for the reason a clean one does: the run tab has
     # to say which of the three things happened. This one must not read as a clean audit, so it
     # carries neither the clean line nor a job count that would imply one.
-    summary = render_stale_summary(_run_fixture(), timedelta(days=30, hours=4))
+    summary = render_stale_summary(_run_fixture())
 
     assert summary.startswith(f"## Action runtime audit: CI run {_RUN_ID}\n")
     assert f"[View the source run]({_RUN_PAYLOAD['html_url']})" in summary
     assert "event `push`, branch `main`, attempt 1." in summary
-    assert "30 days" in summary
+    assert "2026-09-08 23:14 UTC" in summary
+    assert f"more than the {MAX_AUDITABLE_AGE.days} days" in summary
     assert "Jobs audited:" not in summary
     assert "No deprecation annotations." not in summary
     assert "| Job | Level | Annotation |" not in summary

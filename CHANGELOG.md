@@ -18,6 +18,14 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   A hand dispatch still audits the run id it names at any age, so replaying a missed audit or
   reading a release run after the fact is unchanged. ARCHITECTURE.md's AD-50 owns the decision.
 
+- Internal: the ban on reading the clock outside `datetime_utils.py` is now enforced over
+  `scripts/` as well as `src/`. It was stated without qualification in CLAUDE.md and checked over
+  `src/` alone, so a script could open a second time boundary unnoticed. `tests/test_conventions.py`
+  now scans `scripts/` against an exact allowlist and holds an allowlisted script to exactly one
+  current-time call, which fails a second clock and an exemption nothing uses alike. The audit
+  script above is the one entry, because it runs under `uv run --no-project` and cannot import the
+  boundary it would otherwise call.
+
 ## [7.2.0] - 2026-09-08
 
 ### Added

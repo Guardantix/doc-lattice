@@ -2799,9 +2799,21 @@ dispatch with `Not audited.` and exit 0, which reads exactly like a clean run.
 
 *A skipped audit renders as its own report.* Three outcomes now reach one summary tab, and the
 two that are easy to confuse are "found nothing" and "read nothing", so the skipped report
-carries neither the clean line nor a job count. The clock reaches `main` as an argument the way
-the transport does, which is AD-2's reasoning at a boundary that cannot reach `datetime_utils`:
-the workflow runs this file under `uv run --no-project`, where no part of the package imports.
+carries neither the clean line nor a job count. Neither report states an elapsed age: whole days
+are floored, so a run between seven and eight days old would read as "started 7 days ago, more
+than the 7 days" on exactly the runs the horizon has only just caught, and rounding the other way
+overstates instead. They name the run's own start, which rounds nothing, and leave the comparison
+as the inequality `main` evaluated.
+
+*The clock is a second time boundary, and it is enforced as one.* It reaches `main` as an
+argument the way the transport does, which is AD-2's reasoning applied where AD-2's module
+cannot be called: the workflow runs this file under `uv run --no-project`, where no part of the
+package imports. That makes CLAUDE.md's unqualified ban on a current-time call outside
+`datetime_utils.py` false as written, and `tests/test_conventions.py` scanned only `src/`, so
+the exception would have been invisible. Both are corrected here rather than left to a docstring:
+the rule names the carve-out, and the test now scans `scripts/` against an exact allowlist,
+holding an allowlisted script to exactly one call so a second clock fails and an unused exemption
+fails with it.
 
 An alternative was rejected. **Matching the actions named in the annotation against the
 checked-out workflows** would answer the sharper question, whether the reported pin still exists

@@ -89,6 +89,13 @@ it before committing.
 - Do not call `datetime.now()` or `datetime.utcnow()` outside `datetime_utils.py`, the AD-2
   impure time boundary. Call `datetime_utils.utc_now()` instead, so the pure modules stay
   testable against fixed inputs and a deterministic clock has one function to substitute.
+  `scripts/` cannot reach that boundary, since the auditing workflow runs its scripts under
+  `uv run --no-project` where nothing in the package imports, so a script that needs the clock
+  spells the call itself in a single function its `main` takes as an argument.
+  `tests/test_conventions.py` holds those scripts as an exact allowlist and bans the call in
+  every other one, and it requires an allowlisted script to make exactly one such call, so a
+  second clock is a failure and an exemption cannot outlive the reading it was granted for.
+  Adding one is an allowlist edit, never a file that happens to need the time.
 - Keep `src/doc_lattice/__init__.py`, `pyproject.toml`, the first versioned CHANGELOG heading,
   and the exact install pins in README.md and MANAGED_CI.md synchronized. Run
   `scripts/check_version_sync.py` for every documentation or release change that can affect those
