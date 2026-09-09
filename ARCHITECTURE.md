@@ -2811,9 +2811,11 @@ cannot be called: the workflow runs this file under `uv run --no-project`, where
 package imports. That makes CLAUDE.md's unqualified ban on a current-time call outside
 `datetime_utils.py` false as written, and `tests/test_conventions.py` scanned only `src/`, so
 the exception would have been invisible. Both are corrected here rather than left to a docstring:
-the rule names the carve-out, and the test now scans `scripts/` against an exact allowlist,
-holding an allowlisted script to exactly one call so a second clock fails and an unused exemption
-fails with it.
+the rule names the carve-out, and the test now compares every file that reads the clock under
+either root against a manifest keyed by root-relative path and carrying each file's permitted
+call count. One equality then carries all three ways the rule breaks -- an unlisted reader, a
+second clock inside an exempt file, and an entry whose file has moved or gone, which a per-file
+check keyed on a basename would never visit.
 
 An alternative was rejected. **Matching the actions named in the annotation against the
 checked-out workflows** would answer the sharper question, whether the reported pin still exists

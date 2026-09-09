@@ -92,10 +92,12 @@ it before committing.
   `scripts/` cannot reach that boundary, since the auditing workflow runs its scripts under
   `uv run --no-project` where nothing in the package imports, so a script that needs the clock
   spells the call itself in a single function its `main` takes as an argument.
-  `tests/test_conventions.py` holds those scripts as an exact allowlist and bans the call in
-  every other one, and it requires an allowlisted script to make exactly one such call, so a
-  second clock is a failure and an exemption cannot outlive the reading it was granted for.
-  Adding one is an allowlist edit, never a file that happens to need the time.
+  `tests/test_conventions.py` compares every file that reads the clock, under `src/` and under
+  `scripts/` alike, against a manifest keyed by root-relative path and carrying the number of
+  readings each may make. Paths rather than names, since both roots nest and a boundary is an
+  edit someone makes rather than one a file earns by being named a certain way; counts because
+  the rule is a single substitutable clock, so a second reading in an exempt file fails, and an
+  entry whose file is gone or moved fails with it. Adding one is a manifest edit.
 - Keep `src/doc_lattice/__init__.py`, `pyproject.toml`, the first versioned CHANGELOG heading,
   and the exact install pins in README.md and MANAGED_CI.md synchronized. Run
   `scripts/check_version_sync.py` for every documentation or release change that can affect those

@@ -24,13 +24,17 @@ from doc_lattice.scaffold import PYTHON_PIN
 SRC_DIR = Path(__file__).parent.parent / "src" / "doc_lattice"
 SCRIPTS_DIR = Path(__file__).parent.parent / "scripts"
 PYPROJECT_PATH = Path(__file__).parent.parent / "pyproject.toml"
-# Scripts allowed to spell a current-time call themselves, as exact names rather than a pattern,
-# for the reason the typing-boundary allowlist is exact: opening a boundary should be an edit
-# someone makes, not something a file earns by being named a certain way. `scripts/` is outside
-# AD-2's reach by construction -- the auditing workflow runs these files under
-# `uv run --no-project`, where `doc_lattice.datetime_utils` does not import -- so the rule here
-# is the same one at a boundary that cannot call it: one clock, in one function, injected.
-_CLOCK_SCRIPTS = frozenset({"audit_action_runtimes.py"})
+# Every file allowed to read the current time, keyed by path relative to its own root and
+# carrying the number of readings it may make. Paths rather than names, for the reason
+# `check_typing_boundaries.py` holds AD-3's boundaries as exact source-root-relative paths:
+# opening a boundary is an edit someone makes, never one a file earns by being named a certain
+# way, and both roots nest. Counts rather than membership, for the reason `PIN_MANIFEST` carries
+# one: the rule is a *single* substitutable clock, so a second reading in an exempt file is a
+# second clock however it is spelled. `datetime_utils.py` is AD-2's boundary.
+# `audit_action_runtimes.py` is the same rule where AD-2's module cannot be called, since the
+# auditing workflow runs `scripts/` under `uv run --no-project`.
+_CLOCK_SOURCES = {"datetime_utils.py": 1}
+_CLOCK_SCRIPTS = {"audit_action_runtimes.py": 1}
 
 
 def _source_files() -> list[Path]:
@@ -72,17 +76,32 @@ def _current_time_calls(source: str) -> list[int]:
     ]
 
 
+def _clock_readers(files: list[Path], root: Path) -> dict[str, int]:
+    """Return every file that reads the current time, by root-relative path, with its call count.
+
+    Compared against a manifest as a whole rather than checked file by file, so one equality
+    carries all three ways the rule breaks: an unlisted file reading the clock, a listed file
+    reading it twice, and a listed file that is gone or moved and would otherwise leave its
+    exemption granted to nothing and never visited.
+    """
+    counts = {}
+    for path in files:
+        calls = _current_time_calls(path.read_text(encoding="utf-8"))
+        if calls:
+            counts[path.relative_to(root).as_posix()] = len(calls)
+    return counts
+
+
 def test_no_current_time_calls_outside_datetime_utils():
-    """Any current-time call outside datetime_utils.py is banned (incl. datetime.now(tz=UTC))."""
+    """Any current-time call outside datetime_utils.py is banned (incl. datetime.now(tz=UTC)).
+
+    AD-2 records that module as the narrow impure time boundary. It exists because the reconcile
+    journal records when a transaction was prepared; nothing else in `src/` may read the clock.
+    """
     assert _current_time_calls("datetime.now(tz=UTC)")  # positive control: arg'd form caught
     assert not _current_time_calls("x = obj.now")  # attribute access, not a call
-    for py_file in _source_files():
-        # datetime_utils.py is the sanctioned home for a current-time call, and AD-2 records
-        # it as the narrow impure time boundary. It exists again because the reconcile journal
-        # records when a transaction was prepared; nothing else may read the clock.
-        if py_file.name == "datetime_utils.py":
-            continue
-        assert not _current_time_calls(py_file.read_text(encoding="utf-8")), py_file.name
+
+    assert _clock_readers(_source_files(), SRC_DIR) == _CLOCK_SOURCES
 
 
 def test_scripts_read_the_clock_only_where_the_allowlist_says():
@@ -93,16 +112,11 @@ def test_scripts_read_the_clock_only_where_the_allowlist_says():
     than a blanket ban because one script genuinely needs the reading: the runtime audit measures
     a run's age, and it runs under `uv run --no-project`, where nothing in the package imports.
     The allowlisted file is held to exactly one call, which is the substitutable-clock half of
-    the rule -- a second reading in the same file is a second clock however it is spelled.
+    the rule -- a second reading in the same file is a second clock however it is spelled -- and
+    to its path, so a nested file sharing the basename inherits nothing and a moved one takes
+    its exemption with it.
     """
-    for py_file in _script_files():
-        calls = _current_time_calls(py_file.read_text(encoding="utf-8"))
-        if py_file.name in _CLOCK_SCRIPTS:
-            # An allowlist entry outliving its reason is the other way this rots: it would sit
-            # here granting a permission nothing uses, and quietly cover the next call added.
-            assert len(calls) == 1, f"{py_file.name} reads the clock {len(calls)} times"
-            continue
-        assert not calls, py_file.name
+    assert _clock_readers(_script_files(), SCRIPTS_DIR) == _CLOCK_SCRIPTS
 
 
 def test_no_inner_html():
