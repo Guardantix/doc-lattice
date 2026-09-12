@@ -6,6 +6,14 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Changed
+
+- Internal performance: a `doc-lattice links` run that declares `legacy_marker_sources` now parses
+  each Markdown link target for its rendered headings once rather than twice. The heading
+  inventory and the marker accessor read one shared walk of the target, which removes most of the
+  time opting in added. Findings are unchanged, and a run without the key takes exactly the path
+  it took before. ARCHITECTURE.md's AD-49 records the decision.
+
 ### Fixed
 
 - Internal: the `Action runtime audit` workflow no longer reports a run whose workflow file the

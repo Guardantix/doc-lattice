@@ -77,6 +77,23 @@ class SluggedHeading:
     probes: tuple[str, ...]
 
 
+@dataclass(frozen=True, slots=True)
+class RenderedHeadingWalk:
+    """One materialized walk of a document's rendered headings, bound to the text it read.
+
+    ``headings`` is ``(line, level, text)`` per rendered heading in document order, the line
+    1-based. It is a tuple rather than the walk's generator, so every consumer handed it reads
+    the whole walk; a generator would be exhausted by the first.
+
+    ``body`` is the text the walk was taken from, kept so a consumer can refuse a walk of any
+    other text. Source lines are the join key ``addressable_explicit_markers`` intersects its two
+    scanners on, and a walk of a different revision would join cleanly against the wrong lines.
+    """
+
+    body: str
+    headings: tuple[tuple[int, int, str], ...]
+
+
 class _SourceMapState(StateBlock):
     """Minimal line-map state for markdown-it-py's pinned block rules.
 
@@ -421,8 +438,56 @@ def _rendered_headings(body: str) -> Iterator[tuple[int, int, str]]:
         yield token.map[0] + 1, int(token.tag[1:]), content.content
 
 
+def rendered_heading_walk(body: str) -> RenderedHeadingWalk:
+    """Walk the rendered headings of a document once, for more than one consumer to read.
+
+    ``full_heading_inventory`` and ``addressable_explicit_markers`` each walk the rendered
+    headings for themselves when called alone. A caller that needs both hands each this walk
+    instead, so the document is parsed for its rendered headings once rather than once per
+    consumer. The parse and its malformed-token-pair check stay here; the caller only carries
+    the result.
+
+    Args:
+        body: Markdown document text.
+
+    Returns:
+        The document's rendered headings, materialized and bound to ``body``.
+
+    Raises:
+        RuntimeError: If the pinned parser returns a malformed heading token pair.
+    """
+    return RenderedHeadingWalk(body=body, headings=tuple(_rendered_headings(body)))
+
+
+def _headings_of(body: str, rendered: RenderedHeadingWalk | None) -> Iterable[tuple[int, int, str]]:
+    """Return the rendered headings of ``body``, reading a precomputed walk when one was handed in.
+
+    ``None`` means walk here. Any walk, including one with no headings, is taken as already
+    computed: an empty walk is a document with no rendered heading, not a request to parse.
+
+    Args:
+        body: Markdown document text.
+        rendered: A walk from ``rendered_heading_walk``, or None to walk ``body`` here.
+
+    Returns:
+        ``(line, level, text)`` per rendered heading in document order, the line 1-based.
+
+    Raises:
+        ValueError: If ``rendered`` was taken from a different text than ``body``.
+    """
+    if rendered is None:
+        return _rendered_headings(body)
+    if rendered.body != body:
+        msg = "a precomputed rendered-heading walk must be read with the body it was taken from"
+        raise ValueError(msg)
+    return rendered.headings
+
+
 def full_heading_inventory(
-    body: str, base_cache: dict[str, str] | None = None
+    body: str,
+    base_cache: dict[str, str] | None = None,
+    *,
+    rendered: RenderedHeadingWalk | None = None,
 ) -> list[SluggedHeading]:
     """Return every heading a GitHub render assigns an id to, with its allocation trace.
 
@@ -438,6 +503,9 @@ def full_heading_inventory(
         body: Markdown document text.
         base_cache: Optional per-document memo of ``text -> base slug``, shared with the
             addressable inventory so a heading both see is slugged once rather than twice.
+        rendered: Optional ``rendered_heading_walk(body)``, read instead of walking ``body``
+            again, for a caller that hands the same walk to ``addressable_explicit_markers``.
+            None walks here, which is the whole of the behavior without it.
 
     Returns:
         One record per heading in document order, ids deduplicated by the pinned
@@ -445,10 +513,11 @@ def full_heading_inventory(
 
     Raises:
         RuntimeError: If the pinned parser returns a malformed heading token pair.
+        ValueError: If ``rendered`` was taken from a different text than ``body``.
     """
     slugger = _Slugger(base_cache)
     inventory: list[SluggedHeading] = []
-    for line, level, text in _rendered_headings(body):
+    for line, level, text in _headings_of(body, rendered):
         github_id, probes = slugger.slug_with_probes(text)
         inventory.append(
             SluggedHeading(
@@ -563,7 +632,9 @@ def anchor_ids(headings: list[Heading]) -> list[str]:
     ]
 
 
-def addressable_explicit_markers(body: str) -> frozenset[str]:
+def addressable_explicit_markers(
+    body: str, *, rendered: RenderedHeadingWalk | None = None
+) -> frozenset[str]:
     """Return the explicit ``{#marker}`` values a reader can actually address.
 
     A marker qualifies only where its heading is both *rendered* and *addressable*, which is
@@ -600,6 +671,11 @@ def addressable_explicit_markers(body: str) -> frozenset[str]:
 
     Args:
         body: Markdown document text.
+        rendered: Optional ``rendered_heading_walk(body)``, read for the rendered side instead
+            of walking ``body`` again, for a caller that hands the same walk to
+            ``full_heading_inventory``. None walks here, which is the whole of the behavior
+            without it. The addressable side is scanned here either way: it is the other half of
+            the intersection, and no walk carries it.
 
     Returns:
         Every explicit marker value, without the fragment's leading ``#`` and with its case
@@ -607,8 +683,9 @@ def addressable_explicit_markers(body: str) -> frozenset[str]:
 
     Raises:
         RuntimeError: If the pinned parser returns a malformed heading token pair.
+        ValueError: If ``rendered`` was taken from a different text than ``body``.
     """
-    rendered_lines = {line for line, _level, _text in _rendered_headings(body)}
+    rendered_lines = {line for line, _level, _text in _headings_of(body, rendered)}
     return frozenset(
         heading.anchor
         for heading in extract_headings(body)

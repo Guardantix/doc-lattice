@@ -86,7 +86,11 @@ from .link_selectors import (
     selector_matches_path,
     validate_link_selector,
 )
-from .markdown_compat import addressable_explicit_markers, full_heading_inventory
+from .markdown_compat import (
+    addressable_explicit_markers,
+    full_heading_inventory,
+    rendered_heading_walk,
+)
 from .path_utils import format_path_for_display
 
 _PARSER = MarkdownIt("commonmark")
@@ -156,7 +160,8 @@ class _Targets:
     the memo order-independent: whichever source reaches a target first fills both sets under
     the same flag, so a strict source arriving first cannot leave a half-filled entry for a
     legacy source to read. It is false whenever no source has compatibility, which is what keeps
-    the extra parse the accessor costs off the default path entirely.
+    the marker work -- the shared rendered-heading walk and the accessor's restricted scan -- off
+    the default path entirely.
     """
 
     root: Path
@@ -419,6 +424,11 @@ def _target_headings(
     comment or a raw HTML block -- out of the set, since the accessor intersects the two scanners
     by source position and this module would have no reason to.
 
+    Under that policy both consumers read one ``markdown_compat.rendered_heading_walk`` of the
+    target, so an opted-in fill parses the document once for its rendered headings rather than
+    once per consumer, and the walk is the parse the accessor would otherwise repeat. The strict
+    fill builds no walk: it calls the inventory alone, which walks for itself.
+
     A target is read here rather than where the sources are, so it needs a refusal of its own,
     and bytes that will not decode as UTF-8 are the whole of it: the inventory parses blocks
     only, so no character reference reaches an entity decoder and the parse itself has no content
@@ -449,7 +459,8 @@ def _target_headings(
         UnreadableDocError: If the filesystem refused the read.
         RuntimeError: If the pinned parser returned a malformed heading token pair; that is a
             parser invariant failure, not bad content, and is deliberately not caught. Both
-            scanners answer to it, so a compatibility run propagates it from either one.
+            scanners answer to it, so a compatibility run propagates it from the shared walk or
+            from the accessor's restricted scan.
     """
     if document not in targets.entries:
         if text is None:
@@ -460,9 +471,16 @@ def _target_headings(
             except OSError as exc:
                 msg = f"link target {format_path_for_display(document)} could not be read: {exc}"
                 raise UnreadableDocError(msg, source=document) from exc
+        markers: frozenset[str] = frozenset()
+        if targets.reads_markers:
+            rendered = rendered_heading_walk(text)
+            inventory = full_heading_inventory(text, rendered=rendered)
+            markers = addressable_explicit_markers(text, rendered=rendered)
+        else:
+            inventory = full_heading_inventory(text)
         targets.entries[document] = _TargetHeadings(
-            github_ids=frozenset(record.github_id for record in full_heading_inventory(text)),
-            markers=addressable_explicit_markers(text) if targets.reads_markers else frozenset(),
+            github_ids=frozenset(record.github_id for record in inventory),
+            markers=markers,
         )
     return targets.entries[document]
 
