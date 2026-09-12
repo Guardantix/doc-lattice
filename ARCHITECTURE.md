@@ -2745,8 +2745,19 @@ shape an existing config has; null and a declared empty list are an author askin
 naming nothing, and are refused at config load, which is where `link_sources` refuses the same
 punctuation. Every entry must match at least one selected source, checked before any document is
 parsed, so an ineffective policy is a config error rather than a green run over a corpus nobody
-covered. With the key absent the accessor is never called, so its second parse is not a cost the
-default path pays.
+covered. With the key absent the accessor is never called and no shared walk is built, so none of
+the marker work is a cost the default path pays.
+
+**One rendered-heading walk per opted-in target.** The inventory and the accessor each walk a
+target's rendered headings when called alone, so a compatibility run used to parse every target
+for them twice. Measured at the gate (GTX-564), that second parse was most of what opting in cost,
+so an opted-in fill takes one `markdown_compat.rendered_heading_walk` and hands it to both.
+`markdown_compat` keeps the parse and its malformed-token-pair check, and the walk is a tuple
+rather than the generator, which the first consumer would exhaust. It is bound to the text it read
+and refused against any other, because source lines are the accessor's join key and a walk of
+another revision would join cleanly against the wrong lines. The shared input is the raw walk and
+not the slugged inventory, since allocating an id per heading is work the accessor would discard.
+The strict fill is unchanged: it builds no walk and calls the inventory alone.
 
 **Consequences:** A consumer can gate a frozen marker-based corpus instead of excluding it, which
 is what GTX-547 needs and what unblocks retiring colinear's local `github_slug` under GTX-532. The

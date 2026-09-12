@@ -1,15 +1,18 @@
 """Golden tests for the versioned Markdown compatibility adapter."""
 
 import json
+from collections.abc import Callable
 from dataclasses import asdict
 from pathlib import Path
 
 import pytest
 from markdown_it import MarkdownIt
 
+from doc_lattice import markdown_compat as markdown_compat_module
 from doc_lattice.frontmatter_parser import parse_document
 from doc_lattice.markdown_compat import (
     SLUG_UNICODE_VERSION,
+    RenderedHeadingWalk,
     addressable_explicit_markers,
     anchor_ids,
     code_block_line_spans,
@@ -19,6 +22,7 @@ from doc_lattice.markdown_compat import (
     github_heading_ids,
     github_ids_for_texts,
     github_slug,
+    rendered_heading_walk,
     strip_heading_anchor,
 )
 from doc_lattice.sections import section_spans, split_body_lines
@@ -223,50 +227,66 @@ def test_a_document_with_no_repeated_slug_has_no_components():
     assert _components("# One\n\n# Two\n\n# Three\n") == []
 
 
-def test_a_marker_on_a_rendered_addressable_heading_is_returned():
-    assert addressable_explicit_markers("## Fingerprints {#fingerprints}\n") == {"fingerprints"}
+def _markers_from_a_precomputed_walk(body: str) -> frozenset[str]:
+    return addressable_explicit_markers(body, rendered=rendered_heading_walk(body))
 
 
-def test_the_accessor_returns_bare_marker_values_in_a_frozenset():
-    result = addressable_explicit_markers("## Notes {#n}\n")
+@pytest.fixture(params=["self-computed", "precomputed"])
+def markers(request: pytest.FixtureRequest) -> Callable[[str], frozenset[str]]:
+    """The accessor in both of its forms, so every marker witness below binds each of them.
+
+    Self-computed walks the rendered headings inside the accessor; precomputed reads a walk the
+    caller took once, which is how the link gate calls it under a compatibility policy.
+    """
+    if request.param == "self-computed":
+        return addressable_explicit_markers
+    return _markers_from_a_precomputed_walk
+
+
+def test_a_marker_on_a_rendered_addressable_heading_is_returned(markers):
+    assert markers("## Fingerprints {#fingerprints}\n") == {"fingerprints"}
+
+
+def test_the_accessor_returns_bare_marker_values_in_a_frozenset(markers):
+    result = markers("## Notes {#n}\n")
 
     assert isinstance(result, frozenset)
     # No leading "#": the fragment's marker character belongs to the link, not to the value.
     assert result == {"n"}
 
 
-def test_marker_case_survives_because_nothing_here_slugs():
-    assert addressable_explicit_markers("## Notes {#MixedCase}\n") == {"MixedCase"}
+def test_marker_case_survives_because_nothing_here_slugs(markers):
+    assert markers("## Notes {#MixedCase}\n") == {"MixedCase"}
 
 
-def test_a_marker_before_an_atx_closing_sequence_is_returned():
-    assert addressable_explicit_markers("## Notes {#n} ##\n") == {"n"}
+def test_a_marker_before_an_atx_closing_sequence_is_returned(markers):
+    assert markers("## Notes {#n} ##\n") == {"n"}
 
 
-def test_a_document_with_no_marked_heading_yields_nothing():
-    assert addressable_explicit_markers("# Plain\n\ntext\n") == frozenset()
+def test_a_document_with_no_marked_heading_yields_nothing(markers):
+    assert markers("# Plain\n\ntext\n") == frozenset()
 
 
-def test_a_malformed_marker_is_ordinary_heading_text():
+def test_a_malformed_marker_is_ordinary_heading_text(markers):
     # `Heading.anchor` already owns the marker grammar; a value that fails it never becomes a
     # marker anywhere in the engine, so it must not become one here either.
-    assert addressable_explicit_markers("## Notes {#-bad}\n") == frozenset()
-    assert addressable_explicit_markers("## {#early} Notes\n") == frozenset()
+    assert markers("## Notes {#-bad}\n") == frozenset()
+    assert markers("## {#early} Notes\n") == frozenset()
 
 
-def test_repeated_eligible_markers_collapse_to_one_value():
+def test_repeated_eligible_markers_collapse_to_one_value(markers):
     # A set, not a sequence: this accessor reports membership and performs no uniqueness
     # validation, which is the loader's job and reaches a different diagnostic.
-    assert addressable_explicit_markers("## First {#same}\n\n## Second {#same}\n") == {"same"}
+    assert markers("## First {#same}\n\n## Second {#same}\n") == {"same"}
 
 
-def test_a_marker_only_the_restricted_scanner_sees_inside_a_comment_is_not_returned():
+def test_a_marker_only_the_restricted_scanner_sees_inside_a_comment_is_not_returned(markers):
     body = "<!--\n## Hidden {#hidden}\n-->\n"
 
     # The restricted scanner is not container-aware, so it reads the commented heading as one.
     assert [(h.line, h.anchor) for h in extract_headings(body)] == [(2, "hidden")]
     assert full_heading_inventory(body) == []
-    assert addressable_explicit_markers(body) == frozenset()
+    assert markers(body) == frozenset()
 
     # The tension this accessor is specified to accept, pinned so it stays visible: the engine
     # does address `hidden`, so a lattice ref to it resolves while this reports no marker at all.
@@ -276,42 +296,42 @@ def test_a_marker_only_the_restricted_scanner_sees_inside_a_comment_is_not_retur
     assert anchor_ids(extract_headings(body)) == ["hidden"]
 
 
-def test_a_marker_in_a_raw_html_block_the_render_swallows_is_not_returned():
+def test_a_marker_in_a_raw_html_block_the_render_swallows_is_not_returned(markers):
     # The tight form matters: a blank line would end the HTML block and make the heading
     # genuinely rendered, which is a different document rather than a weaker version of this one.
     body = "<div>\n## Boxed {#boxed}\n</div>\n"
 
     assert [(h.line, h.anchor) for h in extract_headings(body)] == [(2, "boxed")]
     assert full_heading_inventory(body) == []
-    assert addressable_explicit_markers(body) == frozenset()
+    assert markers(body) == frozenset()
 
 
-def test_a_blank_line_ends_the_html_block_and_the_marker_comes_back():
+def test_a_blank_line_ends_the_html_block_and_the_marker_comes_back(markers):
     # The paired positive for the swallowed case above, which the tight form's comment names but
     # nothing pinned: one blank line closes the raw HTML block, so the same heading is genuinely
     # rendered and its marker qualifies. Without this, an over-exclusion on the rendered side
     # would still pass every container test here.
-    assert addressable_explicit_markers("<div>\n\n## Boxed {#boxed}\n</div>\n") == {"boxed"}
+    assert markers("<div>\n\n## Boxed {#boxed}\n</div>\n") == {"boxed"}
 
 
 @pytest.mark.parametrize("newline", ["\n", "\r\n", "\r"])
-def test_the_source_position_join_survives_every_line_ending(newline: str):
+def test_the_source_position_join_survives_every_line_ending(markers, newline: str):
     # The join is only sound because both scanners read one normalized text. A lone CR is the
     # sharp case: the restricted scanner's line map splits on "\n" alone while the pinned
     # parser normalizes CR itself, so dropping the shared normalization would leave the two
     # disagreeing about which line a heading sits on and the intersection would come back empty.
     body = newline.join(["## A {#a}", "", "## B {#b}", ""])
 
-    assert addressable_explicit_markers(body) == {"a", "b"}
+    assert markers(body) == {"a", "b"}
 
 
-def test_the_visible_occurrence_supplies_the_marker_and_the_hidden_one_does_not():
+def test_the_visible_occurrence_supplies_the_marker_and_the_hidden_one_does_not(markers):
     body = "## Shared {#visible}\n\n<!--\n## Shared {#hidden}\n-->\n"
 
-    assert addressable_explicit_markers(body) == {"visible"}
+    assert markers(body) == {"visible"}
 
 
-def test_identical_visible_and_hidden_headings_cannot_validate_each_other():
+def test_identical_visible_and_hidden_headings_cannot_validate_each_other(markers):
     # The negative witness for the source-position join. Three leading spaces keep the visible
     # heading out of the addressable subset while leaving it rendered, so the two scanners see
     # disjoint occurrences of the same text: an intersection joined on text alone would admit
@@ -320,7 +340,7 @@ def test_identical_visible_and_hidden_headings_cannot_validate_each_other():
 
     assert [h.line for h in extract_headings(body)] == [4]
     assert [h.line for h in full_heading_inventory(body)] == [1]
-    assert addressable_explicit_markers(body) == frozenset()
+    assert markers(body) == frozenset()
 
 
 @pytest.mark.parametrize(
@@ -332,16 +352,16 @@ def test_identical_visible_and_hidden_headings_cannot_validate_each_other():
         pytest.param("- ## Shared {#shared}\n", id="list_nested"),
     ],
 )
-def test_a_marker_outside_the_addressable_subset_is_not_returned(body: str):
+def test_a_marker_outside_the_addressable_subset_is_not_returned(markers, body: str):
     assert full_heading_inventory(body), "the form must still be a rendered heading"
-    assert addressable_explicit_markers(body) == frozenset()
+    assert markers(body) == frozenset()
 
 
-def test_a_marker_inside_a_fence_is_not_returned():
-    assert addressable_explicit_markers("```\n## Fenced {#fenced}\n```\n") == frozenset()
+def test_a_marker_inside_a_fence_is_not_returned(markers):
+    assert markers("```\n## Fenced {#fenced}\n```\n") == frozenset()
 
 
-def test_removing_a_marker_whose_value_equals_the_heading_slug_empties_the_result():
+def test_removing_a_marker_whose_value_equals_the_heading_slug_empties_the_result(markers):
     # The marker-free heading still allocates the GitHub id `fingerprints`, so asking link
     # resolution whether `#fingerprints` resolves answers yes for both bodies. Only this
     # accessor witnesses that the marker itself is gone, which is why a consumer's
@@ -349,6 +369,94 @@ def test_removing_a_marker_whose_value_equals_the_heading_slug_empties_the_resul
     marked = "## Fingerprints {#fingerprints}\n"
     unmarked = "## Fingerprints\n"
 
-    assert addressable_explicit_markers(marked) == {"fingerprints"}
-    assert addressable_explicit_markers(unmarked) == frozenset()
+    assert markers(marked) == {"fingerprints"}
+    assert markers(unmarked) == frozenset()
     assert [record.github_id for record in full_heading_inventory(unmarked)] == ["fingerprints"]
+
+
+# The bodies the witnesses above bind, gathered so the differential below runs over every shape
+# they pin: containers the render swallows, forms outside the addressable subset, every line
+# ending, identical visible and hidden text, dedup chains, and a document with nothing in it.
+_WITNESS_BODIES = [
+    "## Fingerprints {#fingerprints}\n",
+    "## Notes {#MixedCase}\n",
+    "## Notes {#n} ##\n",
+    "## Notes {#-bad}\n\n## {#early} Notes\n",
+    "## First {#same}\n\n## Second {#same}\n",
+    "<!--\n## Hidden {#hidden}\n-->\n",
+    "<div>\n## Boxed {#boxed}\n</div>\n",
+    "<div>\n\n## Boxed {#boxed}\n</div>\n",
+    "## A {#a}\r\n\r\n## B {#b}\r\n",
+    "## A {#a}\r\r## B {#b}\r",
+    "## Shared {#visible}\n\n<!--\n## Shared {#hidden}\n-->\n",
+    "   ## Shared {#shared}\n\n<!--\n## Shared {#shared}\n-->\n",
+    "Shared {#shared}\n----------------\n\n> ## Quoted {#q}\n\n- ## Nested {#n}\n",
+    "Overview\n--------\n\ntext\n\n# Overview\n\n   #### Indented\n\n> ## Quoted\n\n- ### Nested\n",
+    "# Notes\n\n# Notes-1\n\n# Notes\n\n# Notes-1-1\n",
+    "```\n## Fenced {#fenced}\n```\n",
+    "",
+]
+
+
+@pytest.mark.parametrize(
+    "body",
+    [pytest.param(str(case["body"]), id=str(case["name"])) for case in CASES]
+    + [pytest.param(body, id=f"witness-{index}") for index, body in enumerate(_WITNESS_BODIES)],
+)
+def test_a_precomputed_walk_answers_exactly_what_each_consumer_computes_for_itself(body: str):
+    walk = rendered_heading_walk(body)
+
+    # Records compare whole, so text, level, line, id, and every probe are held equal together.
+    assert full_heading_inventory(body, rendered=walk) == full_heading_inventory(body)
+    assert full_heading_inventory(body, {}, rendered=walk) == full_heading_inventory(body, {})
+    assert addressable_explicit_markers(body, rendered=walk) == addressable_explicit_markers(body)
+    # Reusable rather than consumed: the walk has already been read three times above.
+    assert isinstance(walk.headings, tuple)
+    assert full_heading_inventory(body, rendered=walk) == full_heading_inventory(body)
+
+
+def test_an_empty_precomputed_walk_is_honored_without_a_reparse(monkeypatch):
+    """An empty walk means computed with no rendered headings, never "walk it for me".
+
+    The body carries a heading, so a consumer that read the empty walk as falsy and walked again
+    would find it; the refusing walk is what catches that, and the empty answers are what the
+    walk it was handed says.
+    """
+    body = "## Notes {#n}\n"
+    empty = RenderedHeadingWalk(body=body, headings=())
+
+    def refuse(_body: str):
+        msg = "a consumer re-walked a body it was handed a walk for"
+        raise AssertionError(msg)
+
+    monkeypatch.setattr(markdown_compat_module, "_rendered_headings", refuse)
+
+    assert full_heading_inventory(body, rendered=empty) == []
+    assert addressable_explicit_markers(body, rendered=empty) == frozenset()
+
+
+def test_a_heading_free_document_walks_to_an_empty_walk_both_consumers_accept():
+    body = "plain prose\n\n    ## indented code, not a heading\n"
+    walk = rendered_heading_walk(body)
+
+    assert walk.headings == ()
+    assert full_heading_inventory(body, rendered=walk) == []
+    assert addressable_explicit_markers(body, rendered=walk) == frozenset()
+
+
+@pytest.mark.parametrize(
+    ("walked", "read"),
+    [
+        pytest.param("## A {#a}\n", "## B {#b}\n", id="another_document"),
+        # The same headings after normalization, but not the same text: line endings are what
+        # the join key is derived through, so a walk is bound to its exact body.
+        pytest.param("## A {#a}\r\n", "## A {#a}\n", id="another_line_ending"),
+    ],
+)
+def test_a_walk_of_another_text_is_refused_by_both_consumers(walked: str, read: str):
+    walk = rendered_heading_walk(walked)
+
+    with pytest.raises(ValueError, match="body it was taken from"):
+        full_heading_inventory(read, rendered=walk)
+    with pytest.raises(ValueError, match="body it was taken from"):
+        addressable_explicit_markers(read, rendered=walk)

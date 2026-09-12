@@ -9,6 +9,7 @@ import pytest
 from link_gate_helpers import _requires_permission_enforcement, _write
 
 from doc_lattice import link_check as link_check_module
+from doc_lattice import markdown_compat as markdown_compat_module
 from doc_lattice.error_types import ConfigError, UnreadableDocError
 from doc_lattice.link_check import (
     _PARSER,
@@ -1547,13 +1548,80 @@ def test_the_accessors_parser_invariant_failure_propagates(tmp_path, monkeypatch
     _write(tmp_path, "LEGACY.md", "# Legacy\n\n[t](GUIDE.md#legacy)\n")
     _write(tmp_path, "GUIDE.md", _MARKER_TARGET)
 
-    def broken(_text: str):
+    def broken(_text: str, **_kwargs: object):
         msg = "malformed heading token pair"
         raise RuntimeError(msg)
 
     monkeypatch.setattr(link_check_module, "addressable_explicit_markers", broken)
     with pytest.raises(RuntimeError, match="malformed"):
         _checked(tmp_path, ["LEGACY.md"])
+
+
+def _write_shared_target_corpus(root: Path) -> None:
+    """A self-link, a target two sources share, and a target only a strict source reaches."""
+    _write(root, "LEGACY.md", "# Notes\n\n## Own {#mine}\n\n[self](#mine)\n[t](GUIDE.md#legacy)\n")
+    _write(root, "STRICT.md", "# Strict\n\n[t](GUIDE.md#topic-legacy)\n[o](ONLY.md#only)\n")
+    _write(root, "GUIDE.md", _MARKER_TARGET)
+    _write(root, "ONLY.md", "# Only\n")
+
+
+def _count_rendered_walks(monkeypatch) -> list[int]:
+    """Count every rendered-heading walk ``markdown_compat`` performs, whichever entry point."""
+    calls = [0]
+    original = markdown_compat_module._rendered_headings
+
+    def counted(body: str):
+        calls[0] += 1
+        return original(body)
+
+    monkeypatch.setattr(markdown_compat_module, "_rendered_headings", counted)
+    return calls
+
+
+def test_an_opted_in_fill_walks_each_target_once_for_both_consumers(tmp_path, monkeypatch):
+    """GTX-564: the inventory and the accessor share one walk per target fill.
+
+    The corpus reaches the cache by every route a fill has: a self-link filled from text already
+    in hand, a target two sources share, and a target only the strict source links to, which an
+    opted-in run still fills with markers because the flag belongs to the run.
+    """
+    _write_shared_target_corpus(tmp_path)
+    walks = _count_rendered_walks(monkeypatch)
+    fills: list[str] = []
+    original = link_check_module.rendered_heading_walk
+
+    def recorded(body: str):
+        fills.append(body)
+        return original(body)
+
+    monkeypatch.setattr(link_check_module, "rendered_heading_walk", recorded)
+
+    assert _checked(tmp_path, ["LEGACY.md"]) == []
+    # LEGACY.md for its self-link, GUIDE.md once for both of its readers, and ONLY.md.
+    assert len(fills) == 3
+    assert walks[0] == len(fills)
+
+
+def test_a_strict_fill_builds_no_shared_walk_and_walks_only_for_the_inventory(
+    tmp_path, monkeypatch
+):
+    """Never calling the accessor is not enough: an unconditional walk would still cost a parse."""
+    _write_shared_target_corpus(tmp_path)
+    walks = _count_rendered_walks(monkeypatch)
+
+    def refuse(*_args: object, **_kwargs: object):
+        msg = "a strict run reached the opted-in fill"
+        raise AssertionError(msg)
+
+    monkeypatch.setattr(link_check_module, "rendered_heading_walk", refuse)
+    monkeypatch.setattr(link_check_module, "addressable_explicit_markers", refuse)
+
+    assert _checked(tmp_path) == [
+        "'LEGACY.md':5: fragment '#mine' matches no heading in 'LEGACY.md'",
+        "'LEGACY.md':5: fragment '#legacy' matches no heading in 'GUIDE.md'",
+    ]
+    # One walk per distinct target, and every one of them is the inventory's own.
+    assert walks[0] == 3
 
 
 def test_markers_are_not_extracted_at_all_without_a_declaration(tmp_path, monkeypatch):
