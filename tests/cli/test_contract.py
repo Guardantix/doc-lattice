@@ -24,7 +24,7 @@ from doc_lattice.cli.runtime import default_runtime
 from doc_lattice.error_types import ConfigError
 from doc_lattice.path_utils import format_path_for_display
 
-from .helpers import _run, runner
+from .helpers import _control_characters, _run, runner
 
 _SRC = Path(__file__).resolve().parents[2] / "src"
 
@@ -1726,22 +1726,6 @@ def test_an_admitted_value_still_reaches_the_machine_channels_verbatim(tmp_path:
     assert payload["edges"][0]["source_id"] == f"down{neighbors}"
     assert as_github.returncode == 1
     assert f"down{neighbors} -> ghost is BROKEN".encode() in as_github.stdout
-
-
-def _control_characters(stream: bytes) -> list[str]:
-    """Every C0, DEL, or C1 character in captured output, newline excepted.
-
-    Decoded before the scan, deliberately: a C1 control reaches a terminal as the two-byte UTF-8
-    encoding of its code point, and a byte-level scan of ``0x80`` to ``0x9F`` would also flag the
-    continuation byte of ordinary non-ASCII text. The raw-byte assertion for ESC is kept beside
-    this rather than folded into it, since ``0x1b`` is never a continuation byte and is the exact
-    byte a terminal acts on.
-
-    A newline is how output is written at all, so it is the one member of the range a stream
-    legitimately carries.
-    """
-    text = stream.decode("utf-8", errors="surrogateescape")
-    return sorted({char for char in text if ord(char) < 0x20 or 0x7F <= ord(char) <= 0x9F} - {"\n"})
 
 
 # GTX-201: the per-channel broken-pipe policy. Every case below needs a real subprocess with two

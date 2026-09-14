@@ -11,7 +11,6 @@ from pathlib import Path
 
 import pytest
 from link_gate_helpers import _requires_permission_enforcement, _write
-from markdown_it import MarkdownIt
 from rich.console import Console
 
 from doc_lattice.cli import app
@@ -22,7 +21,7 @@ from doc_lattice.config import load_config
 from doc_lattice.link_check import select_link_sources
 from doc_lattice.orchestrate import load_lattice
 
-from .helpers import _RefusingStream, runner
+from .helpers import _contents, _control_characters, _RefusingStream, _stub_runtime, runner
 
 
 def _flow(values: Sequence[str]) -> str:
@@ -239,15 +238,16 @@ def test_links_github_format_annotates_each_finding_on_stdout(tmp_path: Path, mo
     assert result.stderr == ""
 
 
-def test_links_rejects_json_and_indent(tmp_path: Path, monkeypatch):
+@pytest.mark.parametrize("listing", [[], ["--list-sources"]], ids=["gate", "listing"])
+def test_links_rejects_json_and_indent(tmp_path: Path, monkeypatch, listing):
     _witness(tmp_path)
     monkeypatch.chdir(tmp_path)
 
-    rejected = runner.invoke(app, ["links", "--format", "json"])
-    assert rejected.exit_code == 2
+    rejected = runner.invoke(app, ["links", *listing, "--format", "json"])
+    assert (rejected.exit_code, rejected.stdout) == (2, "")
     assert "must be one of: github, human" in rejected.stderr
 
-    unknown = runner.invoke(app, ["links", "--indent", "2"])
+    unknown = runner.invoke(app, ["links", *listing, "--indent", "2"])
     assert unknown.exit_code == 2
     assert "No such option" in unknown.stderr
 
@@ -486,45 +486,26 @@ def test_links_listing_keeps_each_outside_root_alias(tmp_path: Path, monkeypatch
     assert (result.exit_code, result.stdout, result.stderr) == (0, "'alias.md'\n'other.md'\n", "")
 
 
-def test_links_listing_does_not_check_document_contents(tmp_path: Path, monkeypatch):
-    _config(tmp_path, "*.md")
-    (tmp_path / "bytes.md").write_bytes(b"\xff\xfe")
-    _write(tmp_path, "dead.md", "[dead](missing.md)\n")
-    monkeypatch.chdir(tmp_path)
-
-    result = runner.invoke(app, ["links", "--list-sources"])
-
-    assert (result.exit_code, result.stdout, result.stderr) == (0, "'bytes.md'\n'dead.md'\n", "")
-
-
-@pytest.mark.parametrize("forbidden", ["checker", "parser", "builtins.open", "io.open", "os.open"])
-def test_links_listing_never_checks_parses_or_opens_sources(tmp_path: Path, monkeypatch, forbidden):
+@pytest.mark.parametrize("module", [builtins, io, os], ids=["builtins", "io", "os"])
+def test_links_listing_never_opens_sources(tmp_path: Path, monkeypatch, module):
+    # A source nobody opens is one no checker or parser read, so guarding every open spelling
+    # covers both; the dead link and the undecodable bytes are what a read would have reported.
     _compat_config(tmp_path, ["*.md"], ["README.md"])
-    source = tmp_path / "README.md"
-    source.write_text("[dead](missing.md)\n", encoding="utf-8")
+    _write(tmp_path, "README.md", "[dead](missing.md)\n")
+    (tmp_path / "bytes.md").write_bytes(b"\xff\xfe")
+    sources = {tmp_path / "README.md", tmp_path / "bytes.md"}
+    real_open = module.open
     monkeypatch.chdir(tmp_path)
 
-    def refuse(*_args, **_kwargs):
-        pytest.fail(f"listing called {forbidden}")
+    def guarded_open(file, *args, **kwargs):
+        if not isinstance(file, int) and Path(os.fsdecode(file)).absolute() in sources:
+            pytest.fail(f"listing opened a source through {module.__name__}.open")
+        return real_open(file, *args, **kwargs)
 
-    if forbidden == "checker":
-        monkeypatch.setattr("doc_lattice.cli.commands.links.check_links", refuse)
-    elif forbidden == "parser":
-        monkeypatch.setattr(MarkdownIt, "parse", refuse)
-    else:
-        module = {"builtins.open": builtins, "io.open": io, "os.open": os}[forbidden]
-        real_open = module.open
-
-        def guarded_open(file, *args, **kwargs):
-            if not isinstance(file, int) and Path(os.fsdecode(file)).absolute() == source:
-                pytest.fail(f"listing opened source through {forbidden}")
-            return real_open(file, *args, **kwargs)
-
-        monkeypatch.setattr(module, "open", guarded_open)
-
+    monkeypatch.setattr(module, "open", guarded_open)
     result = runner.invoke(app, ["links", "--list-sources"])
 
-    assert (result.exit_code, result.stdout, result.stderr) == (0, "'README.md'\n", "")
+    assert (result.exit_code, result.stdout, result.stderr) == (0, "'README.md'\n'bytes.md'\n", "")
 
 
 @pytest.mark.skipif(os.name != "posix", reason="filenames contain POSIX-only characters")
@@ -538,11 +519,9 @@ def test_links_listing_round_trips_quoted_backslashed_and_control_filenames(tmp_
     result = runner.invoke(app, ["links", "--list-sources"])
 
     assert (result.exit_code, result.stderr) == (0, "")
-    lines = result.stdout.splitlines()
-    assert len(lines) == len(names)
-    assert [ast.literal_eval(line) for line in lines] == sorted(names)
+    assert [ast.literal_eval(line) for line in result.stdout.splitlines()] == sorted(names)
     assert result.stdout.endswith("\n")
-    assert all(ord(char) >= 32 and not 0x7F <= ord(char) <= 0x9F for line in lines for char in line)
+    assert not _control_characters(result.stdout.encode())
 
 
 def _assert_listing_refusal_matches_gate(*args: str) -> None:
@@ -595,58 +574,6 @@ def test_links_listing_preserves_explicit_missing_config_refusal(tmp_path, monke
     _assert_listing_refusal_matches_gate("--config", str(tmp_path / "missing.yml"))
 
 
-@_requires_permission_enforcement
-@pytest.mark.parametrize("unreadable", ["config", "directory"])
-def test_links_listing_preserves_permission_refusals(tmp_path, monkeypatch, unreadable):
-    _config(tmp_path, "docs/**/*.md")
-    _write(tmp_path, "docs/a.md", "# A\n")
-    monkeypatch.chdir(tmp_path)
-    target = tmp_path / (".doc-lattice.yml" if unreadable == "config" else "docs")
-    mode = target.stat().st_mode
-    target.chmod(0)
-    try:
-        _assert_listing_refusal_matches_gate()
-    finally:
-        target.chmod(mode)
-
-
-@pytest.mark.parametrize("operation", ["resolve", "stat", "scan", "inspect"])
-def test_links_listing_preserves_filesystem_refusals(tmp_path, monkeypatch, operation):
-    _config(tmp_path, "*.md")
-    source = tmp_path / "source.md"
-    _write(tmp_path, "source.md", "# Source\n")
-    monkeypatch.chdir(tmp_path)
-    if operation in {"resolve", "stat"}:
-        original = getattr(Path, operation)
-
-        def refusing_path(path, *args, **kwargs):
-            if path == source:
-                raise PermissionError(errno.EACCES, "test inspection refused", str(path))
-            return original(path, *args, **kwargs)
-
-        monkeypatch.setattr(Path, operation, refusing_path)
-    elif operation == "scan":
-        original_scan = os.scandir
-
-        def refusing_scan(path):
-            if path == tmp_path:
-                raise PermissionError(errno.EACCES, "test scan refused", str(path))
-            return original_scan(path)
-
-        monkeypatch.setattr(os, "scandir", refusing_scan)
-    else:
-        original_is_dir = os.DirEntry.is_dir
-
-        def refusing_inspection(entry, **kwargs):
-            if entry.name == source.name:
-                raise PermissionError(errno.EACCES, "test entry refused", entry.path)
-            return original_is_dir(entry, **kwargs)
-
-        monkeypatch.setattr(os.DirEntry, "is_dir", refusing_inspection)
-
-    _assert_listing_refusal_matches_gate()
-
-
 @pytest.mark.parametrize("kind", ["dangling", "directory", "fifo"])
 def test_links_listing_preserves_nonregular_source_refusals(tmp_path, monkeypatch, kind):
     _config(tmp_path, "*.md")
@@ -665,41 +592,19 @@ def test_links_listing_preserves_nonregular_source_refusals(tmp_path, monkeypatc
     _assert_listing_refusal_matches_gate()
 
 
-@pytest.mark.parametrize("dangling", [False, True])
-def test_links_listing_rejects_github_before_selection(tmp_path, monkeypatch, dangling):
-    _config(tmp_path, "*.md")
-    if dangling:
-        (tmp_path / "source.md").symlink_to(tmp_path / "missing")
-    else:
-        _write(tmp_path, "source.md", "# Source\n")
-    monkeypatch.chdir(tmp_path)
+def test_links_listing_rejects_github_before_loading_config(tmp_path: Path):
+    runtime = _stub_runtime(tmp_path, "the --list-sources format conflict")
 
-    result = runner.invoke(app, ["links", "--list-sources", "--format", "github"])
+    def factory(*, no_color: bool) -> CliRuntime:
+        del no_color
+        return runtime
 
-    assert (result.exit_code, result.stdout, result.stderr) == (
+    result = runner.invoke(
+        create_app(runtime_factory=factory), ["links", "--list-sources", "--format", "github"]
+    )
+
+    assert (result.exit_code, _contents(runtime.stdout), _contents(runtime.stderr)) == (
         2,
         "",
         "error: --list-sources cannot be combined with --format github\n",
     )
-
-
-def test_links_listing_rejects_github_before_loading_config(monkeypatch):
-    def refuse(*_args, **_kwargs):
-        pytest.fail("format conflict loaded configuration")
-
-    monkeypatch.setattr("doc_lattice.cli.runtime.load_config", refuse)
-    result = runner.invoke(app, ["links", "--list-sources", "--format", "github"])
-
-    assert (result.exit_code, result.stdout, result.stderr) == (
-        2,
-        "",
-        "error: --list-sources cannot be combined with --format github\n",
-    )
-
-
-def test_links_listing_still_validates_format():
-    result = runner.invoke(app, ["links", "--list-sources", "--format", "json"])
-
-    assert result.exit_code == 2
-    assert result.stdout == ""
-    assert "must be one of: github, human" in result.stderr

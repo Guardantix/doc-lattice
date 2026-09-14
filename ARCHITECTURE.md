@@ -2467,8 +2467,11 @@ covered by the link gate with its expected corpus without importing `link_check.
 selection. GTX-692 adds `links --list-sources` at the command adapter, after the existing source
 selection and legacy-policy validation and before `check_links`. Keeping that shared sequence
 preserves selection refusals and prevents a listing from certifying an invalid legacy policy.
-The output uses the existing path display formatter and stdout writer, providing a decodable,
-one-path-per-line contract without opening source bodies. Selection remains owned by the engine;
+Each path is encoded with `format_path_for_display`, a deliberate exception to AD-34's rule that
+machine channels keep their own encoders: AD-34 pins that spelling to exactly `repr(str(path))`,
+already an injective one-line literal a consumer can decode, so a second encoder would copy the
+same expression. The display spelling therefore carries a machine contract here, and changing it
+breaks this listing. Selection remains owned by the engine;
 the adapter only exposes its result. [README.md](README.md#links) owns the format and exit
 contract. This is a requested source-set interface, distinct from a schema for link findings.
 

@@ -491,18 +491,15 @@ a `legacy_marker_sources` declaration is empty or null or reaches no selected so
 filesystem refuses the gate, and 0 otherwise.
 
 `doc-lattice links --list-sources` exposes that same selected source set for coverage consumers
-without reading document bodies or checking links. It loads configuration, selects sources, and
-validates `legacy_marker_sources` before writing any output. Exit 0 confirms only that selection
-and legacy-policy validation succeeded; run the gate to check links. Documents with undecodable
-bytes or dead links can therefore be listed successfully.
+without reading document bodies or checking links. Configuration, source selection, and
+`legacy_marker_sources` are validated before any output, and exit 0 confirms only that validation;
+run the gate to check links. Documents with undecodable bytes or dead links can therefore be
+listed successfully.
 
 Each stdout line is one Python string literal containing a project-relative POSIX path;
 `ast.literal_eval` is the supported decoder. Quotes, backslashes, newlines, and terminal control
-characters are escaped, so each path occupies exactly one line. Output retains the selection's
-spelling and order: project-relative POSIX strings are sorted, and contained sources collapse to
-one spelling per resolved file, retaining the first sorted spelling. Outside-root spellings
-remain listed and bypass that collapse, even when two aliases resolve to the same outside file.
-The gate reports those escaping sources as findings.
+characters are escaped, so each path occupies exactly one line. Paths keep the spelling and order
+that the `link_sources` rules under [Configuration](#configuration) define.
 
 Listing accepts `--config PATH` and an explicit `--format human`. Combining `--list-sources`
 with `--format github` exits 2 before loading configuration, with empty stdout and

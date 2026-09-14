@@ -96,6 +96,11 @@ def _write_findings(runtime: CliRuntime, findings: list[LinkFinding]) -> None:
         runtime.write_stderr(format_finding(finding))
 
 
+def _write_sources(runtime: CliRuntime, project_root: Path, sources: list[Path]) -> None:
+    for source in sources:
+        runtime.write_stdout(format_path_for_display(source.relative_to(project_root).as_posix()))
+
+
 def register_links(app: typer.Typer) -> None:
     """Register the ``links`` command on an application.
 
@@ -120,7 +125,9 @@ def register_links(app: typer.Typer) -> None:
         runtime = get_runtime(ctx)
         selection = select_output(runtime, fmt=fmt, valid=VALID_LINK_REPORT_FORMATS)
         if list_sources and selection.annotates:
-            runtime.write_stderr("error: --list-sources cannot be combined with --format github")
+            runtime.stderr.print(
+                "[red]error[/red]: --list-sources cannot be combined with --format github"
+            )
             raise typer.Exit(EXIT_TOOL_ERROR)
         with exit_on_project_error(runtime, github=selection.annotates):
             project = runtime.project(config)
@@ -128,11 +135,8 @@ def register_links(app: typer.Typer) -> None:
             sources = select_link_sources(project.project_root, selectors)
             legacy = _legacy_marker_sources(project, sources)
             if list_sources:
-                for source in sources:
-                    runtime.write_stdout(
-                        format_path_for_display(source.relative_to(project.project_root).as_posix())
-                    )
-                raise typer.Exit(0)
+                _write_sources(runtime, project.project_root, sources)
+                return
             findings = check_links(project.project_root, sources, legacy)
         if selection.annotates:
             write_annotations(runtime, _annotations(project.project_root, findings))
