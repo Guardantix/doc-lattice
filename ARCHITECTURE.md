@@ -2462,12 +2462,27 @@ the filesystem refuses to resolve, inspect, scan, or open is a tool error rather
 because a gate that cannot see its inputs must not pass; what a document's content refuses
 (undecodable bytes, a parser-rejected reference) stays a finding and the run continues.
 
-**Human findings on stderr; annotations on stdout.** The script always wrote findings to stderr,
-and the hook contract is preserved through an exact stderr writer that bypasses Rich, so a
-filename shaped like markup stays a filename. A departed stderr reader is answered under the
-stderr half of AD-40 and the semantic exit code stands; only a truncated stdout result, the
-annotation stream, reaches the silent 141. `--format github` annotates each finding at its line,
-which is the form the generated workflow runs.
+**A supported selection output for coverage consumers.** colinear needs to compare the files
+covered by the link gate with its expected corpus without importing `link_check.py` or duplicating
+selection. GTX-692 adds `links --list-sources` at the command adapter, after the existing source
+selection and legacy-policy validation and before `check_links`. Keeping that shared sequence
+preserves selection refusals and prevents a listing from certifying an invalid legacy policy.
+Each path is encoded with `format_path_for_display`, a deliberate exception to AD-34's rule that
+machine channels keep their own encoders: AD-34 pins that spelling to exactly `repr(str(path))`,
+already an injective one-line literal a consumer can decode, so a second encoder would copy the
+same expression. The display spelling therefore carries a machine contract here, and changing it
+breaks this listing. Selection remains owned by the engine;
+the adapter only exposes its result. [README.md](README.md#links) owns the format and exit
+contract. This is a requested source-set interface, distinct from a schema for link findings.
+
+**Human findings on stderr; annotations and listings on stdout.** The script always wrote
+findings to stderr, and the hook contract is preserved through an exact stderr writer that
+bypasses Rich, so a filename shaped like markup stays a filename. A departed stderr reader is
+answered under the stderr half of AD-40 and the semantic exit code stands; only a truncated
+stdout result, the annotation stream or source listing, reaches the silent 141. `--format github`
+annotates each finding at its line, which is the form the generated workflow runs. Listing
+rejects that format before loading configuration or entering annotation-capable error handling,
+so a requested source stream cannot contain annotations.
 
 **Consequences:** Both generated adopter surfaces run the command, the hook with `always_run`
 and the workflow with `--format github`, and the generated config writes `link_sources` derived

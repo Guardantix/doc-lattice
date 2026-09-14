@@ -24,7 +24,7 @@ from doc_lattice.cli.runtime import default_runtime
 from doc_lattice.error_types import ConfigError
 from doc_lattice.path_utils import format_path_for_display
 
-from .helpers import _run, runner
+from .helpers import _control_characters, _run, runner
 
 _SRC = Path(__file__).resolve().parents[2] / "src"
 
@@ -1728,22 +1728,6 @@ def test_an_admitted_value_still_reaches_the_machine_channels_verbatim(tmp_path:
     assert f"down{neighbors} -> ghost is BROKEN".encode() in as_github.stdout
 
 
-def _control_characters(stream: bytes) -> list[str]:
-    """Every C0, DEL, or C1 character in captured output, newline excepted.
-
-    Decoded before the scan, deliberately: a C1 control reaches a terminal as the two-byte UTF-8
-    encoding of its code point, and a byte-level scan of ``0x80`` to ``0x9F`` would also flag the
-    continuation byte of ordinary non-ASCII text. The raw-byte assertion for ESC is kept beside
-    this rather than folded into it, since ``0x1b`` is never a continuation byte and is the exact
-    byte a terminal acts on.
-
-    A newline is how output is written at all, so it is the one member of the range a stream
-    legitimately carries.
-    """
-    text = stream.decode("utf-8", errors="surrogateescape")
-    return sorted({char for char in text if ord(char) < 0x20 or 0x7F <= ord(char) <= 0x9F} - {"\n"})
-
-
 # GTX-201: the per-channel broken-pipe policy. Every case below needs a real subprocess with two
 # separate descriptors, because all of them live between the command adapter and the interpreter:
 # `CliRunner` and in-process monkeypatching of `app` reach neither typer's own consoles, nor
@@ -1810,6 +1794,20 @@ def _run_with_departed_reader(
         proc.stderr.close()
         survivor, _ = proc.communicate(timeout=60)
     return proc.returncode, survivor
+
+
+@pytest.mark.skipif(os.name != "posix", reason="SIGPIPE/EPIPE semantics are POSIX-only")
+def test_links_listing_exits_141_silently_when_stdout_reader_departs(tmp_path: Path):
+    (tmp_path / ".doc-lattice.yml").write_text(
+        "lattice_format: 2\nlink_sources: ['*.md']\n", encoding="utf-8"
+    )
+    (tmp_path / "README.md").write_text("[dead](missing.md)\n", encoding="utf-8")
+
+    status, stderr = _run_with_departed_reader(
+        ["links", "--list-sources"], tmp_path, channel="stdout"
+    )
+
+    assert (status, stderr) == (141, "")
 
 
 def _duplicate_id_lattice(tmp_path: Path) -> None:

@@ -1,6 +1,7 @@
 """Typer adapter for the Markdown link gate."""
 
 from pathlib import Path
+from typing import Annotated
 
 import typer
 
@@ -14,7 +15,7 @@ from ...link_check import (
     select_link_sources,
 )
 from ...path_utils import format_path_for_display
-from ..errors import EXIT_FINDING, exit_on_project_error
+from ..errors import EXIT_FINDING, EXIT_TOOL_ERROR, exit_on_project_error
 from ..github import Annotation, write_annotations
 from ..options import ConfigOpt, LinkFormatOpt
 from ..output import select_output
@@ -95,6 +96,11 @@ def _write_findings(runtime: CliRuntime, findings: list[LinkFinding]) -> None:
         runtime.write_stderr(format_finding(finding))
 
 
+def _write_sources(runtime: CliRuntime, project_root: Path, sources: list[Path]) -> None:
+    for source in sources:
+        runtime.write_stdout(format_path_for_display(source.relative_to(project_root).as_posix()))
+
+
 def register_links(app: typer.Typer) -> None:
     """Register the ``links`` command on an application.
 
@@ -107,15 +113,30 @@ def register_links(app: typer.Typer) -> None:
         ctx: typer.Context,
         config: ConfigOpt = None,
         fmt: LinkFormatOpt = "human",
+        list_sources: Annotated[
+            bool,
+            typer.Option(
+                "--list-sources",
+                help="List selected sources without reading documents or checking links.",
+            ),
+        ] = False,
     ) -> None:
         """Validate relative links and heading fragments; exit 1 on a finding, 2 on tool error."""
         runtime = get_runtime(ctx)
         selection = select_output(runtime, fmt=fmt, valid=VALID_LINK_REPORT_FORMATS)
+        if list_sources and selection.annotates:
+            runtime.stderr.print(
+                "[red]error[/red]: --list-sources cannot be combined with --format github"
+            )
+            raise typer.Exit(EXIT_TOOL_ERROR)
         with exit_on_project_error(runtime, github=selection.annotates):
             project = runtime.project(config)
             selectors = _require_link_sources(project)
             sources = select_link_sources(project.project_root, selectors)
             legacy = _legacy_marker_sources(project, sources)
+            if list_sources:
+                _write_sources(runtime, project.project_root, sources)
+                return
             findings = check_links(project.project_root, sources, legacy)
         if selection.annotates:
             write_annotations(runtime, _annotations(project.project_root, findings))

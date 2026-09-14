@@ -6,6 +6,14 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added
+
+- `doc-lattice links --list-sources` lists the gate's selected sources after configuration,
+  selection, and legacy-policy validation, without reading documents or checking links. Coverage
+  consumers can decode one Python string literal per stdout line with `ast.literal_eval` instead
+  of importing the engine. [README.md](README.md#links) owns the output and exit contract, and
+  ARCHITECTURE.md's AD-45 records the decision.
+
 ### Changed
 
 - Internal performance: a `doc-lattice links` run that declares `legacy_marker_sources` now parses
