@@ -1812,6 +1812,20 @@ def _run_with_departed_reader(
     return proc.returncode, survivor
 
 
+@pytest.mark.skipif(os.name != "posix", reason="SIGPIPE/EPIPE semantics are POSIX-only")
+def test_links_listing_exits_141_silently_when_stdout_reader_departs(tmp_path: Path):
+    (tmp_path / ".doc-lattice.yml").write_text(
+        "lattice_format: 2\nlink_sources: ['*.md']\n", encoding="utf-8"
+    )
+    (tmp_path / "README.md").write_text("[dead](missing.md)\n", encoding="utf-8")
+
+    status, stderr = _run_with_departed_reader(
+        ["links", "--list-sources"], tmp_path, channel="stdout"
+    )
+
+    assert (status, stderr) == (141, "")
+
+
 def _duplicate_id_lattice(tmp_path: Path) -> None:
     """Write the shortest lattice whose load raises an adapter-caught ``ProjectError``."""
     docs = tmp_path / "docs"

@@ -250,7 +250,7 @@ Contributor commands, gates, and the full verification set live in
 |---------|--------------|----------------|
 | `check [--only STATE ...] [--format human\|json\|github]` | Classify every `derives_from` edge as OK / STALE / UNRECONCILED / BROKEN / AMBIGUOUS. | 1 on drift, 2 on tool error |
 | `lint [--format human\|json\|github]` | Validate the authority ladder (binding > derived > exploratory) over the edges. | 1 on a violation, 2 on tool error |
-| `links [--format human\|github]` | Validate every relative link destination and heading fragment in the `link_sources` files. | 1 on a finding, 2 on tool error |
+| `links [--list-sources] [--format human\|github]` | Validate every relative link destination and heading fragment in the `link_sources` files, or list the selected sources without reading documents or checking links. | 1 on a finding, 2 on tool error; listing cannot use `github` |
 | `impact TOKEN [--depth N] [--format human\|json]` | List every downstream doc affected by a change to TOKEN; `--depth N` bounds the walk to N hops. | 2 on tool error |
 | `reconcile [ID] [--ref REF] [--all] [--dry-run] [--recover] [--format human\|json]` | Durably set `seen` for selected edges as one transaction, preview read-only with `--dry-run`, or recover an interrupted transaction with `--recover`. | 2 on tool error, conflict, lock contention, or persistence/recovery failure |
 | `graph [--format mermaid\|dot\|json]` | Emit the edge graph as Mermaid, DOT, or JSON. | 2 on tool error (including an unrecognized `--format`) |
@@ -466,9 +466,9 @@ exact and case-sensitive against the decoded fragment, so `## Notes {#MixedCase}
 
 It fails closed the way `link_sources` does, and every refusal lands before any document is
 parsed: the key written as null or as an empty list is a config error, as is an entry the grammar
-cannot read and an entry that matches no selected source. Selection collapses aliases of one file
-onto the first spelling in sorted order, so an entry naming only the discarded alias matches
-nothing and is refused rather than quietly granted to the surviving spelling.
+cannot read and an entry that matches no selected source. Selection collapses aliases of one
+contained file onto the first spelling in sorted order, so an entry naming only the discarded
+alias matches nothing and is refused rather than quietly granted to the surviving spelling.
 
 What a compatibility pass does not claim: a marker is literal heading text to GitHub, so
 `## Topic {#legacy}` answers to `#topic-legacy` there and `#legacy` does not navigate. The pass
@@ -482,13 +482,35 @@ reported rather than read, and a file that will not decode as UTF-8 or that the 
 reported and stepped over, so one document cannot end the run. A filesystem the gate cannot
 inspect, resolve, scan, or open is a tool error: a gate that cannot see its inputs must not pass.
 
-Human findings go to stderr, one `'path':line: message` per finding in document order with no
-line for a finding about the document itself, and nothing is printed on success. `--format
-github` writes one annotation per finding to stdout instead, at the finding's line, so a dead link
-shows on the pull-request diff. The generated workflow runs that form. Exit 1 on any finding, 2
-when `link_sources` is missing or empty, a selector matches nothing, a `legacy_marker_sources`
-declaration is empty or null or reaches no selected source, or the filesystem refuses the gate,
-and 0 otherwise.
+When running the gate, human findings go to stderr, one `'path':line: message` per finding in
+document order with no line for a finding about the document itself, and nothing is printed on
+success. `--format github` writes one annotation per finding to stdout instead, at the finding's
+line, so a dead link shows on the pull-request diff. The generated workflow runs that form.
+Exit 1 on any finding, 2 when `link_sources` is missing or empty, a selector matches nothing,
+a `legacy_marker_sources` declaration is empty or null or reaches no selected source, or the
+filesystem refuses the gate, and 0 otherwise.
+
+`doc-lattice links --list-sources` exposes that same selected source set for coverage consumers
+without reading document bodies or checking links. It loads configuration, selects sources, and
+validates `legacy_marker_sources` before writing any output. Exit 0 confirms only that selection
+and legacy-policy validation succeeded; run the gate to check links. Documents with undecodable
+bytes or dead links can therefore be listed successfully.
+
+Each stdout line is one Python string literal containing a project-relative POSIX path;
+`ast.literal_eval` is the supported decoder. Quotes, backslashes, newlines, and terminal control
+characters are escaped, so each path occupies exactly one line. Output retains the selection's
+spelling and order: project-relative POSIX strings are sorted, and contained sources collapse to
+one spelling per resolved file, retaining the first sorted spelling. Outside-root spellings
+remain listed and bypass that collapse, even when two aliases resolve to the same outside file.
+The gate reports those escaping sources as findings.
+
+Listing accepts `--config PATH` and an explicit `--format human`. Combining `--list-sources`
+with `--format github` exits 2 before loading configuration, with empty stdout and
+`error: --list-sources cannot be combined with --format github` on stderr. Configuration,
+source-selection, and legacy-policy refusals have the same error codes, stderr diagnostics,
+empty stdout, and exit 2 as the ordinary human gate. Diagnostic wording may change between
+releases. If stdout's reader departs, listing exits 141 silently under the command's existing
+broken-pipe policy.
 
 ### `reconcile`
 
@@ -825,8 +847,10 @@ within one segment, case-sensitively, and never cross `/`; `**` is accepted only
 segment and matches zero or more directories. `docs/**/*.md`, `ARCHITECTURE.md`, and `*.md` are
 all selectors. Expansion never enters a symlinked directory, whether `**` reaches it or a segment
 names it, and a symlinked file is selected by its spelling and judged for containment afterward.
-Matches are unioned across selectors, sorted by their project-relative spelling, and deduplicated
-by resolved target, so YAML order and overlapping selectors cannot change the output.
+Matches are unioned across selectors and sorted by their project-relative POSIX spelling;
+contained sources are deduplicated by resolved target, retaining the first sorted spelling.
+Outside-root spellings bypass that collapse. YAML order and overlapping selectors cannot change
+the output. The [`links`](#links) section owns the `--list-sources` output contract.
 
 `legacy_marker_sources` is an opt-in policy over that same selected set, letting the sources it
 names resolve a fragment through an explicit `{#marker}` as well. It is omitted by default, adds
