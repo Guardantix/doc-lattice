@@ -2945,6 +2945,10 @@ found, with its own identity and escape rules.
   warning is right for a walk and wrong for a declaration. A record retains its declared
   spelling as document identity, unlike AD-8's single-file `docs_roots` entry, which stores the
   resolved path, while ownership compares resolved targets.
+- A manifest is never a document. A manifest whose resolved target is also the resolved target of
+  any loaded node, registered or discovered, is an error naming both. Otherwise a record, or a
+  `.md` symlink, could register the manifest itself, its `seen` values would enter that node's
+  body hash, and a reconcile write could change a hash it depends on.
 
 **Foreign frontmatter is whatever the inline reading declines to own.** A registered file is
 first classified exactly as an inline file is, by the existing frontmatter classifier. It is
@@ -2983,15 +2987,22 @@ manifests fresh. GTX-755 bumps `CACHE_VERSION` under the rule in `constants.py` 
 meaning changes.
 
 **Coverage is independent of discovery and of registration.** An optional `sidecar_coverage` key
-declares selectors over project paths and exact-path exemptions. The selectors are AD-45's:
+holds a mapping with exactly two keys: `select`, a required non-empty list of selector strings,
+and `exempt`, an optional list of mappings each carrying exactly `path` and `reason`, both
+non-empty strings. As for `sidecar_manifests`, a null or empty `sidecar_coverage`, `select`, or
+declared `exempt` is refused at config load, and an omitted `exempt` means no exemptions. The
+selectors are AD-45's:
 `link_selectors` grammar, expanded by the `links` gate's no-follow walk from the project root,
 which already reports a source that escapes through a symlink rather than skipping it. Discovery's
 `docs_roots`, ignore globs, missing-file skips, escape warnings, and deduplication play no part,
 because each of those is a way a file can drop out of the list discovery returns, and reusing
 that list would hide the omissions coverage exists to report.
 
-- A selected file is covered when its resolved target is an external registration or a valid
-  inline node. An untracked or id-less file is not.
+- A selected file is covered when its resolved target is a node in the loaded lattice: an
+  external registration, or an inline node discovery actually loaded. Validity alone does not
+  cover a file, so a valid inline file outside `docs_roots` or matched by an ignore glob is
+  uncovered, because its edges are not in the graph any command reads. Coverage never enrolls a
+  file. An untracked or id-less file is uncovered too.
 - An exemption names one exact path, never a glob, and a non-empty reason, so exempting today's
   file waives nothing for a future one. An exemption that matches no path the walk kept is
   refused as stale, the AD-49 rule for an entry that matches nothing.
