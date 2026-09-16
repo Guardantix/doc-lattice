@@ -363,6 +363,14 @@ def _record_error(tmp_path: Path, records: str) -> str:
             "is absolute",
             id="absolute",
         ),
+        # Relative on POSIX but absolute once joined on Windows, so refused on every host to
+        # keep a manifest's validity and identity independent of where it is loaded.
+        pytest.param(
+            "  - {path: 'C:/skills/b.md', meta: {id: b}}\n",
+            "C:/skills/b.md",
+            "is absolute",
+            id="drive-prefixed",
+        ),
         pytest.param(
             "  - {path: 'skills\\b.md', meta: {id: b}}\n",
             "skills\\b.md",

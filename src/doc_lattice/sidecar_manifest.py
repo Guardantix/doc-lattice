@@ -17,7 +17,7 @@ directory, so moving a manifest never re-points its records (AD-51).
 
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
-from pathlib import Path, PurePosixPath
+from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import Any
 
 from pydantic import ValidationError
@@ -275,7 +275,10 @@ def _check_path_spelling(declared_path: str, where: str) -> None:
         problem = f"contains a control character ({control})"
     elif "\\" in declared_path:
         problem = "uses a backslash; separate segments with '/'"
-    elif PurePosixPath(declared_path).is_absolute():
+    elif PurePosixPath(declared_path).is_absolute() or PureWindowsPath(declared_path).drive:
+        # A drive prefix is refused on every platform, as the selector grammar refuses it: on
+        # Windows the join onto the project root would read `C:/x.md` as absolute, so the same
+        # manifest would otherwise be valid, with a different identity, depending on the host.
         problem = "is absolute; write it relative to the project root"
     elif not declared_path.endswith(_MARKDOWN_SUFFIX):
         problem = f"does not name a '{_MARKDOWN_SUFFIX}' file"
