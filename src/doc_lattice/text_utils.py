@@ -80,3 +80,22 @@ def first_control_index(text: str) -> int | None:
         if is_control_char(char):
             return index
     return None
+
+
+def describe_first_control_char(text: str) -> str | None:
+    """Name a string's first control character by code point and position.
+
+    The description never contains the character itself, so a diagnostic refusing it cannot
+    print the byte it refuses.
+
+    Args:
+        text: Any string, possibly repo-controlled.
+
+    Returns:
+        A phrase such as ``U+001B at index 3``, or None when the string holds no control
+        character.
+    """
+    index = first_control_index(text)
+    if index is None:
+        return None
+    return f"U+{ord(text[index]):04X} at index {index}"

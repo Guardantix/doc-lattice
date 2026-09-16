@@ -7,13 +7,14 @@ import ast
 import sys
 from pathlib import Path
 
-# The three modules AD-3 names, spelled as exact source-root-relative paths. An allowlist rather
-# than a name pattern: a pattern exempts every future module whose name happens to match it, and
-# a stem alone would extend the exemption to a same-named module anywhere in the tree.
+# The modules AD-3 names, spelled as exact source-root-relative paths. An allowlist rather than a
+# name pattern: a pattern exempts every future module whose name happens to match it, and a stem
+# alone would extend the exemption to a same-named module anywhere in the tree.
 BOUNDARY_MODULES = frozenset(
     {
         "doc_lattice/frontmatter_parser.py",
         "doc_lattice/linear_parser.py",
+        "doc_lattice/sidecar_manifest.py",
         "doc_lattice/yaml_boundary.py",
     }
 )
@@ -39,7 +40,7 @@ def missing_boundary_modules(search_dir: Path) -> list[str]:
 
     `BOUNDARY_MODULES` is spelled relative to the source root, so it classifies correctly only
     when the scan is pointed at that root. Pointed one level deeper, every entry misses and the
-    three exempt modules are reported as violations; pointed at an unrelated tree, the scan runs
+    exempt modules are reported as violations; pointed at an unrelated tree, the scan runs
     with no exemptions at all and says nothing about why. Neither is a finding about the tree, so
     `main` refuses the root instead of reporting against it.
 

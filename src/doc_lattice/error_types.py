@@ -104,6 +104,26 @@ class FrontmatterError(DocumentError):
         super().__init__(message, source=source, code="FRONTMATTER_ERROR")
 
 
+class ManifestError(ProjectError):
+    """A sidecar manifest, or one record in it, cannot be read or fails the AD-51 schema.
+
+    Deliberately not a ``DocumentError``. That base names the Markdown document a failure is
+    about so a renderer can annotate it, and a manifest is never a document (AD-51). The message
+    names the manifest, and for a record failure the record position and its declared Markdown
+    spelling as well.
+    """
+
+    def __init__(self, message: str) -> None:
+        super().__init__(message, code="MANIFEST_ERROR")
+
+
+class RegistrationConflictError(ProjectError):
+    """Two sidecar records, in one manifest or in two, resolve to the same Markdown target."""
+
+    def __init__(self, message: str) -> None:
+        super().__init__(message, code="REGISTRATION_CONFLICT")
+
+
 class LinearError(ProjectError):
     """A Linear network, credential, or response error."""
 

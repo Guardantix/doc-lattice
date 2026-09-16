@@ -7,7 +7,13 @@ from pydantic import BaseModel, ConfigDict, Field
 from pydantic import ValidationError as PydanticValidationError
 
 import doc_lattice.config as config_module
-from doc_lattice.config import Config, declares_lattice_format, load_config
+from doc_lattice.config import (
+    Config,
+    SidecarConfig,
+    declares_lattice_format,
+    load_config,
+    load_sidecar_config,
+)
 from doc_lattice.error_types import ConfigError
 from doc_lattice.path_utils import format_path_for_display
 from doc_lattice.yaml_boundary import YAML_LOAD_ERRORS
@@ -760,3 +766,101 @@ def test_a_compatibility_entry_matching_nothing_is_not_rejected_at_load(tmp_path
         encoding="utf-8",
     )
     assert load_config(None, tmp_path).config.legacy_marker_sources == ["nowhere/**"]
+
+
+# GTX-764: `sidecar_manifests` (AD-51) is parsed only through the private seam until the key is
+# enabled. The user-facing loader must keep refusing it and must not advertise it.
+
+
+@pytest.mark.parametrize(
+    "value", ["[meta/sidecars.yml]", "", "[]"], ids=["valid-list", "null", "empty"]
+)
+def test_the_user_facing_loader_still_refuses_sidecar_manifests(tmp_path: Path, value: str):
+    (tmp_path / ".doc-lattice.yml").write_text(
+        f"lattice_format: 2\nsidecar_manifests: {value}\n", encoding="utf-8"
+    )
+
+    with pytest.raises(ConfigError) as info:
+        load_config(None, tmp_path)
+
+    message = str(info.value)
+    assert "sidecar_manifests: Extra inputs are not permitted" in message
+    assert "sidecar_manifests," not in message.split("accepted keys:")[1]
+
+
+def test_unknown_key_help_does_not_advertise_sidecar_manifests(tmp_path: Path):
+    (tmp_path / ".doc-lattice.yml").write_text("lattice_format: 2\nbogus: 1\n", encoding="utf-8")
+
+    with pytest.raises(ConfigError) as info:
+        load_config(None, tmp_path)
+
+    assert "accepted keys:" in str(info.value)
+    assert "sidecar_manifests" not in str(info.value)
+
+
+def test_the_sidecar_seam_reads_the_declared_manifests_verbatim(tmp_path: Path):
+    (tmp_path / ".doc-lattice.yml").write_text(
+        "lattice_format: 2\nsidecar_manifests: [./meta/a.yml, b.yml]\n", encoding="utf-8"
+    )
+
+    loaded = load_sidecar_config(None, tmp_path)
+
+    assert loaded.sidecar_manifests == ("./meta/a.yml", "b.yml")
+    assert loaded.project.project_root == tmp_path.resolve()
+    assert loaded.project.config_path == tmp_path / ".doc-lattice.yml"
+
+
+@pytest.mark.parametrize("loader", [load_config, load_sidecar_config])
+def test_both_loaders_refuse_a_null_compatibility_declaration_the_same_way(tmp_path: Path, loader):
+    # pydantic registers field validators by method name, so a SidecarConfig validator reusing
+    # an inherited name silently replaces Config's instead of adding beside it. The null then
+    # reached the list validator and was refused with the empty-list message.
+    (tmp_path / ".doc-lattice.yml").write_text(
+        "lattice_format: 2\nlegacy_marker_sources:\n", encoding="utf-8"
+    )
+
+    with pytest.raises(ConfigError, match="legacy_marker_sources is written as null"):
+        loader(None, tmp_path)
+
+
+def test_the_sidecar_model_keeps_every_inherited_field_validator():
+    inherited = set(Config.__pydantic_decorators__.field_validators)
+    extended = set(SidecarConfig.__pydantic_decorators__.field_validators)
+
+    assert inherited < extended
+
+
+def test_the_sidecar_seam_treats_an_omitted_key_as_no_manifests(tmp_path: Path):
+    (tmp_path / ".doc-lattice.yml").write_text("lattice_format: 2\n", encoding="utf-8")
+
+    assert load_sidecar_config(None, tmp_path).sidecar_manifests == ()
+
+
+@pytest.mark.parametrize(
+    ("value", "reason"),
+    [
+        pytest.param("", "sidecar_manifests is written as null", id="null"),
+        pytest.param("[]", "sidecar_manifests is declared but names no manifest", id="empty"),
+        pytest.param("meta/a.yml", "Input should be a valid list", id="not-a-list"),
+        pytest.param("[7]", "Input should be a valid string", id="non-string-entry"),
+        pytest.param("['']", "sidecar_manifests entry 0 is empty", id="empty-entry"),
+        pytest.param(
+            '[a.yml, "b\\u0007.yml"]',
+            "sidecar_manifests entry 1 must not contain a control character; found U+0007",
+            id="control-character",
+        ),
+    ],
+)
+def test_the_sidecar_seam_refuses_an_unusable_declaration_naming_file_and_key(
+    tmp_path: Path, value: str, reason: str
+):
+    config = tmp_path / ".doc-lattice.yml"
+    config.write_text(f"lattice_format: 2\nsidecar_manifests: {value}\n", encoding="utf-8")
+
+    with pytest.raises(ConfigError) as info:
+        load_sidecar_config(None, tmp_path)
+
+    message = str(info.value)
+    assert f"invalid config {format_path_for_display(config)}:" in message
+    assert "sidecar_manifests" in message
+    assert reason in message

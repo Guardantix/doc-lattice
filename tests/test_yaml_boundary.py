@@ -3,7 +3,12 @@
 import pytest
 from ruamel.yaml.error import ReusedAnchorWarning, YAMLError
 
-from doc_lattice.yaml_boundary import YAML_LOAD_ERRORS, SafeYamlLoader
+from doc_lattice.yaml_boundary import (
+    YAML_LOAD_ERRORS,
+    ReuseSpelling,
+    SafeYamlLoader,
+    is_merge_key_scalar,
+)
 
 # Everything below the parser-choice group is a claim about the boundary's own mechanics, not
 # about either parser, so each one is asserted on both implementations this loader can be built
@@ -181,3 +186,72 @@ def test_load_errors_family_covers_a_duplicate_key_in_an_ordered_map(parser):
 @pytest.mark.parametrize("error_type", [YAMLError, ValueError, KeyError, TypeError, AssertionError])
 def test_load_errors_family_is_the_documented_membership(error_type):
     assert error_type in YAML_LOAD_ERRORS
+
+
+@BOTH_PARSERS
+@pytest.mark.parametrize(
+    ("text", "kind", "line", "column"),
+    [
+        pytest.param("a: &x 1\n", "anchor", 1, 4, id="scalar-anchor"),
+        pytest.param("a: &x [1]\n", "anchor", 1, 4, id="sequence-anchor"),
+        pytest.param("a:\n  b: *x\n", "alias", 2, 6, id="alias"),
+        pytest.param("m: {<<: {id: n}}\n", "merge key", 1, 5, id="plain-merge-key"),
+        pytest.param("m: {!!merge k: {id: n}}\n", "merge key", 1, 5, id="explicit-merge-tag"),
+    ],
+)
+def test_first_reuse_spelling_locates_the_spelling(parser, text, kind, line, column):
+    # Read off the event stream because construction discards all three: an unused anchor
+    # leaves no trace in the value, and a merge key needs no alias to take a mapping in.
+    found = SafeYamlLoader(parser=parser).first_reuse_spelling(text)
+
+    assert found == ReuseSpelling(kind=kind, line=line, column=column)
+
+
+@BOTH_PARSERS
+@pytest.mark.parametrize(
+    "text",
+    ["a: 'x & *y'\n", "'<<': 1\n", '"<<": 1\n', "a: !!str <<\n", "", "a: [1, {b: c}]\n"],
+)
+def test_first_reuse_spelling_ignores_text_that_only_contains_the_characters(parser, text):
+    assert SafeYamlLoader(parser=parser).first_reuse_spelling(text) is None
+
+
+@pytest.mark.parametrize(
+    ("tag", "style", "value", "expected"),
+    [
+        pytest.param(None, None, "<<", True, id="pure-plain"),
+        # The optional accelerator reports a plain scalar's style as "" rather than None, so a
+        # check spelled `style is None` misses every plain merge key wherever it is installed.
+        pytest.param(None, "", "<<", True, id="clib-plain"),
+        pytest.param(None, "'", "<<", False, id="single-quoted"),
+        pytest.param(None, '"', "<<", False, id="double-quoted"),
+        pytest.param("tag:yaml.org,2002:merge", None, "k", True, id="explicit-merge-tag"),
+        pytest.param("tag:yaml.org,2002:str", None, "<<", False, id="other-tag"),
+        pytest.param(None, None, "<", False, id="other-text"),
+    ],
+)
+def test_is_merge_key_scalar_reads_both_parsers_plain_style(tag, style, value, expected):
+    assert is_merge_key_scalar(tag, style, value) is expected
+
+
+@BOTH_PARSERS
+def test_first_reuse_spelling_reports_the_first_in_document_order(parser):
+    found = SafeYamlLoader(parser=parser).first_reuse_spelling("a: *x\nb: &y 1\n")
+
+    assert found is not None
+    assert found.kind == "alias"
+
+
+@BOTH_PARSERS
+def test_first_reuse_spelling_raises_the_load_errors_family_on_a_parse_failure(parser):
+    with pytest.raises(YAML_LOAD_ERRORS):
+        SafeYamlLoader(parser=parser).first_reuse_spelling("key: [unclosed\n")
+
+
+@BOTH_PARSERS
+def test_first_reuse_spelling_does_not_leak_directive_state_into_a_later_load(parser):
+    loader = SafeYamlLoader(parser=parser)
+
+    loader.first_reuse_spelling("%YAML 1.1\n---\nkey: on\n")
+
+    assert loader.load("key: on\n") == {"key": "on"}

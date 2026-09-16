@@ -6,6 +6,15 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added
+
+- Internal: the engine can validate the sidecar manifests ARCHITECTURE.md's AD-51 specifies into
+  a typed registration index, refusing a malformed or unusable manifest or record, any YAML
+  anchor, alias, or merge key, and two records claiming one Markdown file. Nothing is loaded as a
+  node yet, and every released command still refuses the `sidecar_manifests` key as unknown. The
+  two error codes this reserves, `MANIFEST_ERROR` and `REGISTRATION_CONFLICT`, are listed in
+  [README.md](README.md#error-codes) and cannot be raised by any command yet.
+
 ## [7.3.0] - 2026-09-13
 
 ### Added

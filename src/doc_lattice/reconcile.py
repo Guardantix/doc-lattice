@@ -40,7 +40,7 @@ from .hashing import normalize_newlines
 from .model import Lattice, TargetId, format_collision, parse_ref
 from .path_utils import format_path_for_display
 from .resolve import cached_target_hash
-from .yaml_boundary import YAML_LOAD_ERRORS
+from .yaml_boundary import YAML_LOAD_ERRORS, is_merge_key_scalar
 from .yaml_error_render import format_yaml_error_for_display
 
 # Characters that end or reinterpret a plain scalar in block or flow context, and the
@@ -67,9 +67,6 @@ _MAX_SHORT_ESCAPE = 0xFFFF
 # The named escapes a double-quoted scalar spells the whitespace controls with, which are
 # more legible than the numeric escape the rest of the non-printable set takes.
 _YAML_NAMED_ESCAPES = {"\t": "\\t", "\n": "\\n", "\r": "\\r"}
-
-# The tag the loader flattens a mapping key on, which the plain `<<` scalar resolves to.
-_MERGE_TAG = "tag:yaml.org,2002:merge"
 
 # The tokens that open a node an anchor or a tag ahead of them belongs to rather than to a
 # scalar, in either the block or the flow spelling.
@@ -486,9 +483,7 @@ def _is_merge_key(anchors: _AnchorIndex, key: _YamlOccurrence) -> bool:
     resolved = _resolve_occurrence(anchors, key)
     if not isinstance(resolved, _ScalarOccurrence):
         return False
-    if resolved.tag is not None:
-        return resolved.tag == _MERGE_TAG
-    return resolved.style is None and resolved.value == "<<"
+    return is_merge_key_scalar(resolved.tag, resolved.style, resolved.value)
 
 
 @dataclass(frozen=True, slots=True)
