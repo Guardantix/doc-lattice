@@ -223,9 +223,13 @@ def is_merge_key_scalar(tag: str | None, style: str | None, value: str) -> bool:
     any scalar, while a quoted or otherwise tagged ``<<`` is an ordinary value. Only a plain,
     untagged ``<<`` resolves to the merge tag on its own.
 
+    A plain scalar's style is falsy rather than one value, because the two parsers disagree:
+    the pure parser reports None, while the optional `ruamel.yaml.clib` parser reports an empty
+    string. Every quoted or block style is a non-empty indicator character under both.
+
     Args:
         tag: The scalar's explicit tag, or None when it carries none.
-        style: The scalar's quoting style, or None for a plain scalar.
+        style: The scalar's style indicator, None or empty for a plain scalar.
         value: The scalar's text.
 
     Returns:
@@ -233,4 +237,4 @@ def is_merge_key_scalar(tag: str | None, style: str | None, value: str) -> bool:
     """
     if tag is not None:
         return tag == MERGE_TAG
-    return style is None and value == "<<"
+    return not style and value == "<<"

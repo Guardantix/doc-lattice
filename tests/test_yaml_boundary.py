@@ -3,7 +3,12 @@
 import pytest
 from ruamel.yaml.error import ReusedAnchorWarning, YAMLError
 
-from doc_lattice.yaml_boundary import YAML_LOAD_ERRORS, ReuseSpelling, SafeYamlLoader
+from doc_lattice.yaml_boundary import (
+    YAML_LOAD_ERRORS,
+    ReuseSpelling,
+    SafeYamlLoader,
+    is_merge_key_scalar,
+)
 
 # Everything below the parser-choice group is a claim about the boundary's own mechanics, not
 # about either parser, so each one is asserted on both implementations this loader can be built
@@ -209,6 +214,24 @@ def test_first_reuse_spelling_locates_the_spelling(parser, text, kind, line, col
 )
 def test_first_reuse_spelling_ignores_text_that_only_contains_the_characters(parser, text):
     assert SafeYamlLoader(parser=parser).first_reuse_spelling(text) is None
+
+
+@pytest.mark.parametrize(
+    ("tag", "style", "value", "expected"),
+    [
+        pytest.param(None, None, "<<", True, id="pure-plain"),
+        # The optional accelerator reports a plain scalar's style as "" rather than None, so a
+        # check spelled `style is None` misses every plain merge key wherever it is installed.
+        pytest.param(None, "", "<<", True, id="clib-plain"),
+        pytest.param(None, "'", "<<", False, id="single-quoted"),
+        pytest.param(None, '"', "<<", False, id="double-quoted"),
+        pytest.param("tag:yaml.org,2002:merge", None, "k", True, id="explicit-merge-tag"),
+        pytest.param("tag:yaml.org,2002:str", None, "<<", False, id="other-tag"),
+        pytest.param(None, None, "<", False, id="other-text"),
+    ],
+)
+def test_is_merge_key_scalar_reads_both_parsers_plain_style(tag, style, value, expected):
+    assert is_merge_key_scalar(tag, style, value) is expected
 
 
 @BOTH_PARSERS
