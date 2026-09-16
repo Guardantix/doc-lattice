@@ -11,7 +11,7 @@ Two named commands cover it.
 `/linear-finalize` is the one skill that auto-invokes, on an open `ABC-N` PR, and it runs the same handback as `/colinear handback`.
 For ad-hoc reads/writes outside a workflow, run the `colinear` CLI with `--help`.
 
-This orientation matches colinear 0.83.x — verify against the `version:` line in `doctor` output; on a major/minor mismatch STOP and tell the user to re-run `colinear orientation enable`.
+This orientation matches colinear 0.85.x — verify against the `version:` line in `doctor` output; on a major/minor mismatch STOP and tell the user to re-run `colinear orientation enable`.
 If `colinear` is not found at all, run `./install.sh` from the colinear repo checkout — that is the version-skew recovery path and does not depend on the new binary.
 
 ## The pipeline
@@ -38,6 +38,9 @@ Where that automation is off, a successful merge leaves the issue in the review 
 
 The authoritative "agent finished, a human is needed" signal is the configured `labels.needs_human_review` marker, attached by the same handback write.
 Read that, not the workflow state, when you want to know whether work is waiting on a person: the state says where the issue sits in the pipeline, and the marker says who owes the next move.
+That reading stops at the configured `states.done` role, which is itself a human's confirmation that the work is finished.
+A merge the integration closes can land before the handback runs, which then halts and leaves the old queue marker attached, and a merge made without `/colinear ship` can leave the attention marker behind, so a marker on an issue currently in that state is residue rather than a sign that anyone owes a move.
+Whoever reopens such an issue re-checks its markers before work resumes.
 
 ## Per-stage commands
 
