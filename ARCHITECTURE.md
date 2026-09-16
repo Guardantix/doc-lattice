@@ -240,7 +240,7 @@ acts on, not the set of ways to reach it.
 ### AD-8: Symlink targets and document identity
 
 **Date:** 2026-07-13
-**Status:** Accepted
+**Status:** Accepted; amended by AD-51
 **Context:** A discovered markdown path may be a symlink, and multiple configured
 roots or aliases may reach the same physical document.
 **Decision:** Discovery resolves each candidate against the project root for
@@ -2217,7 +2217,7 @@ notice that quietly stops running looks exactly like a repository whose pins are
 ### AD-44: Metadata is GitHub-invisible by a second envelope, and auto-slug identity is made safe to use
 
 **Date:** 2026-08-31
-**Status:** Accepted
+**Status:** Accepted; amended by AD-51
 **Context:** Every tracked file carries YAML frontmatter inside `---` fences, and GitHub renders
 that block as a table at the top of the rendered file, which for a README means the repository
 landing page. Both current adopters publish or plan to publish on GitHub, and the visible metadata
@@ -2863,3 +2863,200 @@ sees findings about a workflow file `main` has moved past. The horizon is a prop
 repository's release cadence, not of GitHub: a project that leaves approvals pending for longer
 has to raise it, and `tests/test_audit_action_runtimes.py` pins the boundary as "older than"
 rather than "at least", so a run of exactly seven days is still read.
+
+### AD-51: A document another tool owns is enrolled by a sidecar manifest, and its metadata never enters the file
+
+**Date:** 2026-09-16
+**Status:** Accepted; amends AD-8 and AD-44
+**Context:** AD-44 weighed a sidecar metadata manifest and declined it, because the problem in
+front of it, metadata GitHub renders, was solved by a second envelope inside the file. GTX-396
+is a problem that envelope cannot solve. colinear's skill bodies restate production rules, and
+GTX-387 showed what that costs when they drift: a skill still stating the pre-GTX-133 receipt
+freshness rule led an agent to second-guess the CLI's correct verdict. Enrolling those bodies
+inline fails twice over. Their frontmatter belongs to the skill loader, and adding `id` to it
+makes doc-lattice 7.3.0 validate the loader's `name` and `description` keys against `NodeMeta`
+and reject them. And any in-file envelope ships: the skills are distributed to consuming
+projects, so a publisher's maintenance dependencies would travel into every installation, which
+is the consuming-project frame-of-reference concern colinear's AD-41 records. The declarations
+need to live in the publisher's repository and nowhere else, which is what a sidecar is.
+GTX-752 is the capability, split into this decision (GTX-754), loading (GTX-755), coverage
+(GTX-756), and reconcile (GTX-757). This record fixes the contracts all three implement, so no
+piece chooses its own. It changes no code.
+**Decision:** An opt-in configuration key names YAML manifests whose records associate a
+project-relative Markdown path with ordinary node metadata. The Markdown file is the node's
+content and section source and is never written. The manifest is the node's metadata source and
+is the only file reconcile rewrites for it.
+
+**What this does not prove.** Declared edges are a gate requiring human review of the dependency
+a person declared. They are not a proof that the downstream prose is semantically correct, and
+they do not detect a production change whose governing decision was never updated: if the code
+moves and the decision the skill derives from does not, nothing goes STALE. Inline nodes carry
+the same limit, and a sidecar neither widens nor narrows it.
+
+**An additive key, refused by every engine that predates it.** Enrollment is a new top-level
+`sidecar_manifests` key listing manifest paths exactly, with no globs, so a deleted manifest is a
+configuration error rather than a quietly smaller registration set. Null and an empty list are
+refused at config load, the AD-49 rule for a policy that names nothing. The version-skew guard
+is AD-44's: an older engine rejects the unknown key before loading, so it cannot report a green
+graph with the external nodes missing. `lattice_format` does not bump. An inline-only project's
+hashes and output are unchanged, and forcing a format migration on every adopter to guard a key
+only some write would repeat the global cost AD-44 paid for a change that did alter every
+lattice. The feature therefore ships in a minor release, and an adopter upgrades its hook,
+workflow, and tool pins before writing the key, as AD-49 records for its own key. GTX-755
+verifies the refusal against an actually released pre-feature engine.
+
+**The manifest schema.** A manifest is a YAML mapping whose one key, `nodes`, holds a non-empty
+sequence of records. An empty `nodes` is refused for the same reason a deleted manifest is: an
+accidentally emptied manifest would otherwise remove every node it declared under a green
+`check`, and intentional removal already has an explicit spelling, dropping the manifest from
+`sidecar_manifests`. Each record carries exactly `path`, a project-root-relative POSIX spelling of a `.md`
+file, and `meta`, a mapping validated by `NodeMeta` as it stands, `derives_from` and `seen`
+included. Keeping `meta` a separate object rather than flattening `path` into it reuses the
+schema AD-31 Layer 1 declares instead of copying it, so an inline node and an external node
+cannot drift apart in what metadata they may carry. Paths are relative to the project root
+rather than to the manifest, so moving a manifest never re-points its records and a record's
+spelling matches what `check` prints. The manifest is untyped YAML read through `yaml_boundary`
+under AD-33's pure parser, and GTX-755 opens its validation boundary as an AD-3 and allowlist
+edit.
+
+**No anchors, aliases, or merge keys anywhere in a manifest.** They are refused at load, not
+only across records. Merge-key inheritance of `seen`
+([RECONCILE.md](RECONCILE.md#write-mechanics-and-durability)) would, in a shared manifest, let
+reconciling one node rewrite another node's acknowledgement, which breaks the guarantee below
+that unselected records are unchanged. AD-31 has to carry those spellings because inline
+documents predating it used them. A manifest is a new format with no such history, so the
+refusal costs no adopter anything, and a later amendment that brings its own write proof can
+widen it. Every other spelling question for the manifest rewriter is GTX-757's to settle,
+recorded as an AD-31 amendment.
+
+**Ownership is singular and checked before deduplication.** Every rule here is an exit-2 error
+naming the Markdown path and the manifest record, never a warning that drops the node. This
+amends AD-8, which governs walked paths only: a registration is a second way a document is
+found, with its own identity and escape rules.
+
+- A registration is its own discovery. A registered file outside `docs_roots` is loaded, and a
+  registered file that discovery also reaches is loaded once, as the external node.
+- Duplicate ids across inline and external nodes are AD-1's `DuplicateIdError`, unchanged.
+- Two records, in one manifest or in two, whose paths resolve to the same target are an error
+  naming both. The comparison uses resolved targets, before the AD-8 deduplication that would
+  otherwise keep the first and hide the second.
+- A registered path that does not exist or is not a regular file is an error. Discovery skips a
+  vanished candidate silently because nobody named it. A record is an explicit claim, so its
+  target disappearing is the omission this feature exists to catch.
+- Manifest paths and record paths both resolve through `path_utils.safe_resolve()`. An escape,
+  including through a symlink, is an error for either, where discovery only warns and skips: the
+  warning is right for a walk and wrong for a declaration. A record retains its declared
+  spelling as document identity, unlike AD-8's single-file `docs_roots` entry, which stores the
+  resolved path, while ownership compares resolved targets.
+- A manifest's resolved target must exist and be a regular file, checked before it is opened, the
+  same requirement a registered Markdown target carries. A missing manifest is a configuration
+  error, and a FIFO or other special file is refused rather than read, since opening one can
+  block every lattice-loading command.
+- A manifest is never a document. A manifest whose resolved target is also the resolved target of
+  any loaded node, registered or discovered, is an error naming both. Otherwise a record, or a
+  `.md` symlink, could register the manifest itself, its `seen` values would enter that node's
+  body hash, and a reconcile write could change a hash it depends on.
+
+**Foreign frontmatter is whatever the inline reading declines to own.** A registered file is
+first classified exactly as an inline file is, by the existing frontmatter classifier. It is
+accepted as external only when that reading is `untracked` or `id-less` with no envelope flag.
+Every other outcome refuses: `tracked`, `misplaced-envelope`, a shadowed envelope, and every
+error the inline reading raises, an unclosed fence and unloadable YAML included. One rule then
+decides ownership for both readings, so no second key list can drift from the classifier, and a
+future ownership signal that is not a key reaches both at once.
+
+- In practice that refuses a foreign mapping carrying `id` or any `LATTICE_INTENT_KEYS` key, and
+  passes `title`, `layer`, `name`, `description`, and every other key as the owning tool's
+  business. A tool whose own frontmatter uses a reserved key is therefore unsupported for now.
+  The limit is chosen: lifting it needs a discriminator this record does not have, and failing
+  on ambiguous ownership beats letting either declaration silently win.
+- A refusal never falls back to treating the whole file as body, since that would change which
+  bytes the hash covers without anyone deciding it. The recognized fence is removed from the
+  body whatever it holds, and is never validated against `NodeMeta`.
+- The hash covers the body after the recognized fence, canonicalized exactly as AD-4 and AD-44
+  define for inline nodes, so a section's hash does not depend on whether its file is enrolled
+  inline or externally. Neither manifest bytes nor `seen` ever enter a content hash, which keeps
+  README.md's one-pass convergence argument true for manifest writes. The stated limit follows:
+  a change confined to the foreign frontmatter stales nothing, including an edit to a skill's
+  `description`, which its loader reads.
+
+**The cache stores per-file facts, never enrollment.** Today a cache hit rebuilds a node's
+metadata and body from the Markdown fingerprint alone (AD-12). Keying an assembled external node
+on that fingerprint plus a manifest fingerprint would still miss enrollment removal,
+reassignment between manifests, and symlink retargeting, which change what a node is without
+changing either file. So nothing enrollment determines is cached. A Markdown entry stores what
+its own bytes determine, the inline classification and the body after the fence among them,
+which serves either reading without a mode flag. A manifest's validated records, which its bytes
+alone determine, may be cached under that manifest's own fingerprint tiers. The join of
+configuration, manifests, resolved targets, and Markdown facts, and every ownership check in it,
+runs on every load, cache hits included. Reconcile still verifies bytes (AD-12) and reads
+manifests fresh. GTX-755 bumps `CACHE_VERSION` under the rule in `constants.py` if the stored
+meaning changes.
+
+**Coverage is independent of discovery and of registration.** An optional `sidecar_coverage` key
+holds a mapping with exactly two keys: `select`, a required non-empty list of selector strings,
+and `exempt`, an optional list of mappings each carrying exactly `path` and `reason`, both
+non-empty strings. As for `sidecar_manifests`, a null or empty `sidecar_coverage`, `select`, or
+declared `exempt` is refused at config load, and an omitted `exempt` means no exemptions. The
+selectors are AD-45's:
+`link_selectors` grammar, expanded by the `links` gate's no-follow walk from the project root,
+which already reports a source that escapes through a symlink rather than skipping it. Discovery's
+`docs_roots`, ignore globs, missing-file skips, escape warnings, and deduplication play no part,
+because each of those is a way a file can drop out of the list discovery returns, and reusing
+that list would hide the omissions coverage exists to report.
+
+- A selected file is covered when its resolved target is a node in the loaded lattice: an
+  external registration, or an inline node discovery actually loaded. Validity alone does not
+  cover a file, so a valid inline file outside `docs_roots` or matched by an ignore glob is
+  uncovered, because its edges are not in the graph any command reads. Coverage never enrolls a
+  file. An untracked or id-less file is uncovered too.
+- An exemption names one exact path, never a glob, and a non-empty reason, so exempting today's
+  file waives nothing for a future one. An exemption that matches no path the walk kept is
+  refused as stale, the AD-49 rule for an entry that matches nothing.
+- A selected path that is a symlink escaping the project root is uncovered and reported. It is
+  not skipped.
+- Coverage runs on every load of a configured project, cache hits included, and an uncovered
+  file is an exit-2 error for every lattice-loading command. The lattice those commands would
+  read is not the one the configuration declares, and exit 1 means a coherent graph that has
+  drifted (AD-1).
+
+**Reconcile keys updates by node, writes once per manifest, and finds records by identity.** The
+planner today keys an update by downstream document path and ref, so substituting a manifest
+path for the Markdown path would merge two nodes that share a manifest and an upstream ref.
+
+- A logical update is keyed by node id and ref, and carries the node's origin: its Markdown path
+  and, for an external node, its manifest and record.
+- Updates are grouped by resolved write destination, which is the Markdown file for an inline
+  node and the manifest for an external one. Each destination gets one verified rewrite, which
+  is also what the transaction boundary's duplicate-destination refusal requires. An external
+  node's Markdown is never a destination.
+- The fresh write-time read locates each record by its `meta.id` and checks that its `path`
+  still has the declared spelling and resolved target the plan used. A record that is missing,
+  duplicated, or repointed is a conflict that refuses the batch, and list position is never
+  evidence of identity.
+- Verification covers the whole manifest. The rewritten manifest must re-parse to the fresh read
+  with only the selected `seen` values changed, record order included, and its bytes must be
+  the ones AD-30's gate verified, with source formatting preserved in AD-26's byte-exact manner.
+- A mixed batch of inline and external nodes is one transaction, with AD-5's durability,
+  rollback, and recovery unchanged. Manifest destinations take AD-8's two independent
+  containment checks, before the fresh read and at the transaction boundary.
+- Human and JSON reporting stay per node and name both locations. The output shape belongs to
+  RECONCILE.md and GTX-757. Until GTX-757 ships, a reconcile selection that would update an
+  external node refuses with an actionable message (GTX-755).
+
+**The advisory review's four contracts.** GTX-752's advisory review proposed four: node identity
+separate from the rewritten file, coverage independent of discovery, foreign envelope ownership
+decided together with hashing, and enrollment-aware cache validity. The sections above adopt all
+four. The last is met by not caching what enrollment determines rather than by invalidating on
+enrollment changes, because an invalidation rule has to enumerate every way enrollment can
+change, and missing one serves a warm run a stale node the cold run would not produce. A join
+recomputed on every load has no such list to get wrong, and the per-file and per-manifest
+entries it reads keep the warm path free of re-parsing.
+
+**Consequences:** AD-44's decline of a sidecar manifest no longer governs. Its envelope,
+auto-slug, hash, and `lattice_format` decisions are untouched. GTX-755, GTX-756, and GTX-757 each
+update README.md, RECONCILE.md, and CHANGELOG.md for the behavior they ship, and record the
+AD-3, AD-12, or AD-31 amendment their implementation requires. The costs are chosen ones.
+Foreign-frontmatter-only edits are invisible to drift, tools that use a reserved key in their own
+frontmatter cannot be enrolled yet, the enrollment join runs on every load, and a coverage
+omission blocks read-only commands such as `impact` as well as `check`.
