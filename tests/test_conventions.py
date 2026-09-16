@@ -1999,6 +1999,13 @@ _MODULE_PATH_BEARING_NAMES: dict[str, frozenset[str]] = {
     # this project, and `reconcile_transaction.py` already scopes its own ancestor-directory
     # spelling as `current` for the same reason.
     "cli/commands/init.py": frozenset({"ancestor", "root", "target", "target_name"}),
+    # GTX-764: the sidecar manifest sinks. `declared` is a `sidecar_manifests` entry and
+    # `declared_path` a record's `path`, both as written, as is `manifest` where a location
+    # phrase is built; `resolved` and `target` are what they resolve to. The already-displayed
+    # spelling is `shown`, deliberately absent so it is not wrapped a second time.
+    "sidecar_manifest.py": frozenset(
+        {"declared", "declared_path", "manifest", "resolved", "target"}
+    ),
 }
 
 # Individual expressions inside scanned modules that are not paths despite the name. Every entry

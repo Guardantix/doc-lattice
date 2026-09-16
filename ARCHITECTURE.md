@@ -102,16 +102,20 @@ nesting is possible.
 ### AD-3: Untyped-to-typed boundary policy
 
 **Date:** 2026-06-27
-**Status:** Accepted; amended by AD-32
-**Context:** Document frontmatter YAML, workflow YAML, and Linear JSON arrive untyped.
+**Status:** Accepted; amended by AD-32 and AD-51
+**Context:** Document frontmatter YAML, workflow YAML, sidecar manifest YAML, and Linear JSON
+arrive untyped.
 **Decision:** `typing.Any`/`typing.cast` are allowed only in boundary modules
 (`scripts/check_typing_boundaries.py`); the real boundaries are `frontmatter_parser`
-(document frontmatter YAML), `linear_parser` (Linear JSON), and `yaml_boundary` (the shared
-ruamel safe-load mechanics the first of those and `config` both read through), which validate
-into typed models. Everywhere else
-passes typed values. `yaml_boundary` is the narrowest of the three: it returns the loaded
+(document frontmatter YAML), `linear_parser` (Linear JSON), `sidecar_manifest` (AD-51's
+sidecar manifest YAML), and `yaml_boundary` (the shared ruamel safe-load mechanics
+`frontmatter_parser`, `sidecar_manifest`, and `config` all read through), which validate into
+typed models. Everywhere else
+passes typed values. `yaml_boundary` is the narrowest of them: it returns the loaded
 value still untyped and each caller validates it, which is why the untyped return does not
-widen the boundary past the module that produces it.
+widen the boundary past the module that produces it. `sidecar_manifest` was opened by
+GTX-764 as its own module rather than folded into `frontmatter_parser`, because a manifest is
+never a document and its failures name a manifest record rather than a Markdown file.
 **Consequences:** Untyped data cannot leak past the named boundary modules; CI enforces
 it.
 

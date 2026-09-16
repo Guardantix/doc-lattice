@@ -29,17 +29,21 @@ here rather than on the loader class.
 
 What does not live here is policy. Each caller keeps its own error translation, because a
 malformed config and a malformed frontmatter block are different errors to the user, and
-config keeps its own empty-document fallback.
+config keeps its own empty-document fallback. `sidecar_manifest` is the one caller that refuses
+node-reuse spellings, and the refusal is its own: `first_reuse_spelling` below only locates
+them, because a constructed value no longer carries the syntax that decides the question.
 
 Each caller also still builds its own loader rather than sharing one instance across
 modules. A cross-module singleton would make one boundary's document state observable from
 another, which is the coupling the per-load reset exists to prevent.
 """
 
-from typing import Any
+from dataclasses import dataclass
+from typing import Any, Literal
 
 from ruamel.yaml import YAML
 from ruamel.yaml.error import YAMLError
+from ruamel.yaml.events import AliasEvent, NodeEvent, ScalarEvent
 from ruamel.yaml.parser import Parser as PureParser
 
 from .constants import YamlParser
@@ -53,6 +57,28 @@ from .constants import YamlParser
 # Every module loading a user's YAML catches this family and reports a ProjectError, so the
 # same typo is a clean error wherever the user writes it.
 YAML_LOAD_ERRORS = (YAMLError, ValueError, KeyError, TypeError, AssertionError)
+
+# The tag a merge key resolves to. A plain `<<` scalar resolves to it implicitly, and an explicit
+# `!!merge` spells it on any scalar.
+MERGE_TAG = "tag:yaml.org,2002:merge"
+
+# The three YAML spellings that let one node's content stand for another's.
+ReuseKind = Literal["anchor", "alias", "merge key"]
+
+
+@dataclass(frozen=True, slots=True)
+class ReuseSpelling:
+    """Where a document first spells an anchor, an alias, or a merge key.
+
+    Attributes:
+        kind: Which of the three spellings was found.
+        line: The 1-based line the spelling's node starts on.
+        column: The 1-based column the spelling's node starts at.
+    """
+
+    kind: ReuseKind
+    line: int
+    column: int
 
 
 class SafeYamlLoader:
@@ -114,6 +140,52 @@ class SafeYamlLoader:
         """Return a safe loader on this instance's chosen parser implementation."""
         return YAML(typ="safe", pure=self._parser == "pure")
 
+    def _reset_directive_state(self) -> None:
+        """Discard the underlying loader when a `%YAML` directive has touched it.
+
+        A YAML directive can update the reusable parser's version even when parsing fails, and a
+        stale version steers the next document's resolution. Clearing `YAML.version` is not
+        enough on its own across the declared `ruamel.yaml` range: 0.18 builds the versioned
+        resolver once, on first access, and never rebuilds it, so the previous document's 1.1
+        resolution survives the reset there and a later `on:` reads back as `True`. 0.19 rebuilds
+        the resolver when the version no longer matches. Discarding the loader instead is correct
+        under both, and it costs a construction only for the rare document that actually carried
+        a directive. `version` stays None under the optional `ruamel.yaml.clib` parser, which
+        skips directive state entirely (AD-26), so this never fires on a `platform-default` loader
+        in an environment that has the accelerator, and nothing leaks there either.
+        """
+        if self._yaml.version is not None:
+            self._yaml = self._build()
+
+    def first_reuse_spelling(self, text: str) -> ReuseSpelling | None:
+        """Locate the first anchor, alias, or merge key a YAML document spells.
+
+        Read off the parser's event stream rather than the loaded value, because construction
+        discards the syntax: an anchor nothing reads leaves no trace, and a merge key takes a
+        mapping straight into its parent without any alias. Quoted text that merely contains
+        `&`, `*`, or `<<` is a scalar value and is not reported. A merge key is recognized the
+        way the loader recognizes one, by a plain untagged `<<` or an explicit merge tag. A
+        plain `<<` written as a value is reported too, which costs nothing: the safe loader
+        cannot construct that value at all.
+
+        Args:
+            text: The YAML source to scan.
+
+        Returns:
+            The first spelling in document order, or None when the document has none.
+
+        Raises:
+            YAMLError: If the document cannot be scanned or parsed. Callers catch
+                `YAML_LOAD_ERRORS` rather than this one type.
+        """
+        self._reset_directive_state()
+        for event in self._yaml.parse(text):
+            kind = _reuse_kind(event)
+            if kind is not None:
+                mark = event.start_mark
+                return ReuseSpelling(kind=kind, line=mark.line + 1, column=mark.column + 1)
+        return None
+
     def load(self, text: str) -> Any:
         """Load one YAML document with default semantics.
 
@@ -129,17 +201,36 @@ class SafeYamlLoader:
                 constructor can also raise the builtin whose type rejected a tagged scalar,
                 so callers catch `YAML_LOAD_ERRORS` rather than this one type.
         """
-        # A YAML directive can update the reusable parser's version even when parsing fails,
-        # and a stale version steers the next document's resolution. Clearing `YAML.version`
-        # is not enough on its own across the declared `ruamel.yaml` range: 0.18 builds the
-        # versioned resolver once, on first access, and never rebuilds it, so the previous
-        # document's 1.1 resolution survives the reset there and a later `on:` reads back as
-        # `True`. 0.19 rebuilds the resolver when the version no longer matches. Discarding
-        # the loader instead is correct under both, and it costs a construction only for the
-        # rare document that actually carried a directive. `version` stays None under the
-        # optional `ruamel.yaml.clib` parser, which skips directive state entirely (AD-26),
-        # so this never fires on a `platform-default` loader in an environment that has the
-        # accelerator, and nothing leaks there either.
-        if self._yaml.version is not None:
-            self._yaml = self._build()
+        self._reset_directive_state()
         return self._yaml.load(text)
+
+
+def _reuse_kind(event: object) -> ReuseKind | None:
+    """Classify one parser event as a reuse spelling, or None when it is not one."""
+    if isinstance(event, AliasEvent):
+        return "alias"
+    if isinstance(event, NodeEvent) and event.anchor is not None:
+        return "anchor"
+    if isinstance(event, ScalarEvent) and is_merge_key_scalar(event.tag, event.style, event.value):
+        return "merge key"
+    return None
+
+
+def is_merge_key_scalar(tag: str | None, style: str | None, value: str) -> bool:
+    """Report whether a scalar is one the loader reads as a merge key.
+
+    The loader merges on a key's resolved tag, so an explicit ``!!merge`` spells a merge key on
+    any scalar, while a quoted or otherwise tagged ``<<`` is an ordinary value. Only a plain,
+    untagged ``<<`` resolves to the merge tag on its own.
+
+    Args:
+        tag: The scalar's explicit tag, or None when it carries none.
+        style: The scalar's quoting style, or None for a plain scalar.
+        value: The scalar's text.
+
+    Returns:
+        True when the scalar resolves to the merge tag.
+    """
+    if tag is not None:
+        return tag == MERGE_TAG
+    return style is None and value == "<<"

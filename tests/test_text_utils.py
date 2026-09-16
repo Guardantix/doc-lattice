@@ -5,6 +5,7 @@ from hypothesis import given
 from hypothesis import strategies as st
 
 from doc_lattice.text_utils import (
+    describe_first_control_char,
     first_control_index,
     is_control_char,
     safe_heading_label,
@@ -80,6 +81,11 @@ def test_first_control_index_agrees_with_strip_control_chars(text: str):
     # did not move the other would show up here rather than as a diagnostic that names a
     # position nothing was removed at.
     assert (first_control_index(text) is None) == (strip_control_chars(text) == text)
+
+
+def test_describe_first_control_char_names_the_code_point_and_position_only():
+    assert describe_first_control_char("ab\x1bc\x07d") == "U+001B at index 2"
+    assert describe_first_control_char("café") is None
 
 
 @pytest.mark.parametrize(

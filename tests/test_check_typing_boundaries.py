@@ -14,11 +14,13 @@ find_escape_hatch_usage = _SCRIPT["find_escape_hatch_usage"]
 main = _SCRIPT["main"]
 BOUNDARY_MODULES = _SCRIPT["BOUNDARY_MODULES"]
 
-# AD-3 names exactly these three: document frontmatter YAML, Linear JSON, and the shared ruamel
-# safe-load mechanics the first of those and `config` both read through.
+# AD-3 names exactly these four: document frontmatter YAML, Linear JSON, sidecar manifest YAML,
+# and the shared ruamel safe-load mechanics the first of those, the manifest boundary, and
+# `config` all read through.
 _AD3_MODULES = (
     "doc_lattice/frontmatter_parser.py",
     "doc_lattice/linear_parser.py",
+    "doc_lattice/sidecar_manifest.py",
     "doc_lattice/yaml_boundary.py",
 )
 
@@ -99,7 +101,7 @@ def test_a_root_one_level_below_the_source_root_misses_the_whole_allowlist():
 def test_the_wrong_scan_root_is_refused_instead_of_flagging_the_boundary_modules(
     tmp_path, monkeypatch, capsys
 ):
-    """Pointed one level deep, the guard would otherwise report the three exempt modules."""
+    """Pointed one level deep, the guard would otherwise report the exempt modules."""
     _write_module(tmp_path, "frontmatter_parser.py", "from typing import Any\n")
 
     with pytest.raises(SystemExit) as excinfo:
