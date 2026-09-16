@@ -7,7 +7,13 @@ from pydantic import BaseModel, ConfigDict, Field
 from pydantic import ValidationError as PydanticValidationError
 
 import doc_lattice.config as config_module
-from doc_lattice.config import Config, declares_lattice_format, load_config, load_sidecar_config
+from doc_lattice.config import (
+    Config,
+    SidecarConfig,
+    declares_lattice_format,
+    load_config,
+    load_sidecar_config,
+)
 from doc_lattice.error_types import ConfigError
 from doc_lattice.path_utils import format_path_for_display
 from doc_lattice.yaml_boundary import YAML_LOAD_ERRORS
@@ -802,6 +808,26 @@ def test_the_sidecar_seam_reads_the_declared_manifests_verbatim(tmp_path: Path):
     assert loaded.sidecar_manifests == ("./meta/a.yml", "b.yml")
     assert loaded.project.project_root == tmp_path.resolve()
     assert loaded.project.config_path == tmp_path / ".doc-lattice.yml"
+
+
+@pytest.mark.parametrize("loader", [load_config, load_sidecar_config])
+def test_both_loaders_refuse_a_null_compatibility_declaration_the_same_way(tmp_path: Path, loader):
+    # pydantic registers field validators by method name, so a SidecarConfig validator reusing
+    # an inherited name silently replaces Config's instead of adding beside it. The null then
+    # reached the list validator and was refused with the empty-list message.
+    (tmp_path / ".doc-lattice.yml").write_text(
+        "lattice_format: 2\nlegacy_marker_sources:\n", encoding="utf-8"
+    )
+
+    with pytest.raises(ConfigError, match="legacy_marker_sources is written as null"):
+        loader(None, tmp_path)
+
+
+def test_the_sidecar_model_keeps_every_inherited_field_validator():
+    inherited = set(Config.__pydantic_decorators__.field_validators)
+    extended = set(SidecarConfig.__pydantic_decorators__.field_validators)
+
+    assert inherited < extended
 
 
 def test_the_sidecar_seam_treats_an_omitted_key_as_no_manifests(tmp_path: Path):

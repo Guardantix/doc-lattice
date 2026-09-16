@@ -178,8 +178,13 @@ class SidecarConfig(Config):
 
     @field_validator("sidecar_manifests", mode="before")
     @classmethod
-    def _reject_a_written_null(cls, value: object) -> object:
-        """Refuse ``sidecar_manifests:`` with nothing after it, as AD-49 refuses a null policy."""
+    def _reject_a_null_manifest_list(cls, value: object) -> object:
+        """Refuse ``sidecar_manifests:`` with nothing after it, as AD-49 refuses a null policy.
+
+        Named apart from ``Config._reject_a_written_null`` on purpose: pydantic registers field
+        validators by method name, so reusing that name here would replace the inherited
+        ``legacy_marker_sources`` check rather than add this one beside it.
+        """
         if value is None:
             msg = (
                 f"{SIDECAR_MANIFESTS_KEY} is written as null; remove the key to enroll no "
