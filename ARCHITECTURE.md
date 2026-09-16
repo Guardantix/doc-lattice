@@ -2905,8 +2905,11 @@ lattice. The feature therefore ships in a minor release, and an adopter upgrades
 workflow, and tool pins before writing the key, as AD-49 records for its own key. GTX-755
 verifies the refusal against an actually released pre-feature engine.
 
-**The manifest schema.** A manifest is a YAML mapping whose one key, `nodes`, holds a sequence of
-records. Each record carries exactly `path`, a project-root-relative POSIX spelling of a `.md`
+**The manifest schema.** A manifest is a YAML mapping whose one key, `nodes`, holds a non-empty
+sequence of records. An empty `nodes` is refused for the same reason a deleted manifest is: an
+accidentally emptied manifest would otherwise remove every node it declared under a green
+`check`, and intentional removal already has an explicit spelling, dropping the manifest from
+`sidecar_manifests`. Each record carries exactly `path`, a project-root-relative POSIX spelling of a `.md`
 file, and `meta`, a mapping validated by `NodeMeta` as it stands, `derives_from` and `seen`
 included. Keeping `meta` a separate object rather than flattening `path` into it reuses the
 schema AD-31 Layer 1 declares instead of copying it, so an inline node and an external node
@@ -2945,6 +2948,10 @@ found, with its own identity and escape rules.
   warning is right for a walk and wrong for a declaration. A record retains its declared
   spelling as document identity, unlike AD-8's single-file `docs_roots` entry, which stores the
   resolved path, while ownership compares resolved targets.
+- A manifest's resolved target must exist and be a regular file, checked before it is opened, the
+  same requirement a registered Markdown target carries. A missing manifest is a configuration
+  error, and a FIFO or other special file is refused rather than read, since opening one can
+  block every lattice-loading command.
 - A manifest is never a document. A manifest whose resolved target is also the resolved target of
   any loaded node, registered or discovered, is an error naming both. Otherwise a record, or a
   `.md` symlink, could register the manifest itself, its `seen` values would enter that node's
