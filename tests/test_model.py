@@ -5,6 +5,8 @@ from pathlib import Path
 import pytest
 from pydantic import ValidationError as PydanticValidationError
 
+from doc_lattice import model
+from doc_lattice.loader import build_lattice
 from doc_lattice.model import (
     CollisionMember,
     Edge,
@@ -287,3 +289,37 @@ def test_format_collision_names_every_member_with_its_line():
 
 def test_a_section_record_carries_no_collision_by_default():
     assert SectionRecord(anchor="a", start=1, end=2).collision is None
+
+
+def test_document_origins_format_and_export_external_participants():
+
+    assert hasattr(model, "DocumentOrigin"), "origin values are missing"
+    declaration = model.ExternalDeclaration("./nodes.yml", 2, "./skill.md")
+    origin = model.DocumentOrigin(Path("skill.md"), declaration)
+    lattice = build_lattice(
+        [
+            ParsedDoc(Path("skill.md"), NodeMeta(id="external"), "# Skill\n", origin=origin),
+            ParsedDoc(Path("inline.md"), NodeMeta(id="inline"), "# Inline\n"),
+        ]
+    )
+    assert lattice.nodes_by_id["inline"].origin == model.DocumentOrigin(Path("inline.md"))
+    origins = model.external_origins(lattice, ["unknown", "inline", "external", "external"])
+    assert origins == {"external": origin}
+    assert model.origins_json(origins) == {
+        "origins": {
+            "external": {
+                "markdown_path": "skill.md",
+                "manifest_path": "./nodes.yml",
+                "record_index": 2,
+                "declared_path": "./skill.md",
+            }
+        }
+    }
+    assert model.origins_json({}) == {}
+    assert model.format_origins({}) == ""
+    formatted = model.format_origins(origins)
+    for text in ["external", "skill.md", "./nodes.yml", "nodes[2]", "./skill.md"]:
+        assert text in formatted
+    inline_origin = lattice.nodes_by_id["inline"].origin
+    assert inline_origin is not None
+    assert model.format_document_origin(inline_origin) == "'inline.md'"

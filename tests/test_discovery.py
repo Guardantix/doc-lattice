@@ -4,6 +4,7 @@ from pathlib import Path
 
 import pytest
 
+from doc_lattice import discovery
 from doc_lattice.discovery import (
     decode_doc,
     discover_doc_paths,
@@ -288,3 +289,18 @@ def test_every_read_failure_carries_the_document_as_structured_data(tmp_path: Pa
         with pytest.raises(UnreadableDocError) as exc:
             call()
         assert exc.value.source == source
+
+
+def test_raw_candidates_keep_aliases_and_configured_root_order(tmp_path):
+
+    assert hasattr(discovery, "discover_doc_candidates"), "raw candidates are missing"
+    original = tmp_path / "z.md"
+    original.write_text("# Body\n")
+    alias = tmp_path / "a.md"
+    alias.symlink_to(original)
+    candidates = discovery.discover_doc_candidates([original, alias], [], tmp_path)
+    assert [(candidate.path, candidate.target) for candidate in candidates] == [
+        (original, original),
+        (alias, original),
+    ]
+    assert discovery.discover_doc_paths([original, alias], [], tmp_path) == [original]

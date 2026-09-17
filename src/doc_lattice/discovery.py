@@ -3,11 +3,20 @@
 import os
 import warnings
 from collections.abc import Sequence
+from dataclasses import dataclass
 from pathlib import Path
 
 from .error_types import UnreadableDocError
 from .hashing import normalize_newlines
 from .path_utils import format_path_for_display, safe_resolve
+
+
+@dataclass(frozen=True, slots=True)
+class DocCandidate:
+    """An unresolved Markdown identity and its contained resolved target."""
+
+    path: Path
+    target: Path
 
 
 def discover_doc_paths(
@@ -37,8 +46,26 @@ def discover_doc_paths(
         skipped with a warning rather than read, so a silently missing doc does not
         masquerade as a broken ref later.
     """
-    found: set[Path] = set()
-    resolved_targets: set[Path] = set()
+    found: dict[Path, Path] = {}
+    for candidate in discover_doc_candidates(roots, ignore_globs, project_root):
+        found.setdefault(candidate.target, candidate.path)
+    return sorted(found.values())
+
+
+def discover_doc_candidates(
+    roots: Sequence[Path], ignore_globs: Sequence[str], project_root: Path
+) -> list[DocCandidate]:
+    """Return every contained discovery spelling in configured-root order before deduplication.
+
+    Args:
+        roots: Configured contained roots, in identity preference order.
+        ignore_globs: Patterns excluding walked candidates, as for ``discover_doc_paths``.
+        project_root: Boundary within which every target must remain.
+
+    Returns:
+        Raw candidates retaining aliases for orchestration ownership checks.
+    """
+    found: list[DocCandidate] = []
     for root in roots:
         if root.is_dir():
             candidates = sorted(root.rglob("*.md"))
@@ -62,11 +89,8 @@ def discover_doc_paths(
                     stacklevel=2,
                 )
                 continue
-            if resolved in resolved_targets:
-                continue
-            resolved_targets.add(resolved)
-            found.add(path)
-    return sorted(found)
+            found.append(DocCandidate(path=path, target=resolved))
+    return found
 
 
 def _ignored(path: Path, root: Path, ignore_globs: Sequence[str]) -> bool:

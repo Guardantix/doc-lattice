@@ -2,20 +2,23 @@
 
 import os
 import warnings
+from collections.abc import Callable
 from pathlib import Path
 
 from .cache import CacheHit, LookupPolicy, RunState, cache_path, lookup, make_entry, store
-from .config import ProjectConfig
+from .config import ProjectConfig, SidecarProjectConfig
 from .constants import COMMENT_ENVELOPE_OPEN, FrontmatterDisposition
-from .discovery import decode_doc, discover_doc_paths, read_doc
+from .discovery import decode_doc, discover_doc_candidates, read_doc
+from .error_types import DocumentError, RegistrationConflictError
 from .frontmatter_parser import parse_document
 from .loader import build_lattice, derive_file_sections
-from .model import FileFacts, Lattice, ParsedDoc, ParsedMeta
+from .model import DocumentOrigin, ExternalDeclaration, FileFacts, Lattice, ParsedDoc, ParsedMeta
 from .path_utils import format_path_for_display
+from .sidecar_manifest import RegistrationIndex, build_registration_index
 
 
 def load_lattice(
-    project: ProjectConfig,
+    project: ProjectConfig | SidecarProjectConfig,
     *,
     require_verified: bool = False,
     persist_cache: bool = True,
@@ -27,7 +30,7 @@ def load_lattice(
     rewritten after a successful build.
 
     Args:
-        project: The loaded project config with contained docs roots.
+        project: Loaded ordinary or sidecar-aware config with contained docs roots.
         require_verified: Force the verify tier for every file, disabling the stat fast tier.
             Set only by the reconcile CLI path, whose writes must never derive from stale
             content.
@@ -35,8 +38,8 @@ def load_lattice(
             commands pass False while retaining verified cache reads.
 
     Returns:
-        The built Lattice. A file whose frontmatter declares no ``id`` is left out of it; an
-        id-less fenced block additionally emits a warning naming the file on the way past.
+        The built Lattice. Registrations enroll files whose inline classifier declines ownership.
+        Other id-less files are omitted, with a warning for an id-less fenced mapping.
 
     Raises:
         FrontmatterError: If a discovered file's frontmatter has an unknown or malformed key,
@@ -45,13 +48,20 @@ def load_lattice(
             envelope, or is a comment envelope whose body is not a mapping carrying ``id``.
         UnreadableDocError: If a discovered file cannot be read or decoded, or its frontmatter
             opens a fence or a comment envelope it never closes, or cannot be parsed as YAML.
-        DuplicateIdError: If two discovered files, or two headings in one file, register the
-            same id.
+        DuplicateIdError: If two loaded files, or two headings in one file, register the same id.
+        ManifestError: If a fresh manifest or its declared target fails validation.
+        RegistrationConflictError: If metadata owners collide or a manifest is also a node.
     """
+    declarations = project.sidecar_manifests if isinstance(project, SidecarProjectConfig) else ()
+    project = project.project if isinstance(project, SidecarProjectConfig) else project
+    registrations = build_registration_index(declarations, project.project_root)
     if project.config.cache_key is None:
-        return _load_uncached(project)
+        return _assemble(
+            project, registrations, lambda path: _parse_file_facts(read_doc(path), path)
+        )
     return _load_cached(
         project,
+        registrations,
         require_verified=require_verified,
         persist_cache=persist_cache,
     )
@@ -110,6 +120,16 @@ def _report_reused_anchors(reused: bool, path: Path) -> None:
     )
 
 
+def _misplaced_envelope_message(path: Path) -> str:
+    """Build the shared inline warning and external refusal explanation."""
+    return (
+        f"misplaced doc-lattice envelope in {format_path_for_display(path)}: the "
+        f"'{COMMENT_ENVELOPE_OPEN}' opener is only read as the file's first line, so this file "
+        "is not a lattice node; move the envelope to the top of the file, removing any '---' "
+        "frontmatter fence it would have to displace"
+    )
+
+
 def _report_misplaced_envelope(disposition: FrontmatterDisposition, path: Path) -> None:
     """Report an untracked file carrying the comment envelope where it will not be read.
 
@@ -130,12 +150,16 @@ def _report_misplaced_envelope(disposition: FrontmatterDisposition, path: Path) 
     """
     if disposition != "misplaced-envelope":
         return
-    warnings.warn(
-        f"misplaced doc-lattice envelope in {format_path_for_display(path)}: the "
-        f"'{COMMENT_ENVELOPE_OPEN}' opener is only read as the file's first line, so this file "
-        "is not a lattice node; move the envelope to the top of the file, removing any '---' "
-        "frontmatter fence it would have to displace",
-        stacklevel=1,
+    warnings.warn(_misplaced_envelope_message(path), stacklevel=1)
+
+
+def _shadowed_envelope_message(path: Path) -> str:
+    """Build the shared inline warning and external refusal explanation."""
+    return (
+        f"shadowed doc-lattice envelope in {format_path_for_display(path)}: this file is tracked "
+        f"under its '---' frontmatter fence, so the '{COMMENT_ENVELOPE_OPEN}' envelope below it "
+        "is read as body text and its metadata is ignored; replace both delimiters of the fence "
+        "in the same edit, or remove the envelope"
     )
 
 
@@ -166,13 +190,7 @@ def _report_shadowed_envelope(shadowed: bool, path: Path) -> None:
     """
     if not shadowed:
         return
-    warnings.warn(
-        f"shadowed doc-lattice envelope in {format_path_for_display(path)}: this file is tracked "
-        f"under its '---' frontmatter fence, so the '{COMMENT_ENVELOPE_OPEN}' envelope below it "
-        "is read as body text and its metadata is ignored; replace both delimiters of the fence "
-        "in the same edit, or remove the envelope",
-        stacklevel=1,
-    )
+    warnings.warn(_shadowed_envelope_message(path), stacklevel=1)
 
 
 def _report_load_diagnostics(outcome: ParsedMeta, path: Path) -> None:
@@ -226,29 +244,80 @@ def _parse_file_facts(text: str, path: Path) -> FileFacts:
     )
 
 
-def _inline_doc(facts: FileFacts, path: Path) -> ParsedDoc | None:
-    """Report one file's diagnostics and assemble it only when it has inline metadata."""
-    _report_load_diagnostics(facts.parsed, path)
-    if facts.parsed.meta is None:
-        return None
-    return ParsedDoc(path=path, meta=facts.parsed.meta, body=facts.body, sections=facts.sections)
+def _ownership_explanation(outcome: ParsedMeta, path: Path) -> str:
+    """Describe the inline classification that refuses external ownership."""
+    if outcome.shadowed_envelope:
+        return _shadowed_envelope_message(path)
+    if outcome.disposition == "misplaced-envelope":
+        return _misplaced_envelope_message(path)
+    return "this file is already tracked by its inline metadata"
 
 
-def _load_uncached(project: ProjectConfig) -> Lattice:
-    """Derive the same complete file facts as a cache miss, then assemble inline nodes."""
-    parsed: list[ParsedDoc] = []
-    for path in discover_doc_paths(
+def _assemble(
+    project: ProjectConfig,
+    registrations: RegistrationIndex,
+    acquire_facts: Callable[[Path], FileFacts],
+) -> Lattice:
+    """Join fresh ownership claims and file-local facts before registering any node ids."""
+    identities = {
+        registration.target: project.project_root / registration.declared_path
+        for registration in registrations.registrations
+    }
+    for candidate in discover_doc_candidates(
         project.resolved_roots, project.config.ignore_globs, project.project_root
     ):
-        facts = _parse_file_facts(read_doc(path), path)
-        doc = _inline_doc(facts, path)
-        if doc is not None:
-            parsed.append(doc)
+        identities.setdefault(candidate.target, candidate.path)
+    manifests = {source.resolved: source for source in registrations.manifests}
+    parsed: list[ParsedDoc] = []
+    for target, path in sorted(identities.items(), key=lambda item: item[1]):
+        registration = registrations.by_target.get(target)
+        manifest = manifests.get(target)
+        if registration is not None and manifest is not None:
+            raise RegistrationConflictError(
+                f"manifest {format_path_for_display(manifest.declared)} is also the Markdown "
+                f"target of {registration.location}; a manifest must never be a node"
+            )
+        try:
+            facts = acquire_facts(path)
+        except DocumentError as exc:
+            if registration is not None:
+                exc.add_note(f"external enrollment declared by {registration.location}")
+            raise
+        outcome = facts.parsed
+        if manifest is not None and outcome.meta is not None:
+            raise RegistrationConflictError(
+                f"manifest {format_path_for_display(manifest.declared)} is also inline node "
+                f"{outcome.meta.id!r} at {format_path_for_display(path)}; "
+                "a manifest must never be a node"
+            )
+        origin = DocumentOrigin(path)
+        if registration is not None:
+            if outcome.disposition not in {"untracked", "id-less"} or outcome.shadowed_envelope:
+                explanation = _ownership_explanation(outcome, path)
+                raise RegistrationConflictError(
+                    f"Markdown {format_path_for_display(path)} claimed by {registration.location}: "
+                    f"{explanation}; remove the inline declaration or the manifest record"
+                )
+            meta = registration.meta
+            origin = DocumentOrigin(
+                path,
+                ExternalDeclaration(
+                    registration.manifest.declared,
+                    registration.position,
+                    registration.declared_path,
+                ),
+            )
+        else:
+            _report_load_diagnostics(outcome, path)
+            meta = outcome.meta
+        if meta is not None:
+            parsed.append(ParsedDoc(path, meta, facts.body, facts.sections, origin))
     return build_lattice(parsed)
 
 
 def _load_cached(
     project: ProjectConfig,
+    registrations: RegistrationIndex,
     *,
     require_verified: bool,
     persist_cache: bool,
@@ -265,22 +334,18 @@ def _load_cached(
     state = RunState.begin(snapshot.cache, current_root)
     effective_trust = config.cache_trust_stat and not require_verified
     policy = LookupPolicy(current_root=current_root, trust_stat=effective_trust)
-    parsed: list[ParsedDoc] = []
-    for doc_path in discover_doc_paths(
-        project.resolved_roots, config.ignore_globs, project.project_root
-    ):
+
+    def acquire_facts(doc_path: Path) -> FileFacts:
         rel_key = doc_path.relative_to(resolved_root).as_posix()
         result = lookup.resolve(state.entry(rel_key), doc_path, policy)
         if isinstance(result, CacheHit):
             state.claim(rel_key, result.refreshed_stat)
-            facts = result.facts
-        else:
-            facts = _parse_file_facts(decode_doc(doc_path, result.data), doc_path)
-            state.replace(rel_key, make_entry(result.data, facts, result.stat, current_root))
-        doc = _inline_doc(facts, doc_path)
-        if doc is not None:
-            parsed.append(doc)
-    lattice = build_lattice(parsed)
+            return result.facts
+        facts = _parse_file_facts(decode_doc(doc_path, result.data), doc_path)
+        state.replace(rel_key, make_entry(result.data, facts, result.stat, current_root))
+        return facts
+
+    lattice = _assemble(project, registrations, acquire_facts)
     if persist_cache:
         store.save_if_changed(path, state.complete(), snapshot.baseline)
     return lattice
