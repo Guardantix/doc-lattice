@@ -2324,9 +2324,8 @@ def test_inline_only_commands_are_identical_across_cache_policies(
             f"cache_trust_stat: {str(cache_policy).lower()}\n",
             encoding="utf-8",
         )
-    application = app
     for _ in range(2):
-        actual = runner.invoke(application, command)
+        actual = runner.invoke(app, command)
         assert (actual.exit_code, actual.stdout, actual.stderr) == (
             expected.exit_code,
             expected.stdout,

@@ -524,11 +524,9 @@ conflict, and rolls the batch back if anything fails before the commit. Its temp
 a project-root journal plus staged before and after images, covered by the `.gitignore` block that
 `doc-lattice init` prints.
 
-An enrolled external downstream is deliberately not rewritten: if a selected external downstream
-has an edge that needs a new `seen`, reconcile refuses the whole batch with `VALIDATION_ERROR`,
-under `--dry-run` too, while an external upstream reconciles normally. See
-[RECONCILE.md](https://github.com/Guardantix/doc-lattice/blob/main/RECONCILE.md#selectors) for
-the exact refusal contract, and use the
+Reconcile never rewrites an enrolled external downstream.
+[RECONCILE.md](https://github.com/Guardantix/doc-lattice/blob/main/RECONCILE.md#selectors) owns
+when a selection that reaches one is refused instead; acknowledge that drift with the
 [manual external acknowledgement workflow](#manual-external-acknowledgement) after reviewing the
 upstream change.
 
@@ -700,8 +698,10 @@ key and the code point for the first document it finds, one run at a time.
 
 ### Files with no `id`
 
-Only a file declaring an `id` joins the lattice. How the rest are treated depends on what they
-wrote, because silently dropping a file also silently drops every edge it declares:
+Only a file declaring an `id`, or one a [sidecar manifest](#sidecar-manifests) registers, joins
+the lattice; that section owns how a registered file's own frontmatter is treated. How the rest
+are treated depends on what they wrote, because silently dropping a file also silently drops
+every edge it declares:
 
 | The file | Treatment |
 |----------|-----------|
@@ -1303,7 +1303,7 @@ documented migration surface.
 
 | Code | Raised when |
 |------|-------------|
-| `CONFIG_ERROR` | An explicit `--config PATH` names a file that does not exist, or the selected `.doc-lattice.yml` is unreadable, fails to parse as YAML, fails its schema, or names a `docs_roots` entry that escapes the project root or exists as something other than a directory or a regular `.md` file. A `linear_team` *in that file* that is not a valid team key lands here too; the same value passed to `init --linear-team` does not, because `init` writes a config and never reads one. `links` adds its own selection-time causes: a `link_sources` list that is omitted or empty, an entry the selector grammar cannot read, an entry that matches no file, and a directory the selection walk cannot scan or an entry it cannot inspect. A `legacy_marker_sources` declaration adds three more, all refused before any document is parsed: the key written as null or as an empty list, an entry the grammar cannot read, and an entry that matches no selected source. An absent default config is not an error; it is zero-config mode, except under `links`, which has no zero-config mode to fall back to. |
+| `CONFIG_ERROR` | An explicit `--config PATH` names a file that does not exist, or the selected `.doc-lattice.yml` is unreadable, fails to parse as YAML, fails its schema, or names a `docs_roots` entry that escapes the project root or exists as something other than a directory or a regular `.md` file. A `linear_team` *in that file* that is not a valid team key lands here too; the same value passed to `init --linear-team` does not, because `init` writes a config and never reads one. `links` adds its own selection-time causes: a `link_sources` list that is omitted or empty, an entry the selector grammar cannot read, an entry that matches no file, and a directory the selection walk cannot scan or an entry it cannot inspect. A `legacy_marker_sources` declaration adds three more, all refused before any document is parsed: the key written as null or as an empty list, an entry the grammar cannot read, and an entry that matches no selected source. A `sidecar_manifests` declaration is refused the same way, before any manifest is read, when it is written as null, declared as an empty list, or holds an entry that is empty, not a string, or carries a control character; a manifest that cannot be used once the lattice loads is `MANIFEST_ERROR` instead. An absent default config is not an error; it is zero-config mode, except under `links`, which has no zero-config mode to fall back to. |
 | `VALIDATION_ERROR` | A value parsed cleanly but failed domain validation: an impact token that resolves to no id (from `impact` or from `linear`), a `reconcile` node id that names no node, a `reconcile --ref` matching no edge on the node it named, or any input `init` checks before it writes anything (enumerated below). It also refuses an otherwise selected STALE or UNRECONCILED edge whose downstream node is externally declared, before any rewrite plan or staging begins. Command-shape and parser usage failures are *not* this; they stay uncoded. |
 | `DUPLICATE_ID` | Two files claim the same `id`, or two headings within one file resolve to the same anchor id. The error names both registration sites. |
 | `BROKEN_REF` | An operation that requires a resolved edge was aimed at one that does not resolve, in practice a single-node `reconcile` whose `--ref` names the broken edge. This is *not* the ordinary unresolved ref: that is the coherent `BROKEN` finding `check` reports with exit 1, and a broad `reconcile` skips it rather than failing. |

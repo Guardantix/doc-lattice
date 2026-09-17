@@ -84,7 +84,7 @@ def test_record_paths_resolve_against_the_project_root_not_the_manifest(tmp_path
     assert index.registrations[0].target == (root / "skills/a.md").resolve()
 
 
-def test_the_private_seam_resolves_from_the_config_parent_whatever_the_cwd(
+def test_declared_manifests_resolve_from_the_config_parent_whatever_the_cwd(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ):
     # Config parent, working directory, and manifest directory all differ.

@@ -270,7 +270,7 @@ def load_config(config_path: Path | None, cwd: Path) -> ProjectConfig:
     try:
         config = Config.model_validate(raw)
     except ValidationError as exc:
-        raise ConfigError(_format_validation_error(exc, source, Config)) from exc
+        raise ConfigError(_format_validation_error(exc, source)) from exc
 
     # Required only when a config file was actually read: a zero-config run has no file to
     # carry the key, not no skew to catch. Skew lives in each section's `seen` hash, so a
@@ -327,15 +327,15 @@ def declares_lattice_format(path: Path) -> bool | None:
     return "lattice_format" in data
 
 
-def _format_validation_error(exc: ValidationError, source: Path | None, model: type[Config]) -> str:
+def _format_validation_error(exc: ValidationError, source: Path | None) -> str:
     """Render a config validation failure as the diagnostic this project owns.
 
     Args:
-        exc: The validation error raised by ``model.model_validate``.
+        exc: The validation error raised by ``Config.model_validate``, whose fields answer an
+            unknown-key error.
         source: The config file the raw mapping was read from. None is defensive only:
             zero-config validates ``{}``, and every ``Config`` field has a default, so
             ``model_validate`` cannot fail on that path.
-        model: The schema that raised, whose fields answer an unknown-key error.
 
     Returns:
         A multi-line message: a header naming the config file, then one line per error.
@@ -352,7 +352,7 @@ def _format_validation_error(exc: ValidationError, source: Path | None, model: t
     return format_validation_error(
         exc,
         header=header,
-        model=model,
+        model=Config,
         root_label=_ROOT_LOCATION,
         extra_note=_binding_layers_note,
     )

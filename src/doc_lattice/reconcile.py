@@ -42,6 +42,7 @@ from .model import (
     TargetId,
     format_collision,
     format_document_origin,
+    format_origins,
     node_origins,
     parse_ref,
 )
@@ -1561,9 +1562,11 @@ def reconcile(
             ref_matched = True
             if edge.target_id is None:
                 if targeting_specific_ref:
+                    # An external node's ref lives in its manifest record, not in the Markdown
+                    # file, so the refusal has to say where to fix it.
                     raise BrokenRefError(
                         f"cannot reconcile broken ref {edge.target_ref!r} on {node_id};"
-                        " fix the ref first"
+                        " fix the ref first" + format_origins(node_origins(node))
                     )
                 continue
             collision = lattice.collisions.get(edge.target_id)
@@ -1585,9 +1588,10 @@ def reconcile(
                 raise ValidationError(
                     f"cannot reconcile {node_id!r} -> {edge.target_ref!r} at "
                     f"{format_document_origin(external[node.id])}: updating an external node's "
-                    "seen is not supported in this release; review the upstream, then update this "
-                    "manifest record's seen by hand using the matching edge's actual value "
-                    "from 'doc-lattice check --format json' with cache_trust_stat disabled"
+                    "seen is not supported in this release, and this refusal names one edge at a "
+                    "time; review the upstream, then update each drifting edge's seen in its "
+                    "manifest record by hand using that edge's actual value from "
+                    "'doc-lattice check --format json' with cache_trust_stat disabled"
                 )
             plan[node.path][edge.target_ref] = new_seen
     if targeting_specific_ref and not ref_matched:

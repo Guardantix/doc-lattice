@@ -205,6 +205,8 @@ def test_sidecar_manifest_error_does_not_block_recovery(
     tmp_path, monkeypatch, recover_only, manifest_error
 ):
     _sidecar_reconcile_project(tmp_path)
+    # The project declares a cache_key, so keep any cache write out of the real cache home.
+    monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path / "cache"))
     manifest = tmp_path / "nodes.yml"
     if manifest_error == "missing":
         manifest.unlink()

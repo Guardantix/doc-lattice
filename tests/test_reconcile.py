@@ -2733,5 +2733,8 @@ def test_planner_preserves_broken_external_edge_handling(reconcile_all):
     if reconcile_all:
         assert reconcile(lattice, "external", ref="missing", reconcile_all=True) == {}
     else:
-        with pytest.raises(BrokenRefError):
+        with pytest.raises(BrokenRefError) as excinfo:
             reconcile(lattice, "external", ref="missing", reconcile_all=False)
+        # The broken ref lives in the manifest record, so the refusal names it.
+        assert "record nodes[2]" in str(excinfo.value)
+        assert "meta/nodes.yml" in str(excinfo.value)

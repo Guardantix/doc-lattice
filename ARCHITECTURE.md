@@ -2922,8 +2922,8 @@ moves and the decision the skill derives from does not, nothing goes STALE. Inli
 the same limit, and a sidecar neither widens nor narrows it.
 
 **An additive key, refused by every engine that predates it.** Enrollment is a new top-level
-`sidecar_manifests` key listing manifest paths exactly, with no globs, so a deleted manifest is a
-configuration error rather than a quietly smaller registration set. Null and an empty list are
+`sidecar_manifests` key listing manifest paths exactly, with no globs, so a deleted manifest is an
+exit-2 error rather than a quietly smaller registration set. Null and an empty list are
 refused at config load, the AD-49 rule for a policy that names nothing. The version-skew guard
 is AD-44's: an older engine rejects the unknown key before loading, so it cannot report a green
 graph with the external nodes missing. `lattice_format` does not bump. An inline-only project's
@@ -2977,8 +2977,9 @@ found, with its own identity and escape rules.
   spelling as document identity, unlike AD-8's single-file `docs_roots` entry, which stores the
   resolved path, while ownership compares resolved targets.
 - A manifest's resolved target must exist and be a regular file, checked before it is opened, the
-  same requirement a registered Markdown target carries. A missing manifest is a configuration
-  error, and a FIFO or other special file is refused rather than read, since opening one can
+  same requirement a registered Markdown target carries. A missing manifest is a
+  `MANIFEST_ERROR` when the lattice loads, not a config-load error, so it cannot block journal
+  recovery, and a FIFO or other special file is refused rather than read, since opening one can
   block every lattice-loading command.
 - A manifest is never a document. A manifest whose resolved target is also the resolved target of
   any loaded node, registered or discovered, is an error naming both. Otherwise a record, or a
@@ -3073,7 +3074,7 @@ path for the Markdown path would merge two nodes that share a manifest and an up
   containment checks, before the fresh read and at the transaction boundary.
 - Human and JSON reporting stay per node and name both locations. The output shape belongs to
   RECONCILE.md and GTX-757. Until GTX-757 ships, a reconcile selection that would update an
-  external node refuses with an actionable message (GTX-755).
+  external node refuses with an actionable message (GTX-766).
 
 **The advisory review's four contracts.** GTX-752's advisory review proposed four: node identity
 separate from the rewritten file, coverage independent of discovery, foreign envelope ownership
