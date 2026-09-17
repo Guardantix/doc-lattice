@@ -14,6 +14,7 @@ from doc_lattice.cache.schema import Entry, reconstruct_facts
 from doc_lattice.check import check_lattice, statuses_json, summarize_statuses
 from doc_lattice.config import load_config
 from doc_lattice.error_types import (
+    CoverageError,
     DuplicateIdError,
     FrontmatterError,
     ManifestError,
@@ -1289,3 +1290,205 @@ def test_external_ownership_refusal_explains_inline_classification(tmp_path, tex
     assert explanation in str(caught.value)
     assert "external.md" in str(caught.value)
     assert "nodes[0]" in str(caught.value)
+
+
+def _coverage_project(root, *, exempt=(), cache_policy=None, manifests=(), **options):
+    config = {
+        "lattice_format": 2,
+        "docs_roots": options.get("docs_roots", ["docs"]),
+        "ignore_globs": options.get("ignore", []),
+        "sidecar_coverage": {"select": options.get("select", ["skills/*.md"])},
+    }
+    if options.get("exclude"):
+        config["sidecar_coverage"]["exclude"] = [
+            {"select": selector, "reason": "outside the covered corpus"}
+            for selector in options["exclude"]
+        ]
+    if exempt:
+        config["sidecar_coverage"]["exempt"] = [
+            {"path": path, "reason": "fixture owned elsewhere"} for path in exempt
+        ]
+    if manifests:
+        config["sidecar_manifests"] = list(manifests)
+    if cache_policy is not None:
+        config.update(cache_key="coverage", cache_trust_stat=cache_policy)
+    (root / ".doc-lattice.yml").write_text(json.dumps(config))
+    return load_config(None, root)
+
+
+@pytest.mark.parametrize("enrollment", ["inline", "external", "outside", "ignored", "none"])
+def test_coverage_uses_only_nodes_actually_enrolled(tmp_path, enrollment):
+    skills = tmp_path / "skills"
+    skills.mkdir()
+    target = skills / "one.md"
+    target.write_text(
+        "# Body\n" if enrollment in {"external", "none"} else "---\nid: one\n---\n# Body\n"
+    )
+    manifests = ()
+    if enrollment == "external":
+        _manifest(tmp_path, [{"path": "skills/one.md", "meta": {"id": "one"}}])
+        manifests = ("nodes.yml",)
+    roots = ("skills",) if enrollment in {"inline", "ignored"} else ("docs",)
+    ignore = ("*.md",) if enrollment == "ignored" else ()
+    project = _coverage_project(
+        tmp_path, manifests=manifests, docs_roots=list(roots), ignore=list(ignore)
+    )
+
+    if enrollment in {"inline", "external"}:
+        assert set(load_lattice(project).nodes_by_id) == {"one"}
+    else:
+        with pytest.raises(CoverageError, match=r"'skills/one\.md'.*not enrolled"):
+            load_lattice(project)
+
+
+@pytest.mark.parametrize("cache_policy", [None, False])
+def test_an_exclusion_lets_a_load_a_symlinked_directory_refused_succeed(tmp_path, cache_policy):
+    (tmp_path / "docs").mkdir()
+    skills = tmp_path / "skills"
+    skills.mkdir()
+    (skills / "one.md").write_text("---\nid: one\n---\n# Body\n")
+    modules = skills / "node_modules"
+    modules.mkdir()
+    (modules / "lib").symlink_to(skills, target_is_directory=True)
+    selectors = ["skills/**/*.md"]
+
+    refusing = _coverage_project(
+        tmp_path, select=selectors, cache_policy=cache_policy, docs_roots=["skills"]
+    )
+    with pytest.raises(CoverageError, match="refuses to traverse symlinked directory"):
+        load_lattice(refusing)
+
+    project = _coverage_project(
+        tmp_path,
+        select=selectors,
+        exclude=["skills/node_modules"],
+        cache_policy=cache_policy,
+        docs_roots=["skills"],
+    )
+    cold = load_lattice(project)
+    warm = load_lattice(project)
+
+    assert set(cold.nodes_by_id) == {"one"}
+    assert set(warm.nodes_by_id) == {"one"}
+
+
+def test_coverage_accepts_alias_of_an_inline_node_outside_selection(tmp_path):
+    (tmp_path / "docs").mkdir()
+    target = tmp_path / "docs/one.md"
+    target.write_text("---\nid: one\n---\n# Body\n")
+    (tmp_path / "skills").mkdir()
+    (tmp_path / "skills/alias.md").symlink_to(target)
+    assert set(load_lattice(_coverage_project(tmp_path)).nodes_by_id) == {"one"}
+
+
+@pytest.mark.parametrize("invalid", ["ownership", "duplicate", "missing", "escape"])
+def test_exemptions_cannot_waive_invalid_registration_or_assembly(tmp_path, invalid):
+    (tmp_path / "skills").mkdir()
+    target = tmp_path / "skills/one.md"
+    target.write_text("# Body\n")
+    records = [{"path": "skills/one.md", "meta": {"id": "one"}}]
+    expected = ManifestError
+    if invalid == "ownership":
+        target.write_text("---\nid: one\n---\n# Body\n")
+        expected = RegistrationConflictError
+    elif invalid == "duplicate":
+        (tmp_path / "docs").mkdir()
+        (tmp_path / "docs/other.md").write_text("---\nid: one\n---\n# Body\n")
+        expected = DuplicateIdError
+    elif invalid == "missing":
+        target.unlink()
+    else:
+        target.unlink()
+        target.symlink_to(tmp_path.parent / "outside.md")
+    _manifest(tmp_path, records)
+    project = _coverage_project(tmp_path, manifests=("nodes.yml",), exempt=("skills/one.md",))
+
+    with pytest.raises(expected):
+        load_lattice(project)
+
+
+@pytest.mark.parametrize("trust_stat", [False, True])
+@pytest.mark.parametrize("change", ["registration", "exemption", "new-file", "symlink", "stale"])
+def test_coverage_failure_is_identical_across_cache_tiers_and_preserves_cache(
+    tmp_path, monkeypatch, trust_stat, change
+):
+    monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path / "cache"))
+    (tmp_path / "skills").mkdir()
+    target = tmp_path / "skills/one.md"
+    target.write_text("# Body\n")
+    (tmp_path / "docs").mkdir()
+    (tmp_path / "docs/loaded.md").write_text("---\nid: loaded\n---\n# Loaded\n")
+    exempt = ("skills/one.md",)
+    manifests = ()
+    if change == "registration":
+        exempt = ()
+        manifests = ("nodes.yml",)
+        _manifest(tmp_path, [{"path": "skills/one.md", "meta": {"id": "one"}}])
+    project = _coverage_project(
+        tmp_path, exempt=exempt, manifests=manifests, cache_policy=trust_stat
+    )
+    first = load_lattice(project)
+    assert "loaded" in first.nodes_by_id
+    path = cache_path("coverage", os.environ)
+    before = path.read_bytes()
+    before_stat = path.stat()
+    if change == "registration":
+        # The manifest remains valid but no longer registers the selected target.
+        (tmp_path / "other.md").write_text("# Other\n")
+        _manifest(tmp_path, [{"path": "other.md", "meta": {"id": "other"}}])
+    elif change == "exemption":
+        exempt = ()
+    elif change == "new-file":
+        (tmp_path / "skills/new.md").write_text("# New\n")
+    elif change == "symlink":
+        outside = tmp_path.parent / f"{tmp_path.name}-outside.md"
+        outside.write_text("# Outside\n")
+        target.unlink()
+        target.symlink_to(outside)
+    else:
+        exempt = ("skills/one.md", "skills/stale.md")
+    project = _coverage_project(
+        tmp_path, exempt=exempt, manifests=manifests, cache_policy=trust_stat
+    )
+    with pytest.raises(CoverageError) as warm:
+        load_lattice(project)
+    assert path.read_bytes() == before
+    assert path.stat().st_mtime_ns == before_stat.st_mtime_ns
+    assert path.stat().st_ino == before_stat.st_ino
+
+    uncached = _coverage_project(tmp_path, exempt=exempt, manifests=manifests)
+    with pytest.raises(CoverageError) as no_cache:
+        load_lattice(uncached)
+    path.unlink()
+    with pytest.raises(CoverageError) as cold:
+        load_lattice(project)
+    assert not path.exists()
+    assert str(warm.value) == str(no_cache.value) == str(cold.value)
+
+
+@pytest.mark.parametrize("trust_stat", [False, True])
+def test_covered_alias_replaced_by_escape_fails_every_cache_tier(tmp_path, monkeypatch, trust_stat):
+    monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path / "cache"))
+    (tmp_path / "docs").mkdir()
+    target = tmp_path / "docs/one.md"
+    target.write_text("---\nid: one\n---\n# Body\n")
+    (tmp_path / "skills").mkdir()
+    alias = tmp_path / "skills/alias.md"
+    alias.symlink_to(target)
+    project = _coverage_project(tmp_path, cache_policy=trust_stat)
+    assert set(load_lattice(project).nodes_by_id) == {"one"}
+    path = cache_path("coverage", os.environ)
+    before = path.read_bytes()
+    alias.unlink()
+    alias.symlink_to(tmp_path.parent / "outside.md")
+
+    with pytest.raises(CoverageError, match="outside") as warm:
+        load_lattice(project)
+    assert path.read_bytes() == before
+    with pytest.raises(CoverageError) as uncached:
+        load_lattice(_coverage_project(tmp_path))
+    path.unlink()
+    with pytest.raises(CoverageError) as cold:
+        load_lattice(project)
+    assert not path.exists()
+    assert str(warm.value) == str(uncached.value) == str(cold.value)

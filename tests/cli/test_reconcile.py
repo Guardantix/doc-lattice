@@ -260,6 +260,65 @@ def test_recovery_precedes_external_update_refusal(tmp_path, monkeypatch):
     assert (tmp_path / "nodes.yml").read_bytes() == manifest_before
 
 
+@pytest.mark.parametrize(
+    ("coverage", "detail"),
+    [
+        (
+            "sidecar_coverage: {select: [uncovered.md]}\n",
+            "'uncovered.md': selected by 'uncovered.md'; not enrolled in the loaded lattice",
+        ),
+        (
+            "sidecar_coverage:\n"
+            "  select: [docs/up.md]\n"
+            "  exempt: [{path: gone.md, reason: removed}]\n",
+            "sidecar_coverage.exempt path 'gone.md' matches no selected path",
+        ),
+    ],
+    ids=["uncovered", "stale-exemption"],
+)
+def test_coverage_refusal_runs_after_automatic_recovery_and_not_explicit_recovery(
+    tmp_path: Path, monkeypatch, coverage: str, detail: str
+):
+    explicit_root = tmp_path / "explicit"
+    automatic_root = tmp_path / "automatic"
+    explicit_root.mkdir()
+    automatic_root.mkdir()
+
+    journal, destination = _prepared_project(explicit_root)
+    (explicit_root / "uncovered.md").write_text("# Uncovered\n", encoding="utf-8")
+    (explicit_root / "docs/up.md").write_text("---\nid: up\n---\n# Up\n", encoding="utf-8")
+    (explicit_root / ".doc-lattice.yml").write_text(
+        "lattice_format: 2\n" + coverage, encoding="utf-8"
+    )
+    monkeypatch.chdir(explicit_root)
+
+    explicit = runner.invoke(app, ["reconcile", "--recover"])
+
+    assert explicit.exit_code == 0, (explicit.stdout, explicit.stderr, explicit.exception)
+    assert explicit.stderr == ""
+    assert "rolled back reconcile transaction" in explicit.stdout
+    assert not journal.exists()
+    assert destination.read_bytes() == b"original document\n"
+
+    journal, destination = _prepared_project(automatic_root)
+    (automatic_root / "uncovered.md").write_text("# Uncovered\n", encoding="utf-8")
+    (automatic_root / "docs/up.md").write_text("---\nid: up\n---\n# Up\n", encoding="utf-8")
+    (automatic_root / ".doc-lattice.yml").write_text(
+        "lattice_format: 2\n" + coverage, encoding="utf-8"
+    )
+    monkeypatch.chdir(automatic_root)
+    automatic = runner.invoke(app, ["reconcile", "--all"])
+
+    assert automatic.exit_code == 2, (automatic.stdout, automatic.stderr, automatic.exception)
+    assert automatic.stdout == ""
+    assert "recovered reconcile transaction: rolled_back" in automatic.stderr
+    assert "COVERAGE_ERROR" in automatic.stderr
+    assert detail in automatic.stderr
+    assert automatic.stderr.index("rolled_back") < automatic.stderr.index("COVERAGE_ERROR")
+    assert not journal.exists()
+    assert destination.read_bytes() == b"original document\n"
+
+
 def test_check_actual_allows_manual_acknowledgement_of_external_section(tmp_path, monkeypatch):
     _sidecar_reconcile_project(tmp_path)
     monkeypatch.chdir(tmp_path)

@@ -2006,6 +2006,11 @@ _MODULE_PATH_BEARING_NAMES: dict[str, frozenset[str]] = {
     "sidecar_manifest.py": frozenset(
         {"declared", "declared_path", "manifest", "resolved", "target"}
     ),
+    # GTX-756: the selection sink. `spelling` is the project-relative spelling an entry was
+    # reached by, which is what a traversal refusal names, since an author needs the spelling
+    # they can write into a configuration rather than the absolute path the walk holds. Scoped
+    # here because the word names a rendered form elsewhere in this project rather than a path.
+    "path_selection.py": frozenset({"spelling"}),
 }
 
 # Individual expressions inside scanned modules that are not paths despite the name. Every entry

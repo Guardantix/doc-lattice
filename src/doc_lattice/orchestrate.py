@@ -14,6 +14,7 @@ from .frontmatter_parser import parse_document
 from .loader import build_lattice, derive_file_sections
 from .model import DocumentOrigin, ExternalDeclaration, FileFacts, Lattice, ParsedDoc, ParsedMeta
 from .path_utils import format_path_for_display
+from .sidecar_coverage import enforce_coverage
 from .sidecar_manifest import RegistrationIndex, build_registration_index
 
 
@@ -51,6 +52,7 @@ def load_lattice(
         DuplicateIdError: If two loaded files, or two headings in one file, register the same id.
         ManifestError: If a fresh manifest or its declared target fails validation.
         RegistrationConflictError: If metadata owners collide or a manifest is also a node.
+        CoverageError: If selected files are not enrolled or exempt, or coverage cannot be checked.
     """
     declarations = project.config.sidecar_manifests or ()
     registrations = build_registration_index(declarations, project.project_root)
@@ -270,6 +272,7 @@ def _assemble(
         identities.setdefault(candidate.target, candidate.path)
     manifests = {source.resolved: source for source in registrations.manifests}
     parsed: list[ParsedDoc] = []
+    enrolled: set[Path] = set()
     for target, path in sorted(identities.items(), key=lambda item: item[1]):
         registration = registrations.by_target.get(target)
         manifest = manifests.get(target)
@@ -315,7 +318,11 @@ def _assemble(
             meta = outcome.meta
         if meta is not None:
             parsed.append(ParsedDoc(path, meta, facts.body, facts.sections, origin))
-    return build_lattice(parsed)
+            enrolled.add(target)
+    lattice = build_lattice(parsed)
+    if project.config.sidecar_coverage is not None:
+        enforce_coverage(project.project_root, project.config.sidecar_coverage, enrolled)
+    return lattice
 
 
 def _load_cached(

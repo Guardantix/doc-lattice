@@ -1,8 +1,9 @@
 """Load and validate .doc-lattice.yml, with project-root containment of docs_roots and
 lexical validation of the link source keys.
 
-Sidecar manifest declarations are validated lexically here. Manifest I/O and enrollment belong
-to lattice loading, so a missing or invalid manifest cannot prevent journal recovery.
+Sidecar manifest and coverage declarations are validated lexically here. Manifest I/O, coverage
+selection, and enrollment belong to lattice loading, so those filesystem checks cannot prevent
+journal recovery.
 """
 
 import re
@@ -10,7 +11,15 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
 
-from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator, model_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    ValidationError,
+    ValidationInfo,
+    field_validator,
+    model_validator,
+)
 
 from .constants import LATTICE_FORMAT_VERSION
 from .error_types import ConfigError
@@ -18,6 +27,7 @@ from .link_selectors import (
     LEGACY_MARKER_SOURCES_KEY,
     LINK_SOURCES_KEY,
     selector_defect_message,
+    selector_prunes_path,
     validate_link_selector,
 )
 from .path_utils import format_path_for_display, safe_resolve
@@ -48,10 +58,181 @@ _CACHE_KEY_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
 _ROOT_LOCATION = "<config>"
 _BINDING_LAYERS_KEY = "binding_layers"
 SIDECAR_MANIFESTS_KEY = "sidecar_manifests"
+SIDECAR_COVERAGE_KEY = "sidecar_coverage"
+# The nested coverage keys, exported for the same reason the link keys are: the module that
+# enforces the policy names them in its diagnostics, and a key spelled twice can drift into a
+# refusal that sends the reader to a list their configuration does not have.
+SIDECAR_COVERAGE_SELECT_KEY = f"{SIDECAR_COVERAGE_KEY}.select"
+SIDECAR_COVERAGE_EXCLUDE_KEY = f"{SIDECAR_COVERAGE_KEY}.exclude"
+SIDECAR_COVERAGE_EXEMPT_KEY = f"{SIDECAR_COVERAGE_KEY}.exempt"
 _BINDING_LAYERS_MIGRATION = (
     "binding_layers has been unsupported since 2.0; delete it from 1.x configs, there is "
     "no replacement."
 )
+
+
+# What a coverage key written as null tells its author to do instead. A table rather than a
+# message per validator, since the three refusals differ in nothing else.
+_NULL_LIST_REMEDY = {
+    "select": "name the sources to cover",
+    "exclude": "remove the key or name exclusions",
+    "exempt": "remove the key or name exemptions",
+}
+
+
+def _require_nonblank(kind: str, value: str, info: ValidationInfo) -> str:
+    """Refuse a coverage record's field that names nothing.
+
+    Whitespace alone is refused as well as the empty string. A blank reason satisfies
+    "non-empty" while documenting nothing, and a blank path can only ever be refused later as a
+    stale exemption, at a distance from the key that carried it.
+
+    The field is named from ``info`` rather than spelled into a message shared by both fields,
+    so a reader is told which of the two they left empty instead of having to read the location
+    off the validation envelope. One function rather than one per record, so the rule the two
+    keys share has a definition rather than a convention.
+
+    Args:
+        kind: The record the field belongs to, as its message spells it.
+        value: The field's value as written.
+        info: Pydantic's field context, which carries the name the message reports.
+
+    Returns:
+        The value unchanged, when it names something.
+
+    Raises:
+        ValueError: If the value is empty or only whitespace.
+    """
+    if not value.strip():
+        msg = f"sidecar coverage {kind} {info.field_name} must not be empty"
+        raise ValueError(msg)
+    return value
+
+
+class CoverageExemption(BaseModel):
+    """One exact selected path that sidecar coverage may leave uncovered."""
+
+    model_config = ConfigDict(strict=True, extra="forbid")
+
+    path: str
+    reason: str
+
+    @field_validator("path", "reason")
+    @classmethod
+    def _validate_nonempty_text(cls, value: str, info: ValidationInfo) -> str:
+        """Refuse an exemption field that names nothing, naming the field left empty."""
+        return _require_nonblank("exemption", value, info)
+
+
+class CoverageExclusion(BaseModel):
+    """One selector whose matches sidecar coverage does not select, and why."""
+
+    model_config = ConfigDict(strict=True, extra="forbid")
+
+    select: str
+    reason: str
+
+    @field_validator("select", "reason")
+    @classmethod
+    def _validate_nonempty_text(cls, value: str, info: ValidationInfo) -> str:
+        """Refuse an exclusion field that names nothing, naming the field left empty."""
+        return _require_nonblank("exclusion", value, info)
+
+    @field_validator("select")
+    @classmethod
+    def _validate_selector(cls, value: str) -> str:
+        """Refuse a selector the shared grammar cannot read, as the sibling keys do."""
+        _validate_selectors(SIDECAR_COVERAGE_EXCLUDE_KEY, [value])
+        return value
+
+
+class SidecarCoverage(BaseModel):
+    """The selectors, exclusions, and exact exemptions for sidecar coverage."""
+
+    model_config = ConfigDict(strict=True, extra="forbid")
+
+    select: list[str]
+    exclude: list[CoverageExclusion] | None = None
+    exempt: list[CoverageExemption] | None = None
+
+    @field_validator("select", "exclude", "exempt", mode="before")
+    @classmethod
+    def _reject_a_null_list(cls, value: object, info: ValidationInfo) -> object:
+        """Refuse a coverage list a user wrote as null, with that key's own remedy.
+
+        One validator over the three keys rather than one apiece: the rule is identical and
+        only the remedy differs, so the remedies read as a table instead of as three bodies a
+        reader has to diff. A field left out entirely never reaches here, which is what keeps
+        an omitted optional key distinct from one written as null.
+        """
+        if value is None:
+            remedy = _NULL_LIST_REMEDY[str(info.field_name)]
+            msg = f"{SIDECAR_COVERAGE_KEY}.{info.field_name} is written as null; {remedy}"
+            raise ValueError(msg)
+        return value
+
+    @field_validator("select")
+    @classmethod
+    def _validate_select(cls, value: list[str]) -> list[str]:
+        """Require selectors that the shared selector grammar can read."""
+        if not value:
+            msg = f"{SIDECAR_COVERAGE_SELECT_KEY} is declared but names no selector"
+            raise ValueError(msg)
+        _validate_selectors(SIDECAR_COVERAGE_SELECT_KEY, value)
+        return value
+
+    @field_validator("exclude")
+    @classmethod
+    def _validate_exclude(cls, value: list[CoverageExclusion]) -> list[CoverageExclusion]:
+        """Refuse a declared exclusion list that names nothing."""
+        if not value:
+            msg = f"{SIDECAR_COVERAGE_EXCLUDE_KEY} is declared but names no exclusion"
+            raise ValueError(msg)
+        return value
+
+    @field_validator("exempt")
+    @classmethod
+    def _validate_exempt(cls, value: list[CoverageExemption]) -> list[CoverageExemption]:
+        """Refuse a declared exemption list that names nothing."""
+        if not value:
+            msg = f"{SIDECAR_COVERAGE_EXEMPT_KEY} is declared but names no exemption"
+            raise ValueError(msg)
+        return value
+
+    @model_validator(mode="after")
+    def _an_exclusion_cannot_prune_an_exemption(self) -> "SidecarCoverage":
+        """Refuse an exemption for a path an exclusion removes from selection.
+
+        The two keys would otherwise disagree silently until the next load, whose only symptom
+        is the exempt path reported as a stale exemption: a diagnostic that names neither the
+        exclusion that pruned it nor the key that carried it, at a distance from both. Both
+        declarations are lexical, so the contradiction is decidable here, at the keys that
+        disagree, and this stays a syntax-only boundary that touches no filesystem.
+        """
+        if not self.exclude or not self.exempt:
+            return self
+        # Parsed once for the whole check rather than per exemption: the field validator already
+        # put every selector through the grammar, so this is a derived value, not a second gate.
+        pruners = [(entry.select, validate_link_selector(entry.select)) for entry in self.exclude]
+        for exemption in self.exempt:
+            pruning = next(
+                (
+                    selector
+                    for selector, segments in pruners
+                    if selector_prunes_path(segments, exemption.path)
+                ),
+                None,
+            )
+            if pruning is None:
+                continue
+            msg = (
+                f"{SIDECAR_COVERAGE_EXEMPT_KEY} path {format_path_for_display(exemption.path)} "
+                f"is pruned by the {SIDECAR_COVERAGE_EXCLUDE_KEY} selector "
+                f"{format_path_for_display(pruning)}; an excluded path is never selected and so "
+                "can never be exempt; remove one of the two declarations"
+            )
+            raise ValueError(msg)
+        return self
 
 
 class Config(BaseModel):
@@ -71,6 +252,7 @@ class Config(BaseModel):
     # refusal, since the gate has no file set without it.
     legacy_marker_sources: list[str] | None = None
     sidecar_manifests: list[str] | None = None
+    sidecar_coverage: SidecarCoverage | None = None
     linear_team: str | None = None
     cache_key: str | None = None
     cache_trust_stat: bool = False
@@ -207,6 +389,18 @@ class Config(BaseModel):
                 raise ValueError(msg)
         return value
 
+    @field_validator("sidecar_coverage", mode="before")
+    @classmethod
+    def _reject_an_empty_or_null_coverage_declaration(cls, value: object) -> object:
+        """Keep omitted coverage distinct from null or an empty mapping a user wrote."""
+        if value is None:
+            msg = f"{SIDECAR_COVERAGE_KEY} is written as null; remove the key or declare selectors"
+            raise ValueError(msg)
+        if isinstance(value, Mapping) and not value:
+            msg = f"{SIDECAR_COVERAGE_KEY} is declared but names no selector"
+            raise ValueError(msg)
+        return value
+
 
 def _validate_selectors(key: str, entries: list[str]) -> None:
     """Raise ``ValueError`` naming the first entry of ``key`` the selector grammar refuses."""
@@ -246,8 +440,9 @@ def load_config(config_path: Path | None, cwd: Path) -> ProjectConfig:
     Raises:
         ConfigError: If the file is missing, invalid, has unknown keys, names a docs root
             that resolves outside the project root, or names an existing docs root that is
-            neither a directory nor a regular ``.md`` file. Manifest declarations are validated
-            here, but their files and targets are checked only when the lattice loads.
+            neither a directory nor a regular ``.md`` file. Manifest and coverage declarations
+            are validated here, but filesystem selection and targets are checked only when the
+            lattice loads.
     """
     if config_path is not None:
         if not config_path.exists():

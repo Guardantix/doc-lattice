@@ -896,8 +896,8 @@ key when there is no external enrollment. When present, it is a non-empty list o
 paths and accepts no globs; null and an empty list are config errors. Relative paths resolve from
 the project root. Add the key to an existing config by hand. It is intentionally absent from the
 generated configuration block above, because `init` does not create a manifest or know which
-external files you own. `sidecar_coverage` is not available yet and remains an unknown, refused
-configuration key.
+external files you own. Use [sidecar coverage](#sidecar-coverage) to require enrollment for a
+declared set of paths.
 
 ```yaml
 sidecar_manifests:
@@ -938,6 +938,86 @@ including warm-cache loads; cached file facts may be reused, but registration is
 Human diagnostics name both the Markdown file and its manifest record. JSON findings add an
 `origins` entry for every external participant with its Markdown path, manifest path, record
 index, and declared path.
+
+### Sidecar coverage
+
+`sidecar_coverage` optionally requires every selected file to be enrolled in the loaded lattice
+or have an exact exemption. It works with or without `sidecar_manifests`; coverage never enrolls
+files. Add it to an existing configuration after upgrading all tools that load the repository,
+as described in the [Unreleased migration](CHANGELOG.md#unreleased).
+
+```yaml
+sidecar_coverage:
+  select:
+    - skills/**/SKILL.md
+  exclude:
+    - select: skills/**/node_modules
+      reason: Installed dependencies, carrying no lattice documents
+  exempt:
+    - path: skills/example/SKILL.md
+      reason: Test fixture maintained outside the document lattice
+```
+
+The mapping accepts only `select`, `exclude`, and `exempt`. `select` is a required non-empty list
+using the same project-relative POSIX selector grammar as `link_sources`. Omit `exclude` and
+`exempt` when none are needed; when declared, each must be a non-empty list of mappings containing
+exactly `select` and `reason`, or exactly `path` and `reason`, all strings that are neither empty
+nor whitespace alone, since a blank reason documents nothing.
+Nulls, empty declarations, wrong types, malformed selectors, and unknown
+keys, including nested keys, fail config loading with `CONFIG_ERROR`. Configuration loading
+validates syntax only; selection and exemption-existence checks happen when the lattice loads.
+
+`exclude` shapes the covered corpus and `exempt` waives an obligation inside it. An excluded path
+is never selected, so it is never resolved, inspected, or refused, and it can carry no exemption:
+an exemption a declared exclusion prunes is refused at config load, naming both keys, rather than
+surfacing later as a stale exemption. An exclusion that prunes nothing is accepted, because it can
+only fail to prevent a refusal and never conceal one, and because a dependency tree is absent from
+a clean clone and from any CI leg that has not installed one.
+
+An exclusion names the directory itself, and selectors are anchored at the project root as they
+are everywhere in this grammar: a bare `node_modules` prunes only a top-level one, while
+`**/node_modules` prunes it at any depth and nothing beneath a pruned directory is read. A
+contents-shaped selector is the trap, because it matches only what is strictly inside:
+`**/node_modules/**` prunes a symlinked directory nested under a real `node_modules`, but cannot
+prune `node_modules` itself where that directory is the symlink. It therefore passes in one
+layout and refuses in the other while looking correct in both, so name the directory. Matching is
+by code point, again as the grammar is throughout, so `**/Node_Modules` does not prune
+`**/node_modules`. Exclusion is per spelling and not per resolved target, exactly as exemption is:
+excluding `a.md` leaves its alias `b.md` selected and still obligated.
+
+Selection is independent of `docs_roots` and `ignore_globs`. A file is covered when its resolved
+target is actually enrolled by a valid external registration or by inline metadata that discovery
+loaded. Valid inline metadata outside discovery or excluded by an ignore glob is still uncovered.
+Contained file aliases of an enrolled target are covered. Untracked prose and id-less files need
+enrollment or an exemption.
+
+Exemptions match exact project-relative spellings retained by selection. They perform no glob
+expansion, path normalization, or substitution of resolved targets: exempting `a.md` does not
+exempt `b.md`, even if both point at the same unenrolled file. Adding a file or an earlier-sorting
+alias creates a new obligation. An exemption matching no selected spelling is refused as stale.
+
+Every selector must match at least one path that no exclusion pruned. A filesystem inspection
+failure, escaping or dangling symlink, or selected nonregular file fails coverage. Containment and
+regular-file checks happen before any exemption applies. The walk never enters symlinked
+directories and refuses one wherever a coverage selector would otherwise traverse it, even if a
+covered sibling matches; `exclude` is the way out of such a refusal, and the diagnostic names the
+spelling to write. The `links` command keeps its existing symlink-directory behavior and prunes
+nothing.
+
+Coverage runs after validated lattice assembly on every load, including warm-cache loads, and
+before cache persistence. Exemptions cannot waive invalid registrations or ownership conflicts.
+Selection and coverage results are never cached; a coverage failure neither creates a successful
+load cache nor alters an existing one. All uncovered paths appear once in project-relative order,
+with every selecting selector sorted and deduplicated:
+
+```text
+error (COVERAGE_ERROR): sidecar coverage failed:
+  'skills/new/SKILL.md': selected by 'skills/**/SKILL.md'; not enrolled in the loaded lattice; register this file or add an exact sidecar_coverage.exempt entry with a reason
+```
+
+Coverage refusals exit 2 under `check`, `lint`, `impact`, `graph`, `linear`, and normal or dry-run
+`reconcile`. Explicit `reconcile --recover` bypasses lattice loading, so uncovered files and stale
+exemptions cannot block it. Automatic journal recovery completes before the coverage gate runs.
 
 ### Load cache (opt-in)
 
@@ -1303,7 +1383,8 @@ documented migration surface.
 
 | Code | Raised when |
 |------|-------------|
-| `CONFIG_ERROR` | An explicit `--config PATH` names a file that does not exist, or the selected `.doc-lattice.yml` is unreadable, fails to parse as YAML, fails its schema, or names a `docs_roots` entry that escapes the project root or exists as something other than a directory or a regular `.md` file. A `linear_team` *in that file* that is not a valid team key lands here too; the same value passed to `init --linear-team` does not, because `init` writes a config and never reads one. `links` adds its own selection-time causes: a `link_sources` list that is omitted or empty, an entry the selector grammar cannot read, an entry that matches no file, and a directory the selection walk cannot scan or an entry it cannot inspect. A `legacy_marker_sources` declaration adds three more, all refused before any document is parsed: the key written as null or as an empty list, an entry the grammar cannot read, and an entry that matches no selected source. A `sidecar_manifests` declaration is refused the same way, before any manifest is read, when it is written as null, declared as an empty list, or holds an entry that is empty, not a string, or carries a control character; a manifest that cannot be used once the lattice loads is `MANIFEST_ERROR` instead. An absent default config is not an error; it is zero-config mode, except under `links`, which has no zero-config mode to fall back to. |
+| `CONFIG_ERROR` | An explicit `--config PATH` names a file that does not exist, or the selected `.doc-lattice.yml` is unreadable, fails to parse as YAML, fails its schema, or names a `docs_roots` entry that escapes the project root or exists as something other than a directory or a regular `.md` file. A `linear_team` *in that file* that is not a valid team key lands here too; the same value passed to `init --linear-team` does not, because `init` writes a config and never reads one. `links` adds its own selection-time causes: a `link_sources` list that is omitted or empty, an entry the selector grammar cannot read, an entry that matches no file, and a directory the selection walk cannot scan or an entry it cannot inspect. A `legacy_marker_sources` declaration adds three more, all refused before any document is parsed: the key written as null or as an empty list, an entry the grammar cannot read, and an entry that matches no selected source. A `sidecar_manifests` declaration is refused the same way, before any manifest is read, when it is written as null, declared as an empty list, or holds an entry that is empty, not a string, or carries a control character; a manifest that cannot be used once the lattice loads is `MANIFEST_ERROR` instead. Malformed `sidecar_coverage` declarations also fail here; selection and coverage refusals during lattice loading use `COVERAGE_ERROR`. An absent default config is not an error; it is zero-config mode, except under `links`, which has no zero-config mode to fall back to. |
+| `COVERAGE_ERROR` | A `sidecar_coverage.select` or `sidecar_coverage.exclude` selector is one the grammar cannot read when a direct engine caller expands it rather than config load, a `sidecar_coverage` selector matches nothing exclusions left, selection cannot inspect the filesystem, or a selector would traverse a symlinked directory no exclusion pruned; a selected path escapes the project root, is missing or nonregular, or is neither enrolled nor exactly exempt; or an exemption matches no selected spelling. See [Sidecar coverage](#sidecar-coverage) for diagnostics and remedies. |
 | `VALIDATION_ERROR` | A value parsed cleanly but failed domain validation: an impact token that resolves to no id (from `impact` or from `linear`), a `reconcile` node id that names no node, a `reconcile --ref` matching no edge on the node it named, or any input `init` checks before it writes anything (enumerated below). It also refuses an otherwise selected STALE or UNRECONCILED edge whose downstream node is externally declared, before any rewrite plan or staging begins. Command-shape and parser usage failures are *not* this; they stay uncoded. |
 | `DUPLICATE_ID` | Two files claim the same `id`, or two headings within one file resolve to the same anchor id. The error names both registration sites. |
 | `BROKEN_REF` | An operation that requires a resolved edge was aimed at one that does not resolve, in practice a single-node `reconcile` whose `--ref` names the broken edge. This is *not* the ordinary unresolved ref: that is the coherent `BROKEN` finding `check` reports with exit 1, and a broad `reconcile` skips it rather than failing. |
@@ -1416,7 +1497,8 @@ not collide.
 doc-lattice/
 ├── src/doc_lattice/         # the engine: a pure graph/report core, the link gate, behind a thin impure shell
 │   ├── markdown_compat.py      # pinned heading and GitHub-slug compatibility adapter
-│   ├── link_check.py           # the links gate: selector expansion and link resolution (read-only I/O)
+│   ├── path_selection.py       # the shared no-follow selector walk (read-only I/O)
+│   ├── link_check.py           # the links gate: link resolution over selected sources (read-only I/O)
 │   ├── _github_slugger_data.py # generated slug and Unicode compatibility data
 │   ├── persistence.py          # shared durable single-path filesystem primitives
 │   ├── reconcile_transaction.py # reconcile lock, journal, commit, rollback, and recovery
