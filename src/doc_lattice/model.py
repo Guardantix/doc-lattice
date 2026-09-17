@@ -403,11 +403,27 @@ def format_document_origin(origin: DocumentOrigin) -> str:
     declaration = origin.declaration
     if declaration is None:
         return shown
-    return (
-        f"{shown} (record nodes[{declaration.record_index}] "
-        f"(path {format_path_for_display(declaration.declared_path)}) in manifest "
-        f"{format_path_for_display(declaration.manifest_path)})"
+    location = format_record_location(
+        declaration.manifest_path, declaration.record_index, declaration.declared_path
     )
+    return f"{shown} ({location})"
+
+
+def format_record_location(manifest: str, position: int, declared_path: str | None) -> str:
+    """Spell a record's location: its manifest, its position, and its path when it has one.
+
+    Args:
+        manifest: The manifest's declared spelling.
+        position: The record's 0-based index in ``nodes``.
+        declared_path: The record's ``path`` string, or None when it carries no string path.
+
+    Returns:
+        A phrase such as ``record nodes[2] (path 'skills/a.md') in manifest 'sidecars.yml'``.
+    """
+    spelled = f"record nodes[{position}]"
+    if declared_path is not None:
+        spelled = f"{spelled} (path {format_path_for_display(declared_path)})"
+    return f"{spelled} in manifest {format_path_for_display(manifest)}"
 
 
 def origins_json(origins: Mapping[str, DocumentOrigin]) -> dict:
@@ -442,13 +458,44 @@ def external_origins(lattice: Lattice, node_ids: Iterable[str]) -> dict[str, Doc
     Returns:
         Known external participants once each, ordered by id.
     """
-    return {
-        node_id: node.origin
-        for node_id in sorted(set(node_ids))
-        if (node := lattice.nodes_by_id.get(node_id)) is not None
-        and node.origin is not None
-        and node.origin.declaration is not None
-    }
+    origins: dict[str, DocumentOrigin] = {}
+    for node_id in sorted(set(node_ids)):
+        node = lattice.nodes_by_id.get(node_id)
+        if node is not None:
+            origins.update(node_origins(node))
+    return origins
+
+
+def node_origins(node: Node) -> dict[str, DocumentOrigin]:
+    """Select one node's origin when it is external.
+
+    Args:
+        node: The candidate participant.
+
+    Returns:
+        The node id mapped to its origin, or an empty mapping for an inline node.
+    """
+    origin = node.origin
+    if origin is None or origin.declaration is None:
+        return {}
+    return {node.id: origin}
+
+
+def edge_origins(lattice: Lattice, source_id: str, edge: Edge) -> dict[str, DocumentOrigin]:
+    """Select the external origins of an edge's source and target file.
+
+    The target file id comes from the parsed ref, so a broken edge still names a known file
+    whose section is missing.
+
+    Args:
+        lattice: Graph holding the participants.
+        source_id: The id of the node declaring the edge.
+        edge: The declared edge.
+
+    Returns:
+        Known external participants once each, ordered by id.
+    """
+    return external_origins(lattice, (source_id, parse_ref(edge.target_ref).file_id))
 
 
 def format_origins(origins: Mapping[str, DocumentOrigin]) -> str:

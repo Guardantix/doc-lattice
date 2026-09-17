@@ -202,8 +202,10 @@ def build_lattice(docs: list[ParsedDoc]) -> Lattice:
     collisions: dict[TargetId, tuple[CollisionMember, ...]] = {}
     ancestor_context: dict[TargetId, tuple[str, ...]] = {}
 
+    origins: dict[str, DocumentOrigin] = {}
     for doc in docs:
         origin = doc.origin or DocumentOrigin(doc.path)
+        shown = format_document_origin(origin)
         file_id = doc.meta.id
         file_sections = doc.sections if doc.sections is not None else derive_file_sections(doc.body)
         total_lines = file_sections.total_lines
@@ -212,8 +214,9 @@ def build_lattice(docs: list[ParsedDoc]) -> Lattice:
             Location(path=doc.path, kind="file", span=(1, total_lines)),
             index,
             sources,
-            f"file {format_document_origin(origin)}",
+            f"file {shown}",
         )
+        origins[file_id] = origin
         anchored: list[TargetId] = []
         spans: dict[TargetId, tuple[int, int]] = {}
         for record in file_sections.sections:
@@ -230,7 +233,7 @@ def build_lattice(docs: list[ParsedDoc]) -> Lattice:
                 Location(path=doc.path, kind="section", span=span),
                 index,
                 sources,
-                f"anchor {tid.as_ref()!r} in {format_document_origin(origin)}",
+                f"anchor {tid.as_ref()!r} in {shown}",
             )
         _record_ancestors(anchored, spans, ancestors)
 
@@ -250,7 +253,7 @@ def build_lattice(docs: list[ParsedDoc]) -> Lattice:
             body=doc.body,
             derives_from=tuple(edges),
             tickets=tuple(doc.meta.tickets),
-            origin=doc.origin or DocumentOrigin(doc.path),
+            origin=origins[doc.meta.id],
         )
 
     file_id_by_path = {node.path: node_id for node_id, node in nodes.items()}

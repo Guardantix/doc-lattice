@@ -23,7 +23,7 @@ from typing import Any
 from pydantic import ValidationError
 
 from .error_types import ManifestError, RegistrationConflictError
-from .model import NodeMeta
+from .model import NodeMeta, format_record_location
 from .path_utils import format_path_for_display, safe_resolve
 from .text_utils import describe_first_control_char
 from .validation_render import format_validation_error
@@ -79,7 +79,7 @@ class Registration:
     @property
     def location(self) -> str:
         """Name this record for a diagnostic: its manifest, position, and declared path."""
-        return _record_location(self.manifest.declared, self.position, self.declared_path)
+        return format_record_location(self.manifest.declared, self.position, self.declared_path)
 
 
 @dataclass(frozen=True, slots=True)
@@ -217,12 +217,12 @@ def _validate_record(
 ) -> Registration:
     """Validate one record's keys, path spelling, target, and metadata, in that order."""
     if not isinstance(record, dict):
-        where = _record_location(source.declared, position, None)
+        where = format_record_location(source.declared, position, None)
         msg = f"{where} is not a mapping; a record is a mapping of exactly 'path' and 'meta'"
         raise ManifestError(msg)
     raw_path = record.get("path")
     declared_path = raw_path if isinstance(raw_path, str) else None
-    where = _record_location(source.declared, position, declared_path)
+    where = format_record_location(source.declared, position, declared_path)
     keys = set(record)
     if keys != _RECORD_KEYS:
         missing = sorted(repr(key) for key in _RECORD_KEYS - keys)
@@ -324,20 +324,3 @@ def _resolve_regular_file(declared: str, project_root: Path, *, subject: str, re
         )
         raise ManifestError(msg)
     return resolved
-
-
-def _record_location(manifest: str, position: int, declared_path: str | None) -> str:
-    """Spell a record's location: its manifest, its position, and its path when it has one.
-
-    Args:
-        manifest: The manifest's declared spelling.
-        position: The record's 0-based index in ``nodes``.
-        declared_path: The record's ``path`` string, or None when it carries no string path.
-
-    Returns:
-        A phrase such as ``record nodes[2] (path 'skills/a.md') in manifest 'sidecars.yml'``.
-    """
-    spelled = f"record {_NODES_KEY}[{position}]"
-    if declared_path is not None:
-        spelled = f"{spelled} (path {format_path_for_display(declared_path)})"
-    return f"{spelled} in manifest {format_path_for_display(manifest)}"

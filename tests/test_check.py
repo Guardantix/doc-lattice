@@ -5,6 +5,7 @@ from dataclasses import replace
 from pathlib import Path
 
 import pytest
+from external_origin_helpers import _external_lattice
 
 from doc_lattice.check import (
     EdgeStatus,
@@ -460,35 +461,6 @@ def test_the_same_transient_collision_reads_stale_with_atx_parents():
 
     assert lattice.ancestor_context[TargetId("up", "setup")] == ("# Products", "## Product B")
     assert check_lattice(lattice)[0].state == "STALE"
-
-
-def _external_lattice(*, ambiguous=False, authority="binding"):
-
-    return build_lattice(
-        [
-            ParsedDoc(
-                Path("docs/up.md"),
-                NodeMeta(id="up", authority="derived"),
-                "# Notes\n\n# Notes\n" if ambiguous else "# Notes\nbody\n",
-                origin=DocumentOrigin(
-                    Path("docs/up.md"), ExternalDeclaration("meta/up.yml", 4, "./docs/up.md")
-                ),
-            ),
-            ParsedDoc(
-                Path("docs/down.md"),
-                NodeMeta(
-                    id="down",
-                    authority=authority,
-                    tickets=["GTX-770"],
-                    derives_from=[RawEdge(ref="up#notes", seen="old"), RawEdge(ref="missing")],
-                ),
-                "body\n",
-                origin=DocumentOrigin(
-                    Path("docs/down.md"), ExternalDeclaration("meta/down.yml", 1, "docs/down.md")
-                ),
-            ),
-        ]
-    )
 
 
 def test_external_origins_follow_both_endpoints_and_broken_source():

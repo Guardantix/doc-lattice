@@ -8,6 +8,7 @@ from .model import (
     external_origins,
     format_collision_members,
     format_origins,
+    node_origins,
     origins_json,
 )
 
@@ -233,7 +234,7 @@ def to_json(
             "layer": node.layer,
             "authority": node.authority,
             "path": str(node.path),
-            **origins_json(external_origins(lattice, (node_id,))),
+            **origins_json(node_origins(node)),
         }
         for node_id, node in sorted(lattice.nodes_by_id.items())
     ]

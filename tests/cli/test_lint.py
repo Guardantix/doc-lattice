@@ -1,19 +1,13 @@
 """CLI integration tests for the lint command."""
 
 import json
-from dataclasses import replace
 from pathlib import Path
 
 from doc_lattice.cli import app
-from doc_lattice.cli.application import create_app
 from doc_lattice.cli.github import escape_github_property
-from doc_lattice.cli.runtime import default_runtime
-from doc_lattice.config import Config, ProjectConfig
-from doc_lattice.loader import build_lattice
-from doc_lattice.model import DocumentOrigin, ExternalDeclaration, NodeMeta, ParsedDoc, RawEdge
 from doc_lattice.path_utils import format_path_for_display
 
-from .helpers import runner
+from .helpers import _external_reporting_app, runner
 
 
 def _write_lint_docs(root: Path) -> None:
@@ -302,41 +296,6 @@ def test_lint_github_annotates_a_violation_and_an_ambiguity_at_their_own_severit
     assert result.stdout.startswith("::error file=docs/down.md,title=doc-lattice ladder violation")
     assert "\n::warning file=docs/down.md,title=doc-lattice AMBIGUOUS::" in result.stdout
     assert result.exit_code == 1
-
-
-def _external_reporting_app(root, *, authority=None, ambiguous=False):
-
-    project = ProjectConfig(Config(), root, (root,))
-    lattice = build_lattice(
-        [
-            ParsedDoc(
-                root / "up.md",
-                NodeMeta(id="up", authority="derived"),
-                "# Notes\n\n# Notes\n" if ambiguous else "# Notes\nbody\n",
-            ),
-            ParsedDoc(
-                root / "down.md",
-                NodeMeta(
-                    id="down",
-                    authority=authority,
-                    derives_from=[RawEdge(ref="up#notes"), RawEdge(ref="missing")],
-                ),
-                "body\n",
-                origin=DocumentOrigin(
-                    root / "down.md", ExternalDeclaration("meta/[red]index.yml", 6, "./down.md")
-                ),
-            ),
-        ]
-    )
-
-    def factory(*, no_color):
-        return replace(
-            default_runtime(no_color=no_color),
-            load_config=lambda _config, _cwd: project,
-            load_lattice=lambda _project, **_kwargs: lattice,
-        )
-
-    return create_app(runtime_factory=factory)
 
 
 def test_external_unranked_github_annotation_attaches_to_markdown(tmp_path, monkeypatch):

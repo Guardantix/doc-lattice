@@ -120,7 +120,7 @@ def stale_shipped(
         node = lattice.nodes_by_id[node_id]
         participants = [node_id]
         participants.extend(
-            lattice.file_id_by_path[lattice.index[edge.target_id].path]
+            edge.target_id.file_id
             for edge in node.derives_from
             if edge.target_ref in drifted_refs and edge.target_id is not None
         )

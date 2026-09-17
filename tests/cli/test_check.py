@@ -4,7 +4,6 @@ import json
 import os
 import subprocess
 import sys
-from dataclasses import replace
 from pathlib import Path
 from typing import get_args
 
@@ -12,16 +11,11 @@ import pytest
 
 import doc_lattice.config as config_module
 from doc_lattice.cli import app
-from doc_lattice.cli.application import create_app
 from doc_lattice.cli.github import escape_github_property
-from doc_lattice.cli.runtime import default_runtime
-from doc_lattice.config import Config, ProjectConfig
 from doc_lattice.constants import EdgeState
-from doc_lattice.loader import build_lattice
-from doc_lattice.model import DocumentOrigin, ExternalDeclaration, NodeMeta, ParsedDoc, RawEdge
 from doc_lattice.path_utils import format_path_for_display
 
-from .helpers import _clean_docs, runner
+from .helpers import _clean_docs, _external_reporting_app, runner
 
 _SRC = Path(__file__).resolve().parents[2] / "src"
 
@@ -895,41 +889,6 @@ def test_check_github_annotation_names_the_colliding_headings(tmp_path: Path, mo
         f"down -> up#notes is AMBIGUOUS in {upstream} "
         '(ambiguous with "Notes" (line 4), "Notes" (line 6))\n'
     )
-
-
-def _external_reporting_app(root, *, authority=None, ambiguous=False):
-
-    project = ProjectConfig(Config(), root, (root,))
-    lattice = build_lattice(
-        [
-            ParsedDoc(
-                root / "up.md",
-                NodeMeta(id="up", authority="derived"),
-                "# Notes\n\n# Notes\n" if ambiguous else "# Notes\nbody\n",
-            ),
-            ParsedDoc(
-                root / "down.md",
-                NodeMeta(
-                    id="down",
-                    authority=authority,
-                    derives_from=[RawEdge(ref="up#notes"), RawEdge(ref="missing")],
-                ),
-                "body\n",
-                origin=DocumentOrigin(
-                    root / "down.md", ExternalDeclaration("meta/[red]index.yml", 6, "./down.md")
-                ),
-            ),
-        ]
-    )
-
-    def factory(*, no_color):
-        return replace(
-            default_runtime(no_color=no_color),
-            load_config=lambda _config, _cwd: project,
-            load_lattice=lambda _project, **_kwargs: lattice,
-        )
-
-    return create_app(runtime_factory=factory)
 
 
 def test_external_broken_and_ambiguous_github_messages_keep_markdown_attachment(

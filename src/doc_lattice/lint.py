@@ -5,7 +5,7 @@ from dataclasses import dataclass, field
 
 from .check import EdgeStatus, ambiguous_edges, ambiguous_json
 from .constants import AUTHORITY_LADDER, Authority, SkipReason
-from .model import DocumentOrigin, Lattice, TargetId, external_origins, origins_json
+from .model import DocumentOrigin, Lattice, TargetId, edge_origins, origins_json
 from .resolve import node_for_path
 
 
@@ -124,18 +124,12 @@ def lint_lattice(lattice: Lattice) -> LintResult:
             if target_id is None:
                 continue  # broken edge: reported by check, not counted here
             target_authority = _target_authority(lattice, target_id)
-            origins = external_origins(
-                lattice, (node_id, lattice.file_id_by_path[lattice.index[target_id].path])
-            )
-            if source_authority is None:
-                skipped.append(
-                    SkippedEdge(node_id, edge.target_ref, target_id, "source-unannotated", origins)
+            if source_authority is None or target_authority is None:
+                reason: SkipReason = (
+                    "source-unannotated" if source_authority is None else "target-unannotated"
                 )
-                continue
-            if target_authority is None:
-                skipped.append(
-                    SkippedEdge(node_id, edge.target_ref, target_id, "target-unannotated", origins)
-                )
+                origins = edge_origins(lattice, node_id, edge)
+                skipped.append(SkippedEdge(node_id, edge.target_ref, target_id, reason, origins))
                 continue
             if _rank(target_authority) < _rank(source_authority):
                 violations.append(
@@ -145,7 +139,7 @@ def lint_lattice(lattice: Lattice) -> LintResult:
                         target_id=target_id,
                         target_ref=edge.target_ref,
                         target_authority=target_authority,
-                        origins=origins,
+                        origins=edge_origins(lattice, node_id, edge),
                     )
                 )
     return LintResult(

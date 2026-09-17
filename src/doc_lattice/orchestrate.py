@@ -52,8 +52,9 @@ def load_lattice(
         ManifestError: If a fresh manifest or its declared target fails validation.
         RegistrationConflictError: If metadata owners collide or a manifest is also a node.
     """
-    declarations = project.sidecar_manifests if isinstance(project, SidecarProjectConfig) else ()
-    project = project.project if isinstance(project, SidecarProjectConfig) else project
+    declarations = ()
+    if isinstance(project, SidecarProjectConfig):
+        declarations, project = project.sidecar_manifests, project.project
     registrations = build_registration_index(declarations, project.project_root)
     if project.config.cache_key is None:
         return _assemble(

@@ -11,11 +11,10 @@ from .model import (
     Lattice,
     TargetId,
     collision_members_json,
-    external_origins,
+    edge_origins,
     format_collision,
     format_origins,
     origins_json,
-    parse_ref,
 )
 from .path_utils import format_path_for_display
 from .resolve import cached_target_hash
@@ -39,18 +38,11 @@ class EdgeStatus:
     origins: Mapping[str, DocumentOrigin] = field(default_factory=dict)
 
 
-def _edge_origins(lattice: Lattice, source_id: str, edge: Edge) -> dict[str, DocumentOrigin]:
-    """Select the source and known target file, including a file with a missing section."""
-    participants = [source_id]
-    if edge.target_id is not None:
-        participants.append(lattice.file_id_by_path[lattice.index[edge.target_id].path])
-    else:
-        participants.append(parse_ref(edge.target_ref).file_id)
-    return external_origins(lattice, participants)
-
-
 def _ambiguous(
-    lattice: Lattice, source_id: str, edge: Edge, collision: tuple[CollisionMember, ...]
+    source_id: str,
+    edge: Edge,
+    collision: tuple[CollisionMember, ...],
+    origins: Mapping[str, DocumentOrigin],
 ) -> EdgeStatus:
     """Build the one AMBIGUOUS record shape every command reads.
 
@@ -65,7 +57,7 @@ def _ambiguous(
         edge.seen,
         None,
         collision,
-        _edge_origins(lattice, source_id, edge),
+        origins,
     )
 
 
@@ -89,7 +81,9 @@ def ambiguous_edges(lattice: Lattice) -> tuple[EdgeStatus, ...]:
                 continue
             collision = lattice.collisions.get(edge.target_id)
             if collision is not None:
-                found.append(_ambiguous(lattice, node_id, edge, collision))
+                found.append(
+                    _ambiguous(node_id, edge, collision, edge_origins(lattice, node_id, edge))
+                )
     return tuple(found)
 
 
@@ -241,14 +235,14 @@ def _classify(
     compared against ``seen``: a missing ``seen`` is UNRECONCILED, a mismatch is STALE, and
     a match is OK.
     """
-    origins = _edge_origins(lattice, source_id, edge)
+    origins = edge_origins(lattice, source_id, edge)
     if edge.target_id is None:
         return EdgeStatus(
             source_id, edge.target_ref, None, "BROKEN", edge.seen, None, origins=origins
         )
     collision = lattice.collisions.get(edge.target_id)
     if collision is not None:
-        return _ambiguous(lattice, source_id, edge, collision)
+        return _ambiguous(source_id, edge, collision, origins)
     actual = cached_target_hash(lattice, edge.target_id, cache)
     if edge.seen is None:
         return EdgeStatus(

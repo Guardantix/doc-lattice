@@ -4,6 +4,8 @@ import json
 from dataclasses import replace
 from pathlib import Path
 
+from external_origin_helpers import _external_lattice
+
 from doc_lattice.loader import build_lattice
 from doc_lattice.model import (
     DocumentOrigin,
@@ -359,35 +361,6 @@ def test_identical_components_in_different_files_each_keep_their_row():
     assert '// ambiguous zzz#notes: "Notes" (line 1), "Notes" (line 3)' in dot
     assert '%% ambiguous up#notes: "Notes" (line 1), "Notes" (line 3)' in mermaid
     assert '%% ambiguous zzz#notes: "Notes" (line 1), "Notes" (line 3)' in mermaid
-
-
-def _external_lattice(*, ambiguous=False, authority="binding"):
-
-    return build_lattice(
-        [
-            ParsedDoc(
-                Path("docs/up.md"),
-                NodeMeta(id="up", authority="derived"),
-                "# Notes\n\n# Notes\n" if ambiguous else "# Notes\nbody\n",
-                origin=DocumentOrigin(
-                    Path("docs/up.md"), ExternalDeclaration("meta/up.yml", 4, "./docs/up.md")
-                ),
-            ),
-            ParsedDoc(
-                Path("docs/down.md"),
-                NodeMeta(
-                    id="down",
-                    authority=authority,
-                    tickets=["GTX-770"],
-                    derives_from=[RawEdge(ref="up#notes", seen="old"), RawEdge(ref="missing")],
-                ),
-                "body\n",
-                origin=DocumentOrigin(
-                    Path("docs/down.md"), ExternalDeclaration("meta/down.yml", 1, "docs/down.md")
-                ),
-            ),
-        ]
-    )
 
 
 def test_graph_external_origins_include_nodes_edges_and_collision_comments():

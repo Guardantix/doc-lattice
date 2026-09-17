@@ -13,7 +13,7 @@ from rich.markup import escape
 from .check import EdgeStatus
 from .constants import EDGE_STATES, EdgeState
 from .lint import LintResult
-from .model import Node, format_collision, format_origins
+from .model import Node, format_collision, format_origins, node_origins
 from .path_utils import format_path_for_display
 
 _STATE_COL_WIDTH = 13  # widest EdgeState ("UNRECONCILED") is 12 chars, plus one trailing space
@@ -194,14 +194,9 @@ def render_impact(
     for node, _impact_depth_not_shown in affected:
         tickets = ", ".join(node.tickets) if node.tickets else "-"
         displayed_path = escape(format_path_for_display(node.path))
-        origins = (
-            {node.id: node.origin}
-            if node.origin is not None and node.origin.declaration is not None
-            else {}
-        )
         console.print(
             f"{escape(node.id)}  ({displayed_path})  tickets: {escape(tickets)}"
-            f"{escape(format_origins(origins))}",
+            f"{escape(format_origins(node_origins(node)))}",
             highlight=False,
             soft_wrap=True,
         )
