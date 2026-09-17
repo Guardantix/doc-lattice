@@ -10,9 +10,8 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
-from .error_types import ConfigError, ProjectError
+from .error_types import ProjectError
 from .link_selectors import (
-    LINK_SOURCES_KEY,
     RECURSIVE_SEGMENT,
     SELECTOR_SEPARATOR,
     segment_matches,
@@ -24,15 +23,29 @@ from .path_utils import format_path_for_display
 
 @dataclass(frozen=True, slots=True)
 class SelectionPolicy:
-    """The consumer's diagnostic context and traversal refusal policy."""
+    """The consumer's diagnostic context and traversal refusal policy.
 
-    key: str = LINK_SOURCES_KEY
-    purpose: str = "links command"
-    error_type: type[ProjectError] = ConfigError
+    Nothing here defaults to a consumer: this module names no key, purpose, or error type of
+    its own, so a caller that forgets one cannot inherit another consumer's taxonomy and report
+    a refusal under a key the reader will not find in their configuration.
+
+    Attributes:
+        key: The config key whose entries are being expanded, named in every diagnostic.
+        purpose: How a refusal spells the gate that refused, as in "the links command refuses".
+        error_type: The ``ProjectError`` subclass every refusal is raised as.
+        refuse_symlink_directories: Whether reaching a symlinked directory is a refusal rather
+            than a directory the walk declines to enter.
+        annotate_selector: Whether a refusal met inside the walk gains a note naming the
+            selector that reached it. Separate from the traversal policy because the two are
+            independent choices: a consumer can want the provenance without the strictness, and
+            widening an existing consumer's diagnostics is a contract change of its own.
+    """
+
+    key: str
+    purpose: str
+    error_type: type[ProjectError]
     refuse_symlink_directories: bool = False
-
-
-_LINK_POLICY = SelectionPolicy()
+    annotate_selector: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -47,7 +60,7 @@ def select_paths(
     project_root: Path,
     selectors: Sequence[str],
     *,
-    policy: SelectionPolicy = _LINK_POLICY,
+    policy: SelectionPolicy,
 ) -> tuple[SelectedPath, ...]:
     """Expand selectors without following directory symlinks or collapsing file aliases.
 
@@ -85,7 +98,7 @@ def select_paths(
         try:
             found = _walk(root, segments, policy)
         except ProjectError as exc:
-            if policy.refuse_symlink_directories:
+            if policy.annotate_selector:
                 exc.add_note(
                     f"selected by {format_path_for_display(selector)}; repair the path "
                     "or narrow the selector"
@@ -104,7 +117,7 @@ def select_paths(
     )
 
 
-def _scan(directory: Path, policy: SelectionPolicy = _LINK_POLICY) -> list[os.DirEntry[str]]:
+def _scan(directory: Path, policy: SelectionPolicy) -> list[os.DirEntry[str]]:
     """List one directory.
 
     Raises:
@@ -121,7 +134,7 @@ def _scan(directory: Path, policy: SelectionPolicy = _LINK_POLICY) -> list[os.Di
 
 
 def _is_directory(
-    entry: os.DirEntry[str], policy: SelectionPolicy = _LINK_POLICY, *, traverse: bool = False
+    entry: os.DirEntry[str], policy: SelectionPolicy, *, traverse: bool = False
 ) -> bool:
     """Report whether an entry is a directory in its own right, never through a symlink.
 
@@ -190,6 +203,7 @@ def _recursive_frames(
         entries: That directory's listing.
         last: Whether ``**`` is the selector's final segment.
         found: The selector's matched spellings, added to in place.
+        policy: The consumer's diagnostic context and traversal refusal policy.
 
     Returns:
         The frames to push, children first and the ``index + 1`` handoff last.
@@ -238,6 +252,7 @@ def _walk(root: Path, segments: tuple[str, ...], policy: SelectionPolicy) -> set
     Args:
         root: The resolved project root the selector is anchored to.
         segments: The validated selector segments.
+        policy: The consumer's diagnostic context and traversal refusal policy.
 
     Returns:
         Every project-relative spelling the selector matched, unordered.

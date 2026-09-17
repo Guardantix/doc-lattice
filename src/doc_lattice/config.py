@@ -11,7 +11,15 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
 
-from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator, model_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    ValidationError,
+    ValidationInfo,
+    field_validator,
+    model_validator,
+)
 
 from .constants import LATTICE_FORMAT_VERSION
 from .error_types import ConfigError
@@ -66,10 +74,19 @@ class CoverageExemption(BaseModel):
 
     @field_validator("path", "reason")
     @classmethod
-    def _validate_nonempty_text(cls, value: str) -> str:
-        """Refuse an exemption field that names nothing."""
-        if not value:
-            msg = "sidecar coverage exemption path and reason must not be empty"
+    def _validate_nonempty_text(cls, value: str, info: ValidationInfo) -> str:
+        """Refuse an exemption field that names nothing.
+
+        Whitespace alone is refused as well as the empty string. A blank reason satisfies
+        "non-empty" while documenting nothing, and a blank path can only ever be refused later
+        as a stale exemption, at a distance from the key that carried it.
+
+        The field is named from ``info`` rather than spelled into a message shared by both, so
+        a reader is told which of the two they left empty instead of having to read the
+        location off the validation envelope.
+        """
+        if not value.strip():
+            msg = f"sidecar coverage exemption {info.field_name} must not be empty"
             raise ValueError(msg)
         return value
 

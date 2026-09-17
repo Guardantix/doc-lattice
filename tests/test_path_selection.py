@@ -8,6 +8,7 @@ import pytest
 
 from doc_lattice import path_selection
 from doc_lattice.error_types import ConfigError, CoverageError, UnreadableDocError
+from doc_lattice.link_check import _SELECTION_POLICY as _LINKS
 from doc_lattice.link_check import select_link_sources
 from doc_lattice.path_selection import SelectedPath, SelectionPolicy, select_paths
 
@@ -16,7 +17,22 @@ _COVERAGE = SelectionPolicy(
     purpose="coverage policy",
     error_type=CoverageError,
     refuse_symlink_directories=True,
+    annotate_selector=True,
 )
+
+
+class _RefusingEntry:
+    """A directory entry whose kind the filesystem refuses to report.
+
+    ``os.DirEntry`` has no public constructor and cannot be instantiated or subclassed, so the
+    only way to reach ``_is_directory``'s refusal branch is to hand it a stand-in.
+    """
+
+    path = "/project/locked"
+    name = "locked"
+
+    def is_dir(self, **_kwargs: bool) -> bool:
+        raise OSError(errno.EACCES, "inspection refused")
 
 
 def test_selection_retains_every_alias_and_sorted_unique_selectors(tmp_path):
@@ -24,7 +40,7 @@ def test_selection_retains_every_alias_and_sorted_unique_selectors(tmp_path):
     target.write_text("# B\n")
     (tmp_path / "a.md").symlink_to(target)
 
-    selected = select_paths(tmp_path, ["b.md", "*.md", "**/*.md", "*.md"])
+    selected = select_paths(tmp_path, ["b.md", "*.md", "**/*.md", "*.md"], policy=_COVERAGE)
 
     assert selected == (
         SelectedPath("a.md", ("**/*.md", "*.md")),
@@ -85,18 +101,24 @@ def test_scan_failure_cannot_hide_a_subtree(tmp_path, monkeypatch):
         select_paths(tmp_path, ["**/*.md"], policy=_COVERAGE)
 
 
-def test_directory_inspection_failure_keeps_the_coverage_error_type():
-    class RefusingEntry:
-        path = "/project/locked"
-
-        def is_dir(self, *, follow_symlinks):
-            assert follow_symlinks is False
-            raise OSError(errno.EACCES, "inspection refused")
-
-    with pytest.raises(CoverageError, match="could not inspect"):
-        # DirEntry cannot be instantiated or subclassed; this stand-in forces its I/O failure.
+@pytest.mark.parametrize(
+    ("policy", "expected"),
+    [(_COVERAGE, CoverageError), (_LINKS, ConfigError)],
+    ids=["coverage", "links"],
+)
+def test_directory_inspection_failure_keeps_each_consumer_error_type(policy, expected):
+    with pytest.raises(expected, match="could not inspect"):
         path_selection._is_directory(
-            RefusingEntry(),  # ty: ignore[invalid-argument-type]
-            _COVERAGE,
+            _RefusingEntry(),  # ty: ignore[invalid-argument-type]
+            policy,
             traverse=True,
         )
+
+
+def test_an_unresolvable_project_root_is_the_consumer_refusal(tmp_path, monkeypatch):
+    def refuse(_self, *_args, **_kwargs):
+        raise OSError(errno.EACCES, "resolve refused")
+
+    monkeypatch.setattr(Path, "resolve", refuse)
+    with pytest.raises(CoverageError, match=r"project root .* could not be resolved"):
+        select_paths(tmp_path, ["*.md"], policy=_COVERAGE)

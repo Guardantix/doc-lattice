@@ -24,7 +24,6 @@ from doc_lattice.link_check import (
     select_legacy_marker_sources,
     select_link_sources,
 )
-from doc_lattice.path_selection import _is_directory
 from doc_lattice.path_utils import format_path_for_display
 
 
@@ -1258,25 +1257,6 @@ def test_an_unscannable_directory_is_a_config_error(tmp_path):
             select_link_sources(tmp_path, ["docs/**/*.md"])
     finally:
         locked.chmod(0o755)
-
-
-class _RefusingEntry:
-    """A directory entry whose kind the filesystem refuses to report.
-
-    ``os.DirEntry`` has no public constructor and cannot be instantiated or subclassed, so the
-    only way to reach ``_is_directory``'s refusal branch is to hand it a stand-in.
-    """
-
-    path = "blocked"
-    name = "blocked"
-
-    def is_dir(self, **_kwargs: bool) -> bool:
-        raise PermissionError(errno.EACCES, "Permission denied")
-
-
-def test_an_entry_whose_kind_cannot_be_read_is_a_config_error():
-    with pytest.raises(ConfigError, match="could not inspect"):
-        _is_directory(_RefusingEntry())  # ty: ignore[invalid-argument-type] - the stand-in
 
 
 def test_adjacent_recursive_segments_match_the_same_set_as_one(tmp_path):

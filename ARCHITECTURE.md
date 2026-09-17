@@ -3031,8 +3031,8 @@ are reused.
 
 **Coverage is independent of discovery and of registration (GTX-756).** The optional
 `sidecar_coverage` key holds a mapping with only these keys: `select`, a required non-empty list of selector strings,
-and `exempt`, an optional list of mappings each carrying exactly `path` and `reason`, both
-non-empty strings. As for `sidecar_manifests`, a null or empty `sidecar_coverage`, `select`, or
+and `exempt`, an optional list of mappings each carrying exactly `path` and `reason`, neither
+blank. As for `sidecar_manifests`, a null or empty `sidecar_coverage`, `select`, or
 declared `exempt` is refused at config load, and an omitted `exempt` means no exemptions. The
 selectors are AD-45's:
 `link_selectors` grammar, expanded by the shared `path_selection` no-follow walk from the project

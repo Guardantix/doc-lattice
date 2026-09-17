@@ -958,7 +958,8 @@ sidecar_coverage:
 The mapping accepts only `select` and `exempt`. `select` is a required non-empty list using the
 same project-relative POSIX selector grammar as `link_sources`. Omit `exempt` when none are needed;
 when declared, it must be a non-empty list of mappings containing exactly `path` and `reason`,
-both non-empty strings. Nulls, empty declarations, wrong types, malformed selectors, and unknown
+both strings that are neither empty nor whitespace alone, since a blank reason documents nothing.
+Nulls, empty declarations, wrong types, malformed selectors, and unknown
 keys, including nested keys, fail config loading with `CONFIG_ERROR`. Configuration loading
 validates syntax only; selection and exemption-existence checks happen when the lattice loads.
 
@@ -1472,7 +1473,8 @@ not collide.
 doc-lattice/
 ├── src/doc_lattice/         # the engine: a pure graph/report core, the link gate, behind a thin impure shell
 │   ├── markdown_compat.py      # pinned heading and GitHub-slug compatibility adapter
-│   ├── link_check.py           # the links gate: selector expansion and link resolution (read-only I/O)
+│   ├── path_selection.py       # the shared no-follow selector walk (read-only I/O)
+│   ├── link_check.py           # the links gate: link resolution over selected sources (read-only I/O)
 │   ├── _github_slugger_data.py # generated slug and Unicode compatibility data
 │   ├── persistence.py          # shared durable single-path filesystem primitives
 │   ├── reconcile_transaction.py # reconcile lock, journal, commit, rollback, and recovery

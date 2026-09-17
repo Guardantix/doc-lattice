@@ -883,14 +883,26 @@ def test_config_refuses_invalid_sidecar_coverage_declarations(
         pytest.param(
             "{path: '', reason: allowed}",
             "sidecar_coverage.exempt.0.path",
-            "must not be empty",
+            "exemption path must not be empty",
             id="empty-path",
         ),
         pytest.param(
             "{path: allowed.md, reason: ''}",
             "sidecar_coverage.exempt.0.reason",
-            "must not be empty",
+            "exemption reason must not be empty",
             id="empty-reason",
+        ),
+        pytest.param(
+            "{path: '   ', reason: allowed}",
+            "sidecar_coverage.exempt.0.path",
+            "exemption path must not be empty",
+            id="blank-path",
+        ),
+        pytest.param(
+            "{path: allowed.md, reason: '   '}",
+            "sidecar_coverage.exempt.0.reason",
+            "exemption reason must not be empty",
+            id="blank-reason",
         ),
         pytest.param(
             "{path: 1, reason: allowed}",

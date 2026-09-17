@@ -88,8 +88,19 @@ from .markdown_compat import (
     full_heading_inventory,
     rendered_heading_walk,
 )
-from .path_selection import select_paths
+from .path_selection import SelectionPolicy, select_paths
 from .path_utils import format_path_for_display
+
+# This gate's half of the shared selection contract, spelled here rather than defaulted in
+# ``path_selection``: the key and the prose belong to the consumer that reports them. Both
+# traversal-policy flags stay at their defaults deliberately. A symlinked directory is declined
+# rather than refused, which is the behavior AD-45 records, and a refusal carries no selector
+# note, because widening this gate's diagnostics is a contract change of its own.
+_SELECTION_POLICY = SelectionPolicy(
+    key=LINK_SOURCES_KEY,
+    purpose="links command",
+    error_type=ConfigError,
+)
 
 _PARSER = MarkdownIt("commonmark")
 _MARKDOWN_SUFFIX = ".md"
@@ -820,7 +831,7 @@ def select_link_sources(project_root: Path, selectors: Sequence[str]) -> list[Pa
             can block indefinitely.
     """
     root = project_root.resolve()
-    matched = select_paths(root, selectors)
+    matched = select_paths(root, selectors, policy=_SELECTION_POLICY)
     seen: set[Path] = set()
     sources: list[Path] = []
     for selected in matched:

@@ -10,7 +10,7 @@ from pathlib import Path
 
 from .config import SidecarCoverage
 from .error_types import CoverageError
-from .path_selection import SelectionPolicy, select_paths
+from .path_selection import SelectedPath, SelectionPolicy, select_paths
 from .path_utils import format_path_for_display, safe_resolve
 
 _POLICY = SelectionPolicy(
@@ -18,8 +18,27 @@ _POLICY = SelectionPolicy(
     purpose="sidecar coverage policy",
     error_type=CoverageError,
     refuse_symlink_directories=True,
+    annotate_selector=True,
 )
 _REMEDY = "register this file or add an exact sidecar_coverage.exempt entry with a reason"
+
+
+def _context(entry: SelectedPath) -> str:
+    """Name one selected spelling and every declaration that selected it.
+
+    Built only for a spelling that turns out to be a problem. A configured project reaches this
+    module on every load, cache hits included, and the common outcome is that every selected
+    path is covered, so building the prose up front would spend a string and a join per selected
+    file on every command for output nobody sees.
+
+    Args:
+        entry: One selected spelling with its sorted, unique selecting declarations.
+
+    Returns:
+        The ``'path': selected by 'selector', ...`` prefix every coverage problem opens with.
+    """
+    selectors = ", ".join(format_path_for_display(selector) for selector in entry.selectors)
+    return f"{format_path_for_display(entry.path)}: selected by {selectors}"
 
 
 def enforce_coverage(
@@ -41,27 +60,24 @@ def enforce_coverage(
     targets = set(enrolled)
     problems: list[str] = []
     for entry in selected:
-        context = f"{format_path_for_display(entry.path)}: selected by " + ", ".join(
-            format_path_for_display(selector) for selector in entry.selectors
-        )
         candidate = project_root / entry.path
         try:
             target = safe_resolve(candidate, project_root)
             mode = target.stat().st_mode
         except (ValueError, OSError) as exc:
             problems.append(
-                f"{context}; cannot resolve or inspect selected path: {exc}; "
+                f"{_context(entry)}; cannot resolve or inspect selected path: {exc}; "
                 "repair the path or narrow sidecar_coverage.select; exemptions cannot waive "
                 "invalid paths"
             )
             continue
         if not stat.S_ISREG(mode):
             problems.append(
-                f"{context}; not a regular file; select regular files only; "
+                f"{_context(entry)}; not a regular file; select regular files only; "
                 "exemptions cannot waive invalid paths"
             )
         elif target not in targets and entry.path not in exempt:
-            problems.append(f"{context}; not enrolled in the loaded lattice; {_REMEDY}")
+            problems.append(f"{_context(entry)}; not enrolled in the loaded lattice; {_REMEDY}")
     spellings = {entry.path for entry in selected}
     for path in sorted(exempt - spellings):
         problems.append(
