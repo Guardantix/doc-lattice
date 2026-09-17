@@ -92,10 +92,10 @@ from .path_selection import SelectionPolicy, select_paths
 from .path_utils import format_path_for_display
 
 # This gate's half of the shared selection contract, spelled here rather than defaulted in
-# ``path_selection``: the key and the prose belong to the consumer that reports them. Both
-# traversal-policy flags stay at their defaults deliberately. A symlinked directory is declined
-# rather than refused, which is the behavior AD-45 records, and a refusal carries no selector
-# note, because widening this gate's diagnostics is a contract change of its own.
+# ``path_selection``: the key and the prose belong to the consumer that reports them. A
+# symlinked directory is declined rather than refused, which is the behavior AD-45 records, and
+# no ``selector_note`` is set, so a refusal carries no note: widening this gate's diagnostics is
+# a contract change of its own. This gate prunes nothing, so it passes no exclusions.
 _SELECTION_POLICY = SelectionPolicy(
     key=LINK_SOURCES_KEY,
     purpose="links command",

@@ -3031,9 +3031,10 @@ are reused.
 
 **Coverage is independent of discovery and of registration (GTX-756).** The optional
 `sidecar_coverage` key holds a mapping with only these keys: `select`, a required non-empty list of selector strings,
-and `exempt`, an optional list of mappings each carrying exactly `path` and `reason`, neither
-blank. As for `sidecar_manifests`, a null or empty `sidecar_coverage`, `select`, or
-declared `exempt` is refused at config load, and an omitted `exempt` means no exemptions. The
+`exclude`, an optional list of mappings each carrying exactly `select` and `reason`, and `exempt`,
+an optional list of mappings each carrying exactly `path` and `reason`, none of them
+blank. As for `sidecar_manifests`, a null or empty `sidecar_coverage`, `select`, declared
+`exclude`, or declared `exempt` is refused at config load, and an omitted one means none. The
 selectors are AD-45's:
 `link_selectors` grammar, expanded by the shared `path_selection` no-follow walk from the project
 root. It retains every spelling and all its selecting declarations, before the alias collapse
@@ -3060,7 +3061,37 @@ that list would hide the omissions coverage exists to report.
   exemption cannot waive these checks.
 - Coverage refuses a symlinked directory wherever the selector would otherwise traverse it,
   without entering it. A covered sibling cannot conceal the refusal. This strengthens coverage
-  specifically; AD-45's `links` behavior stays unchanged.
+  specifically; AD-45's `links` behavior stays unchanged. Declining instead was rejected: a
+  document behind such a directory would go unselected and so unreported, which is the omission
+  coverage exists to find. The refusal is therefore paired with `exclude`, because a refusal with
+  no way out of it is one an adopter cannot act on: a single interior symlink, a pnpm store or a
+  virtualenv's linked `lib64`, would end every lattice-loading command at exit 2 with no
+  declaration able to say the subtree is out of scope. `SelectionPolicy` holds that pairing as an
+  invariant, refusing a strict traversal policy that carries no note, since the note is where a
+  consumer's remedy reaches the terminal.
+- `exclude` prunes the walk rather than filtering its result (GTX-756). Pruning is what makes it
+  an answer to the refusal at all: the refusal is raised while classifying an entry, so a
+  declaration that removed spellings afterward would arrive after the walk had already refused.
+  Applying it to each listing as it is scanned, ahead of every classification, makes that ordering
+  structural rather than a rule each branch of the walk has to repeat. One consequence is
+  deliberate and is a weakening: a scan or inspection failure inside a pruned subtree no longer
+  refuses, so an unreadable dependency tree stops failing the gate. That is the same class of
+  unactionable refusal, and pruning answers both with one mechanism rather than two.
+- An exclusion that prunes nothing is accepted, departing from AD-49's rule that a declaration
+  matching nothing is refused. AD-49 targets a declaration that grants something while adding
+  nothing, whose failure mode is silent; an unmatched exclusion fails loud instead, because the
+  refusal it was written to prune comes straight back. The accounting also differs in kind, since
+  nothing beneath a pruned directory is ever enumerated, and requiring a match would make whether
+  a config loads depend on whether a dependency tree happens to be installed. An exemption that a
+  declared exclusion prunes is the contradiction that is refused instead, and at config load
+  rather than at selection: both declarations are lexical, so the disagreement is decidable at the
+  keys that disagree, where a reader can see both. Completeness comes from testing an exemption's
+  own spelling and each ancestor spelling, since pruning a directory removes everything beneath
+  it.
+- `exclude` is offered as a remedy by the refusals that a pruned path never reaches: the
+  traversal refusal, and the invalid-path and nonregular-file refusals. It is deliberately absent
+  from the uncovered-file remedy, which stays register-or-exempt. An uncovered document is the
+  finding the gate exists to produce, and scoping it away is not a repair for it.
 - Coverage runs on every load of a configured project, cache hits included, and an uncovered
   file is an exit-2 error for every lattice-loading command. The lattice those commands would
   read is not the one the configuration declares, and exit 1 means a coherent graph that has

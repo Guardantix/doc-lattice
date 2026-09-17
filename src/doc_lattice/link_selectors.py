@@ -72,7 +72,7 @@ def validate_link_selector(entry: str) -> tuple[str, ...]:
         msg = "is absolute; a selector is relative to the project root"
         raise ValueError(msg)
     if entry.endswith(SELECTOR_SEPARATOR):
-        msg = "ends in a separator; a selector names files, not a directory"
+        msg = "ends in a separator; name the path itself, without a trailing separator"
         raise ValueError(msg)
     segments = tuple(entry.split(SELECTOR_SEPARATOR))
     for segment in segments:

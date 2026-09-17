@@ -1,7 +1,9 @@
 """Enforce declared coverage against the targets enrolled by validated assembly.
 
-Selection and exemptions are fresh on every load. Neither can enroll a document or waive a
-filesystem refusal, and exemptions compare exact spellings before alias deduplication.
+Selection, exclusions, and exemptions are fresh on every load. None of them can enroll a
+document, and exemptions compare exact spellings before alias deduplication. An exemption waives
+an obligation inside the covered corpus and cannot waive a filesystem refusal; an exclusion
+prunes the walk, so what it removes is never selected, inspected, or refused at all.
 """
 
 import stat
@@ -10,15 +12,19 @@ from pathlib import Path
 
 from .config import SidecarCoverage
 from .error_types import CoverageError
-from .path_selection import SelectedPath, SelectionPolicy, select_paths
+from .path_selection import Exclusions, SelectedPath, SelectionPolicy, select_paths
 from .path_utils import format_path_for_display, safe_resolve
 
+_EXCLUDE_KEY = "sidecar_coverage.exclude"
 _POLICY = SelectionPolicy(
     key="sidecar_coverage.select",
     purpose="sidecar coverage policy",
     error_type=CoverageError,
     refuse_symlink_directories=True,
-    annotate_selector=True,
+    selector_note=(
+        "selected by {selector}; repair the path, narrow the selector, or prune it with "
+        f"{_EXCLUDE_KEY}"
+    ),
 )
 _REMEDY = "register this file or add an exact sidecar_coverage.exempt entry with a reason"
 
@@ -53,9 +59,15 @@ def enforce_coverage(
 
     Raises:
         CoverageError: If selection cannot complete, a selected path is invalid or uncovered,
-            or an exemption matches no selected spelling.
+            or an exemption matches no selected spelling. A declared exclusion that prunes
+            nothing is not a refusal: it can only fail to prevent one, so it errs loud.
     """
-    selected = select_paths(project_root, coverage.select, policy=_POLICY)
+    exclude = (
+        Exclusions(_EXCLUDE_KEY, tuple(entry.select for entry in coverage.exclude))
+        if coverage.exclude
+        else None
+    )
+    selected = select_paths(project_root, coverage.select, policy=_POLICY, exclude=exclude)
     exempt = {entry.path for entry in coverage.exempt or ()}
     targets = set(enrolled)
     problems: list[str] = []
@@ -67,14 +79,14 @@ def enforce_coverage(
         except (ValueError, OSError) as exc:
             problems.append(
                 f"{_context(entry)}; cannot resolve or inspect selected path: {exc}; "
-                "repair the path or narrow sidecar_coverage.select; exemptions cannot waive "
-                "invalid paths"
+                f"repair the path, narrow sidecar_coverage.select, or prune it with "
+                f"{_EXCLUDE_KEY}; exemptions cannot waive invalid paths"
             )
             continue
         if not stat.S_ISREG(mode):
             problems.append(
-                f"{_context(entry)}; not a regular file; select regular files only; "
-                "exemptions cannot waive invalid paths"
+                f"{_context(entry)}; not a regular file; select regular files only, or "
+                f"prune it with {_EXCLUDE_KEY}; exemptions cannot waive invalid paths"
             )
         elif target not in targets and entry.path not in exempt:
             problems.append(f"{_context(entry)}; not enrolled in the loaded lattice; {_REMEDY}")

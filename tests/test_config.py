@@ -9,6 +9,7 @@ from pydantic import ValidationError as PydanticValidationError
 import doc_lattice.config as config_module
 from doc_lattice.config import (
     Config,
+    CoverageExclusion,
     CoverageExemption,
     SidecarCoverage,
     declares_lattice_format,
@@ -795,6 +796,159 @@ def test_config_reads_sidecar_coverage_without_selecting_files(tmp_path: Path):
     )
 
 
+def test_config_reads_sidecar_coverage_exclusions(tmp_path: Path):
+    (tmp_path / ".doc-lattice.yml").write_text(
+        "lattice_format: 2\n"
+        "sidecar_coverage:\n"
+        "  select: ['skills/**/SKILL.md']\n"
+        "  exclude:\n"
+        "    - select: skills/**/node_modules\n"
+        "      reason: installed dependencies, no lattice documents\n",
+        encoding="utf-8",
+    )
+
+    coverage = load_config(None, tmp_path).config.sidecar_coverage
+
+    assert coverage == SidecarCoverage(
+        select=["skills/**/SKILL.md"],
+        exclude=[
+            CoverageExclusion(
+                select="skills/**/node_modules",
+                reason="installed dependencies, no lattice documents",
+            )
+        ],
+    )
+
+
+def test_config_coverage_omitted_exclude_means_no_exclusions(tmp_path: Path):
+    (tmp_path / ".doc-lattice.yml").write_text(
+        "lattice_format: 2\nsidecar_coverage: {select: ['skills/**']}\n", encoding="utf-8"
+    )
+
+    coverage = load_config(None, tmp_path).config.sidecar_coverage
+
+    assert coverage is not None
+    assert coverage.exclude is None
+
+
+@pytest.mark.parametrize(
+    ("exclusion", "location", "reason"),
+    [
+        pytest.param("{}", "sidecar_coverage.exclude.0.select", "Field required", id="empty"),
+        pytest.param(
+            "{select: '', reason: allowed}",
+            "sidecar_coverage.exclude.0.select",
+            "exclusion select must not be empty",
+            id="empty-select",
+        ),
+        pytest.param(
+            "{select: '   ', reason: allowed}",
+            "sidecar_coverage.exclude.0.select",
+            "exclusion select must not be empty",
+            id="blank-select",
+        ),
+        pytest.param(
+            "{select: skills, reason: ''}",
+            "sidecar_coverage.exclude.0.reason",
+            "exclusion reason must not be empty",
+            id="empty-reason",
+        ),
+        pytest.param(
+            "{select: skills, reason: '   '}",
+            "sidecar_coverage.exclude.0.reason",
+            "exclusion reason must not be empty",
+            id="blank-reason",
+        ),
+        pytest.param(
+            "{select: 1, reason: allowed}",
+            "sidecar_coverage.exclude.0.select",
+            "Input should be a valid string",
+            id="select-not-string",
+        ),
+        pytest.param(
+            "{select: skills, reason: null}",
+            "sidecar_coverage.exclude.0.reason",
+            "Input should be a valid string",
+            id="reason-null",
+        ),
+        pytest.param(
+            "{select: '/skills', reason: allowed}",
+            "sidecar_coverage.exclude.0.select",
+            "sidecar_coverage.exclude entry '/skills'",
+            id="malformed-selector",
+        ),
+        pytest.param(
+            "{select: skills, reason: allowed, extra: nope}",
+            "sidecar_coverage.exclude.0.extra",
+            "Extra inputs are not permitted",
+            id="unknown-exclusion-key",
+        ),
+    ],
+)
+def test_config_refuses_invalid_sidecar_coverage_exclusions(
+    tmp_path: Path, exclusion: str, location: str, reason: str
+):
+    config = tmp_path / ".doc-lattice.yml"
+    config.write_text(
+        f"lattice_format: 2\nsidecar_coverage:\n  select: ['*.md']\n  exclude: [{exclusion}]\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ConfigError) as info:
+        load_config(None, tmp_path)
+
+    message = str(info.value)
+    assert f"invalid config {format_path_for_display(config)}:" in message
+    assert location in message
+    assert reason in message
+
+
+@pytest.mark.parametrize(
+    ("exempted", "excluded"),
+    [
+        pytest.param("skills/a.md", "skills/a.md", id="the-exempt-path-itself"),
+        pytest.param("skills/a.md", "skills/*.md", id="a-pattern-over-the-path"),
+        pytest.param("skills/web/a.md", "skills/web", id="the-parent-directory"),
+        pytest.param("skills/web/deep/a.md", "**/web", id="an-ancestor-at-any-depth"),
+    ],
+)
+def test_config_refuses_an_exemption_an_exclusion_prunes(
+    tmp_path: Path, exempted: str, excluded: str
+):
+    (tmp_path / ".doc-lattice.yml").write_text(
+        "lattice_format: 2\n"
+        "sidecar_coverage:\n"
+        "  select: ['skills/**/*.md']\n"
+        f"  exclude: [{{select: '{excluded}', reason: out of scope}}]\n"
+        f"  exempt: [{{path: '{exempted}', reason: fixture}}]\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ConfigError) as info:
+        load_config(None, tmp_path)
+
+    message = str(info.value)
+    assert f"sidecar_coverage.exempt path {format_path_for_display(exempted)} is pruned" in message
+    assert f"sidecar_coverage.exclude selector {format_path_for_display(excluded)}" in message
+    assert "remove one of the two declarations" in message
+
+
+def test_config_keeps_an_exemption_no_exclusion_prunes(tmp_path: Path):
+    (tmp_path / ".doc-lattice.yml").write_text(
+        "lattice_format: 2\n"
+        "sidecar_coverage:\n"
+        "  select: ['skills/**/*.md']\n"
+        "  exclude: [{select: 'skills/web', reason: out of scope}]\n"
+        "  exempt: [{path: 'skills/webbed/a.md', reason: fixture}]\n",
+        encoding="utf-8",
+    )
+
+    coverage = load_config(None, tmp_path).config.sidecar_coverage
+
+    assert coverage is not None
+    assert coverage.exempt is not None
+
+
 def test_config_coverage_omitted_exempt_means_no_exemptions(tmp_path: Path):
     (tmp_path / ".doc-lattice.yml").write_text(
         "lattice_format: 2\nsidecar_coverage: {select: ['skills/**']}\n", encoding="utf-8"
@@ -825,6 +979,24 @@ def test_config_coverage_omitted_exempt_means_no_exemptions(tmp_path: Path):
         ),
         pytest.param(
             "{select: null}", "sidecar_coverage.select", "written as null", id="select-null"
+        ),
+        pytest.param(
+            "{select: ['*.md'], exclude: null}",
+            "sidecar_coverage.exclude",
+            "written as null",
+            id="exclude-null",
+        ),
+        pytest.param(
+            "{select: ['*.md'], exclude: []}",
+            "sidecar_coverage.exclude",
+            "declared but names no exclusion",
+            id="exclude-empty",
+        ),
+        pytest.param(
+            "{select: ['*.md'], exclude: {select: skills, reason: r}}",
+            "sidecar_coverage.exclude",
+            "Input should be a valid list",
+            id="exclude-not-list",
         ),
         pytest.param(
             "{select: '*.md'}",

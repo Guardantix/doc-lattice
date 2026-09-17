@@ -6,17 +6,27 @@ from pathlib import Path
 
 import pytest
 
-from doc_lattice.config import CoverageExemption, SidecarCoverage
+from doc_lattice.config import CoverageExclusion, CoverageExemption, SidecarCoverage
 from doc_lattice.error_types import CoverageError
 from doc_lattice.sidecar_coverage import enforce_coverage
 
 
-def _policy(select=("*.md",), exempt=()):
+def _policy(select=("*.md",), exempt=(), exclude=()):
     return SidecarCoverage(
         select=list(select),
         **(
             {"exempt": [CoverageExemption(path=path, reason="foreign fixture") for path in exempt]}
             if exempt
+            else {}
+        ),
+        **(
+            {
+                "exclude": [
+                    CoverageExclusion(select=selector, reason="outside the covered corpus")
+                    for selector in exclude
+                ]
+            }
+            if exclude
             else {}
         ),
     )
@@ -156,3 +166,77 @@ def test_uncovered_and_stale_exemptions_are_reported_together(tmp_path):
         enforce_coverage(tmp_path, _policy(exempt=["stale.md"]), set())
     assert "'uncovered.md': selected by" in str(info.value)
     assert "'stale.md' matches no selected path" in str(info.value)
+
+
+def test_an_exclusion_removes_an_otherwise_uncovered_file(tmp_path):
+    (tmp_path / "covered.md").write_text("# Covered\n")
+    vendored = tmp_path / "vendor"
+    vendored.mkdir()
+    (vendored / "untracked.md").write_text("# Untracked\n")
+
+    with pytest.raises(CoverageError, match="not enrolled in the loaded lattice"):
+        enforce_coverage(tmp_path, _policy(["**/*.md"]), {tmp_path / "covered.md"})
+
+    enforce_coverage(
+        tmp_path,
+        _policy(["**/*.md"], exclude=["vendor"]),
+        {tmp_path / "covered.md"},
+    )
+
+
+@pytest.mark.parametrize("kind", ["escape", "dangling", "directory", "fifo", "loop"])
+def test_an_exclusion_removes_an_invalid_selected_path(tmp_path, kind):
+    root = tmp_path / "project"
+    root.mkdir()
+    (root / "covered.md").write_text("# Covered\n")
+    selected = root / "invalid.md"
+    if kind == "escape":
+        target = tmp_path / "outside.md"
+        target.write_text("# Outside\n")
+        selected.symlink_to(target)
+    elif kind == "dangling":
+        selected.symlink_to(root / "missing.md")
+    elif kind == "directory":
+        target = root / "directory"
+        target.mkdir()
+        selected.symlink_to(target, target_is_directory=True)
+    elif kind == "fifo":
+        os.mkfifo(selected)
+    else:
+        selected.symlink_to(selected)
+
+    with pytest.raises(CoverageError, match="exemptions cannot waive invalid paths"):
+        enforce_coverage(root, _policy(), {root / "covered.md"})
+
+    enforce_coverage(root, _policy(exclude=["invalid.md"]), {root / "covered.md"})
+
+
+def test_an_invalid_selected_path_offers_the_exclusion_remedy(tmp_path):
+    (tmp_path / "invalid.md").symlink_to(tmp_path / "missing.md")
+
+    with pytest.raises(CoverageError, match=r"prune it with sidecar_coverage\.exclude") as info:
+        enforce_coverage(tmp_path, _policy(), set())
+
+    assert "exemptions cannot waive invalid paths" in str(info.value)
+
+
+def test_an_exclusion_prunes_the_symlinked_directory_that_refused_the_gate(tmp_path):
+    skills = tmp_path / "skills"
+    (skills / "a").mkdir(parents=True)
+    covered = skills / "a" / "SKILL.md"
+    covered.write_text("# A\n")
+    modules = skills / "web" / "node_modules"
+    modules.mkdir(parents=True)
+    (modules / "lib").symlink_to(skills, target_is_directory=True)
+
+    with pytest.raises(CoverageError, match="refuses to traverse symlinked directory") as info:
+        enforce_coverage(tmp_path, _policy(["skills/**/SKILL.md"]), {covered})
+
+    notes = " ".join(info.value.__notes__)
+    assert "prune it with sidecar_coverage.exclude" in notes
+
+    enforce_coverage(
+        tmp_path,
+        _policy(["skills/**/SKILL.md"], exclude=["skills/**/node_modules"]),
+        {covered},
+    )

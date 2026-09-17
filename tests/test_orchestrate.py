@@ -1299,6 +1299,11 @@ def _coverage_project(root, *, exempt=(), cache_policy=None, manifests=(), **opt
         "ignore_globs": options.get("ignore", []),
         "sidecar_coverage": {"select": options.get("select", ["skills/*.md"])},
     }
+    if options.get("exclude"):
+        config["sidecar_coverage"]["exclude"] = [
+            {"select": selector, "reason": "outside the covered corpus"}
+            for selector in options["exclude"]
+        ]
     if exempt:
         config["sidecar_coverage"]["exempt"] = [
             {"path": path, "reason": "fixture owned elsewhere"} for path in exempt
@@ -1334,6 +1339,37 @@ def test_coverage_uses_only_nodes_actually_enrolled(tmp_path, enrollment):
     else:
         with pytest.raises(CoverageError, match=r"'skills/one\.md'.*not enrolled"):
             load_lattice(project)
+
+
+@pytest.mark.parametrize("cache_policy", [None, False])
+def test_an_exclusion_lets_a_load_a_symlinked_directory_refused_succeed(tmp_path, cache_policy):
+    (tmp_path / "docs").mkdir()
+    skills = tmp_path / "skills"
+    skills.mkdir()
+    (skills / "one.md").write_text("---\nid: one\n---\n# Body\n")
+    modules = skills / "node_modules"
+    modules.mkdir()
+    (modules / "lib").symlink_to(skills, target_is_directory=True)
+    selectors = ["skills/**/*.md"]
+
+    refusing = _coverage_project(
+        tmp_path, select=selectors, cache_policy=cache_policy, docs_roots=["skills"]
+    )
+    with pytest.raises(CoverageError, match="refuses to traverse symlinked directory"):
+        load_lattice(refusing)
+
+    project = _coverage_project(
+        tmp_path,
+        select=selectors,
+        exclude=["skills/node_modules"],
+        cache_policy=cache_policy,
+        docs_roots=["skills"],
+    )
+    cold = load_lattice(project)
+    warm = load_lattice(project)
+
+    assert set(cold.nodes_by_id) == {"one"}
+    assert set(warm.nodes_by_id) == {"one"}
 
 
 def test_coverage_accepts_alias_of_an_inline_node_outside_selection(tmp_path):

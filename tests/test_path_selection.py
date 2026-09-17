@@ -10,15 +10,25 @@ from doc_lattice import path_selection
 from doc_lattice.error_types import ConfigError, CoverageError, UnreadableDocError
 from doc_lattice.link_check import _SELECTION_POLICY as _LINKS
 from doc_lattice.link_check import select_link_sources
-from doc_lattice.path_selection import SelectedPath, SelectionPolicy, select_paths
+from doc_lattice.path_selection import (
+    Exclusions,
+    SelectedPath,
+    SelectionPolicy,
+    select_paths,
+)
 
+_EXCLUDE_KEY = "sidecar_coverage.exclude"
 _COVERAGE = SelectionPolicy(
     key="sidecar_coverage.select",
     purpose="coverage policy",
     error_type=CoverageError,
     refuse_symlink_directories=True,
-    annotate_selector=True,
+    selector_note="selected by {selector}; repair the path or prune it with " + _EXCLUDE_KEY,
 )
+
+
+def _exclude(*selectors):
+    return Exclusions(_EXCLUDE_KEY, selectors)
 
 
 class _RefusingEntry:
@@ -111,6 +121,7 @@ def test_directory_inspection_failure_keeps_each_consumer_error_type(policy, exp
         path_selection._is_directory(
             _RefusingEntry(),  # ty: ignore[invalid-argument-type]
             policy,
+            "locked",
             traverse=True,
         )
 
@@ -122,3 +133,149 @@ def test_an_unresolvable_project_root_is_the_consumer_refusal(tmp_path, monkeypa
     monkeypatch.setattr(Path, "resolve", refuse)
     with pytest.raises(CoverageError, match=r"project root .* could not be resolved"):
         select_paths(tmp_path, ["*.md"], policy=_COVERAGE)
+
+
+def test_a_refusing_policy_must_carry_the_note_that_holds_its_remedy():
+    with pytest.raises(ValueError, match="requires selector_note"):
+        SelectionPolicy(
+            key="sidecar_coverage.select",
+            purpose="coverage policy",
+            error_type=CoverageError,
+            refuse_symlink_directories=True,
+        )
+
+
+def test_an_exclusion_prunes_a_matched_file_and_leaves_its_siblings(tmp_path):
+    (tmp_path / "keep.md").write_text("# Keep\n")
+    (tmp_path / "drop.md").write_text("# Drop\n")
+
+    selected = select_paths(
+        tmp_path, ["*.md", "**/*.md"], policy=_COVERAGE, exclude=_exclude("drop.md")
+    )
+
+    assert selected == (SelectedPath("keep.md", ("**/*.md", "*.md")),)
+
+
+@pytest.mark.parametrize("selector", ["**/*.md", "*/SKILL.md", "linked/**/*.md", "**"])
+def test_an_exclusion_prunes_the_symlinked_directory_a_selector_would_refuse(tmp_path, selector):
+    real = tmp_path / "real"
+    real.mkdir()
+    (real / "SKILL.md").write_text("# Covered\n")
+    (tmp_path / "linked").symlink_to(real, target_is_directory=True)
+
+    if selector == "linked/**/*.md":
+        with pytest.raises(CoverageError, match=f"that {_EXCLUDE_KEY} did not prune"):
+            select_paths(tmp_path, [selector], policy=_COVERAGE, exclude=_exclude("linked"))
+        return
+    assert select_paths(tmp_path, [selector], policy=_COVERAGE, exclude=_exclude("linked")) == (
+        SelectedPath("real/SKILL.md", (selector,)),
+    )
+
+
+def test_an_exclusion_on_an_interior_directory_prevents_descent(tmp_path):
+    skills = tmp_path / "skills"
+    (skills / "a").mkdir(parents=True)
+    (skills / "a" / "SKILL.md").write_text("# A\n")
+    modules = skills / "web" / "node_modules"
+    modules.mkdir(parents=True)
+    (modules / "lib").symlink_to(skills, target_is_directory=True)
+
+    with pytest.raises(CoverageError, match="symlinked directory"):
+        select_paths(tmp_path, ["skills/**/SKILL.md"], policy=_COVERAGE)
+
+    assert select_paths(
+        tmp_path,
+        ["skills/**/SKILL.md"],
+        policy=_COVERAGE,
+        exclude=_exclude("skills/**/node_modules"),
+    ) == (SelectedPath("skills/a/SKILL.md", ("skills/**/SKILL.md",)),)
+
+
+def test_an_exclusion_precedes_the_scan_refusal_it_prunes(tmp_path, monkeypatch):
+    (tmp_path / "keep.md").write_text("# Keep\n")
+    locked = tmp_path / "locked"
+    locked.mkdir()
+    original = os.scandir
+
+    def refuse(directory):
+        if Path(directory) == locked:
+            raise OSError(errno.EACCES, "scan refused")
+        return original(directory)
+
+    monkeypatch.setattr(os, "scandir", refuse)
+    with pytest.raises(CoverageError, match="could not scan"):
+        select_paths(tmp_path, ["**/*.md"], policy=_COVERAGE)
+
+    assert select_paths(tmp_path, ["**/*.md"], policy=_COVERAGE, exclude=_exclude("locked")) == (
+        SelectedPath("keep.md", ("**/*.md",)),
+    )
+
+
+def test_a_contents_shaped_exclusion_cannot_prune_the_directory_itself(tmp_path):
+    real = tmp_path / "real"
+    real.mkdir()
+    (real / "SKILL.md").write_text("# Covered\n")
+    (tmp_path / "node_modules").symlink_to(real, target_is_directory=True)
+
+    with pytest.raises(CoverageError, match="symlinked directory"):
+        select_paths(
+            tmp_path, ["**/*.md"], policy=_COVERAGE, exclude=_exclude("**/node_modules/**")
+        )
+
+    assert select_paths(
+        tmp_path, ["**/*.md"], policy=_COVERAGE, exclude=_exclude("**/node_modules")
+    ) == (SelectedPath("real/SKILL.md", ("**/*.md",)),)
+
+
+def test_an_exclusion_prunes_one_spelling_and_not_its_alias(tmp_path):
+    target = tmp_path / "b.md"
+    target.write_text("# B\n")
+    (tmp_path / "a.md").symlink_to(target)
+
+    assert select_paths(tmp_path, ["*.md"], policy=_COVERAGE, exclude=_exclude("a.md")) == (
+        SelectedPath("b.md", ("*.md",)),
+    )
+
+
+@pytest.mark.parametrize(
+    ("policy", "expected"),
+    [(_COVERAGE, CoverageError), (_LINKS, ConfigError)],
+    ids=["coverage", "links"],
+)
+def test_an_invalid_exclusion_names_the_key_that_carried_it(tmp_path, policy, expected):
+    (tmp_path / "a.md").write_text("# A\n")
+    with pytest.raises(expected, match=f"{_EXCLUDE_KEY} entry '\\.\\./x'"):
+        select_paths(tmp_path, ["*.md"], policy=policy, exclude=_exclude("../x"))
+
+
+def test_pruning_everything_a_selector_matched_names_the_exclusion_key(tmp_path):
+    (tmp_path / "a.md").write_text("# A\n")
+    with pytest.raises(CoverageError, match=f"that {_EXCLUDE_KEY} did not prune"):
+        select_paths(tmp_path, ["*.md"], policy=_COVERAGE, exclude=_exclude("*.md"))
+
+
+def test_excluding_everything_empties_selection_without_pruning_the_root(tmp_path):
+    (tmp_path / "a.md").write_text("# A\n")
+    (tmp_path / "sub").mkdir()
+
+    with pytest.raises(CoverageError, match="matches no file"):
+        select_paths(tmp_path, ["**/*.md"], policy=_COVERAGE, exclude=_exclude("**"))
+
+
+def test_an_exclusion_prunes_identically_through_adjacent_recursive_segments(tmp_path):
+    for name in ("keep", "drop"):
+        directory = tmp_path / "a" / name
+        directory.mkdir(parents=True)
+        (directory / "x.md").write_text("# X\n")
+
+    assert select_paths(
+        tmp_path, ["a/**/**/x.md"], policy=_COVERAGE, exclude=_exclude("a/drop")
+    ) == (SelectedPath("a/keep/x.md", ("a/**/**/x.md",)),)
+
+
+def test_an_exclusion_that_prunes_nothing_is_accepted(tmp_path):
+    (tmp_path / "a.md").write_text("# A\n")
+
+    assert select_paths(
+        tmp_path, ["*.md"], policy=_COVERAGE, exclude=_exclude("absent/**/node_modules")
+    ) == (SelectedPath("a.md", ("*.md",)),)

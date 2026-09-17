@@ -31,10 +31,16 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   the loaded lattice or have exact-path exemptions with reasons. Coverage is independent of
   discovery and is checked after validated assembly on every load, before cache persistence.
   Uncovered paths, stale exemptions, invalid selected paths, empty selections, and traversable
-  symlinked directories refuse with `COVERAGE_ERROR` and exit 2. Explicit journal recovery stays
-  available; automatic recovery precedes the gate. [README.md](README.md#sidecar-coverage) owns
-  configuration, exemption semantics, and diagnostics. The shared selector walk preserves the
-  existing `links` behavior.
+  symlinked directories refuse with `COVERAGE_ERROR` and exit 2. Its optional `exclude` list
+  declares, with a reason each, the selectors whose matches are outside the covered corpus: an
+  excluded directory is pruned before the walk classifies it, so nothing beneath it is selected,
+  inspected, or refused, which is what makes a subtree carrying an interior symlinked directory
+  or an unreadable directory declarable rather than fatal. An exclusion that prunes nothing is
+  accepted; an exemption an exclusion prunes is refused at config load. Explicit journal recovery
+  stays available; automatic recovery precedes the gate.
+  [README.md](README.md#sidecar-coverage) owns configuration, exclusion and exemption semantics,
+  and diagnostics. The shared selector walk preserves the existing `links` behavior and prunes
+  nothing for it.
 
 - `sidecar_manifests` is now an ordinary optional configuration key. Every lattice load validates
   and enrolls its manifests, including files outside `docs_roots`, while manifest I/O remains in
