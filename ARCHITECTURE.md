@@ -390,9 +390,9 @@ while the analysis can be tested without network access.
 must not weaken default correctness or become part of the project state.
 **Decision:** A validated, safe `cache_key` opts into a cache slot under the user cache
 home, outside checkouts so worktrees can share it. By default, cache hits re-read and hash
-document bytes. `cache_trust_stat` explicitly permits read-only commands to trust unchanged
-size and modification time, accepting stale content or masked unreadability when both remain
-unchanged. Reconcile always verifies bytes. Cache contents are disposable, and cache write
+document bytes. `cache_trust_stat` explicitly permits read-only commands to trust an unchanged
+file identity, size, and modification time, accepting stale content or masked unreadability when
+all remain unchanged. Reconcile always verifies bytes. Cache contents are disposable, and cache write
 failure may report a diagnostic but cannot change command output or exit status.
 
 **Per-file facts amendment (GTX-769):** A Markdown entry stores the complete result its own
@@ -407,7 +407,11 @@ metadata into a `ParsedDoc`.
 Section spans remain body-relative for slicing and hashing; collision member lines are
 file-relative for diagnostics. A foreign-frontmatter edit can therefore change the raw-file
 fingerprint and refresh those diagnostic lines without changing any content hash. The existing
-stat tier's explicit unchanged-stat staleness allowance still applies. Enrollment, registration,
+stat tier's explicit unchanged-stat staleness allowance still applies, but only to the same file:
+each stat hint also records the device and inode it was read from, because a cache key names a
+path and a path can come to reach a different file of equal size and mtime. A retargeted symlink,
+discovered or registered, would otherwise serve the previous target's facts, including a stale
+inline classification that hides an ownership conflict. Enrollment, registration,
 manifest data, and rendered diagnostics never enter a Markdown entry, as AD-51 requires. The
 schema change raises `CACHE_VERSION` from 7 to 8; previous entries are discarded and recomputed,
 never filled with defaults that would hide missing facts.
@@ -3074,6 +3078,31 @@ enrollment changes, because an invalidation rule has to enumerate every way enro
 change, and missing one serves a warm run a stale node the cold run would not produce. A join
 recomputed on every load has no such list to get wrong, and the per-file and per-manifest
 entries it reads keep the warm path free of re-parsing.
+
+**Enrollment implementation (GTX-770).** The internal `load_sidecar_config` seam feeds the same
+orchestration as ordinary configuration. Each load rebuilds the registration index and joins
+resolved discovery candidates with registered targets before ownership can be hidden by alias
+deduplication. Cached and uncached loads share assembly and warning decisions; they differ only
+in how they obtain Markdown file facts and whether a successful load persists cache state.
+Registered files are read and stat-ed through their validated resolved targets, while declared
+spellings remain the node identities, cache keys, and parser diagnostic paths.
+The default command configuration loader continues to refuse `sidecar_manifests` until the
+user-facing enrollment work enables it.
+
+Assembly attaches a pure typed origin before the loader registers ids: the Markdown identity
+path and, for an external node, the declared manifest path, zero-based record index, and exact
+declared Markdown spelling. The graph retains that origin without importing the manifest I/O
+boundary. A record index locates a diagnostic in the current load; it is not the write-time
+identity proof reconcile will require. Origins never enter Markdown cache entries or hashes.
+
+Diagnostics involving external nodes name the Markdown and manifest record together. Human
+findings append origin details, and GitHub annotation messages include them while remaining
+attached to the Markdown path. JSON finding records carry an additional `origins` mapping keyed
+by the participating external node ids. Each value holds `markdown_path`, `manifest_path`,
+`record_index`, and `declared_path`; declared strings are preserved verbatim. Records with no
+external participants omit the mapping, preserving inline-only output. The same origin format
+serves drift, ambiguity, authority, impact, graph, and ticket findings.
+Broken section references retain the known file's origin even when the section does not exist.
 
 **Consequences:** AD-44's decline of a sidecar manifest no longer governs. Its envelope,
 auto-slug, hash, and `lattice_format` decisions are untouched. GTX-755, GTX-756, and GTX-757 each

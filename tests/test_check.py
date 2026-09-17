@@ -1,11 +1,17 @@
 """Tests for check."""
 
 from collections import Counter
+from dataclasses import replace
 from pathlib import Path
+
+import pytest
+from external_origin_helpers import _external_lattice
 
 from doc_lattice.check import (
     EdgeStatus,
+    ambiguity_annotation_message,
     ambiguous_edges,
+    ambiguous_json,
     check_lattice,
     has_drift,
     statuses_json,
@@ -15,7 +21,15 @@ from doc_lattice.config import load_config
 from doc_lattice.constants import EDGE_STATES
 from doc_lattice.hashing import content_hash
 from doc_lattice.loader import build_lattice
-from doc_lattice.model import Lattice, NodeMeta, ParsedDoc, RawEdge, TargetId
+from doc_lattice.model import (
+    DocumentOrigin,
+    ExternalDeclaration,
+    Lattice,
+    NodeMeta,
+    ParsedDoc,
+    RawEdge,
+    TargetId,
+)
 from doc_lattice.orchestrate import load_lattice
 from doc_lattice.resolve import cached_target_hash, target_content
 from doc_lattice.sections import build_toc, section_spans, section_text
@@ -447,3 +461,80 @@ def test_the_same_transient_collision_reads_stale_with_atx_parents():
 
     assert lattice.ancestor_context[TargetId("up", "setup")] == ("# Products", "## Product B")
     assert check_lattice(lattice)[0].state == "STALE"
+
+
+def test_external_origins_follow_both_endpoints_and_broken_source():
+    lattice = _external_lattice()
+    statuses = check_lattice(lattice)
+    payload = statuses_json(statuses, summarize_statuses(statuses))
+    origins = payload["edges"][0]["origins"]
+    assert list(origins) == ["down", "up"]
+    assert origins["up"] == {
+        "markdown_path": "docs/up.md",
+        "manifest_path": "meta/up.yml",
+        "record_index": 4,
+        "declared_path": "./docs/up.md",
+    }
+    assert list(payload["edges"][1]["origins"]) == ["down"]
+
+
+def test_broken_section_keeps_known_external_file_origin():
+    file_id = "external"
+    origin = DocumentOrigin(
+        Path("docs/up.md"), ExternalDeclaration("meta/up.yml", 4, "./docs/up.md")
+    )
+    lattice = build_lattice(
+        [
+            ParsedDoc(Path("docs/up.md"), NodeMeta(id=file_id), "# Notes\n", origin=origin),
+            ParsedDoc(
+                Path("docs/down.md"),
+                NodeMeta(
+                    id="down",
+                    derives_from=[
+                        RawEdge(ref=f"{file_id}#missing"),
+                        RawEdge(ref="unknown#missing"),
+                    ],
+                ),
+                "# Down\n",
+            ),
+        ]
+    )
+
+    statuses = check_lattice(lattice)
+    assert [status.state for status in statuses] == ["BROKEN", "BROKEN"]
+    assert all(status.target_id is None for status in statuses)
+    assert statuses[0].origins == {file_id: origin}
+    assert statuses[1].origins == {}
+
+
+def test_external_ambiguous_reports_keep_markdown_collision_location():
+    lattice = _external_lattice(ambiguous=True)
+    statuses = ambiguous_edges(lattice)
+    assert statuses == tuple(s for s in check_lattice(lattice) if s.state == "AMBIGUOUS")
+    row = ambiguous_json(statuses)[0]
+    assert list(row["origins"]) == ["down", "up"]
+    assert [member["line"] for member in row["collision"]] == [1, 3]
+    message = ambiguity_annotation_message(lattice, statuses[0])
+    assert "in 'docs/up.md'" in message
+    assert "record nodes[4]" in message
+    assert "meta/up.yml" in message
+
+
+@pytest.mark.parametrize("external_id", ["up", "down"])
+def test_mixed_endpoints_include_only_the_external_node(external_id):
+    lattice = _external_lattice()
+    inline_id = "down" if external_id == "up" else "up"
+    lattice = replace(
+        lattice,
+        nodes_by_id={
+            node_id: replace(node, origin=None) if node_id == inline_id else node
+            for node_id, node in lattice.nodes_by_id.items()
+        },
+    )
+    statuses = check_lattice(lattice)
+    rows = statuses_json(statuses, summarize_statuses(statuses))["edges"]
+    assert list(rows[0]["origins"]) == [external_id]
+    if external_id == "up":
+        assert "origins" not in rows[1]
+    else:
+        assert list(rows[1]["origins"]) == ["down"]

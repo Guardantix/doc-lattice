@@ -24,7 +24,7 @@ def _entry_for(text: str, stats: dict[str, StatRecord] | None = None) -> Entry:
     entry = make_entry(
         data,
         _parse_file_facts(text, Path("docs/a.md")),
-        types.SimpleNamespace(st_size=len(data), st_mtime_ns=0),  # ty: ignore[invalid-argument-type]
+        types.SimpleNamespace(st_dev=0, st_ino=0, st_size=len(data), st_mtime_ns=0),  # ty: ignore[invalid-argument-type]
         ROOT,
     )
     if stats is not None:
@@ -133,18 +133,14 @@ def test_verify_policy_disables_stat_tier(tmp_path: Path) -> None:
     assert isinstance(resolve(entry, path, VERIFY), CacheMiss)
 
 
-@pytest.mark.parametrize(("size_delta", "mtime_delta"), [(1, 0), (0, 1)])
-def test_trusting_stat_mismatch_falls_to_verify_hit(
-    tmp_path: Path, size_delta: int, mtime_delta: int
-) -> None:
+@pytest.mark.parametrize("field", ["device", "inode", "size", "mtime_ns"])
+def test_trusting_stat_mismatch_falls_to_verify_hit(tmp_path: Path, field: str) -> None:
     text = "# A\n"
     path = _write(tmp_path, text)
     st = path.stat()
+    stored = stat_record(st)
     entry = _entry_for(
-        text,
-        stats={
-            ROOT: StatRecord(size=st.st_size + size_delta, mtime_ns=st.st_mtime_ns + mtime_delta)
-        },
+        text, stats={ROOT: stored.model_copy(update={field: getattr(stored, field) + 1})}
     )
     result = resolve(entry, path, TRUSTING)
     assert isinstance(result, CacheHit)
@@ -154,7 +150,9 @@ def test_trusting_stat_mismatch_falls_to_verify_hit(
 def test_no_current_root_stat_falls_to_verify_hit(tmp_path: Path) -> None:
     text = "# A\n"
     path = _write(tmp_path, text)
-    entry = _entry_for(text, stats={"/abs/other": StatRecord(size=1, mtime_ns=1)})
+    entry = _entry_for(
+        text, stats={"/abs/other": StatRecord(device=1, inode=1, size=1, mtime_ns=1)}
+    )
     result = resolve(entry, path, TRUSTING)
     assert isinstance(result, CacheHit)
     assert result.refreshed_stat == stat_record(path.stat())
@@ -169,6 +167,8 @@ def test_verify_hit_uses_stat_captured_with_read(tmp_path: Path, monkeypatch) ->
     path = _write(tmp_path, NODE_TEXT)
     real_stat = path.stat()
     sentinel = types.SimpleNamespace(
+        st_dev=real_stat.st_dev + 1,
+        st_ino=real_stat.st_ino + 1,
         st_size=real_stat.st_size + 1000,
         st_mtime_ns=real_stat.st_mtime_ns + 999_999_999,
     )
@@ -177,13 +177,15 @@ def test_verify_hit_uses_stat_captured_with_read(tmp_path: Path, monkeypatch) ->
     )
     result = resolve(_entry_for(NODE_TEXT), path, VERIFY)
     assert isinstance(result, CacheHit)
-    assert result.refreshed_stat == StatRecord(size=sentinel.st_size, mtime_ns=sentinel.st_mtime_ns)
+    assert result.refreshed_stat == stat_record(sentinel)  # ty: ignore[invalid-argument-type]
 
 
 def test_miss_carries_stat_captured_with_read(tmp_path: Path, monkeypatch) -> None:
     path = _write(tmp_path, "new\n")
     real_stat = path.stat()
     sentinel = types.SimpleNamespace(
+        st_dev=real_stat.st_dev + 2,
+        st_ino=real_stat.st_ino + 2,
         st_size=real_stat.st_size + 2000,
         st_mtime_ns=real_stat.st_mtime_ns + 888_888_888,
     )

@@ -2,6 +2,8 @@
 
 import io
 import json
+from dataclasses import replace
+from io import StringIO
 from pathlib import Path
 
 from hypothesis import given
@@ -16,7 +18,7 @@ from doc_lattice.linear_render import (
     render_findings,
     render_safe,
 )
-from doc_lattice.model import CollisionMember, TargetId
+from doc_lattice.model import CollisionMember, DocumentOrigin, ExternalDeclaration, TargetId
 from doc_lattice.tickets import Finding, Ticket, TicketState
 
 
@@ -311,3 +313,24 @@ def test_render_findings_joins_multiple_drifted_refs():
     console = Console(file=output, width=200)
     render_findings(console, [finding])
     assert "a#b, c#d" in output.getvalue()
+
+
+def test_linear_external_origins_are_additive_and_human_locations_literal():
+
+    finding = Finding(
+        "BLOCKED", "down", None, Path("docs/down.md"), ("up",), "GTX-770", "not-found", None
+    )
+    finding = replace(
+        finding,
+        origins={
+            "down": DocumentOrigin(
+                finding.node_path, ExternalDeclaration("meta/[red]index.yml", 8, "./docs/down.md")
+            )
+        },
+    )
+    row = findings_json([finding])["findings"][0]
+    assert row["origins"]["down"]["record_index"] == 8
+    buffer = StringIO()
+    render_findings(Console(file=buffer, no_color=True), [finding])
+    assert "meta/[red]index.yml" in buffer.getvalue()
+    assert "record nodes[8]" in buffer.getvalue()

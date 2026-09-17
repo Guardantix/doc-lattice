@@ -1,6 +1,6 @@
 """Domain types for the lattice graph."""
 
-from collections.abc import Mapping
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Annotated
@@ -8,6 +8,7 @@ from typing import Annotated
 from pydantic import AfterValidator, BaseModel, ConfigDict, Field, field_validator
 
 from .constants import Authority, FrontmatterDisposition, Layer, LocationKind
+from .path_utils import format_path_for_display
 from .text_utils import first_control_index
 
 
@@ -258,6 +259,23 @@ class FileSections:
 
 
 @dataclass(frozen=True, slots=True)
+class ExternalDeclaration:
+    """The pure declared location of one external metadata record."""
+
+    manifest_path: str
+    record_index: int
+    declared_path: str
+
+
+@dataclass(frozen=True, slots=True)
+class DocumentOrigin:
+    """Markdown identity and its optional external metadata declaration."""
+
+    markdown_path: Path
+    declaration: ExternalDeclaration | None = None
+
+
+@dataclass(frozen=True, slots=True)
 class Node:
     """One tracked file assembled from its frontmatter and body."""
 
@@ -269,6 +287,7 @@ class Node:
     body: str
     derives_from: tuple[Edge, ...]
     tickets: tuple[str, ...]
+    origin: DocumentOrigin | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -334,6 +353,7 @@ class ParsedDoc:
     meta: NodeMeta
     body: str
     sections: "FileSections | None" = None
+    origin: DocumentOrigin | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -368,3 +388,128 @@ class Lattice:
     anchors_by_path: Mapping[Path, frozenset[TargetId]]
     collisions: Mapping[TargetId, tuple[CollisionMember, ...]] = field(default_factory=dict)
     ancestor_context: Mapping[TargetId, tuple[str, ...]] = field(default_factory=dict)
+
+
+def format_document_origin(origin: DocumentOrigin) -> str:
+    """Return the plain display path and optional manifest record declaration.
+
+    Args:
+        origin: Markdown identity and optional external declaration.
+
+    Returns:
+        Plain display text, ready for a sink to escape if necessary.
+    """
+    shown = format_path_for_display(origin.markdown_path)
+    declaration = origin.declaration
+    if declaration is None:
+        return shown
+    location = format_record_location(
+        declaration.manifest_path, declaration.record_index, declaration.declared_path
+    )
+    return f"{shown} ({location})"
+
+
+def format_record_location(manifest: str, position: int, declared_path: str | None) -> str:
+    """Spell a record's location: its manifest, its position, and its path when it has one.
+
+    Args:
+        manifest: The manifest's declared spelling.
+        position: The record's 0-based index in ``nodes``.
+        declared_path: The record's ``path`` string, or None when it carries no string path.
+
+    Returns:
+        A phrase such as ``record nodes[2] (path 'skills/a.md') in manifest 'sidecars.yml'``.
+    """
+    spelled = f"record nodes[{position}]"
+    if declared_path is not None:
+        spelled = f"{spelled} (path {format_path_for_display(declared_path)})"
+    return f"{spelled} in manifest {format_path_for_display(manifest)}"
+
+
+def origins_json(origins: Mapping[str, DocumentOrigin]) -> dict:
+    """Return an additive JSON fragment for external document participants.
+
+    Args:
+        origins: Participant ids and their pure origins.
+
+    Returns:
+        An origins object ordered by id, or an empty fragment without external participants.
+    """
+    values = {
+        node_id: {
+            "markdown_path": str(origin.markdown_path),
+            "manifest_path": origin.declaration.manifest_path,
+            "record_index": origin.declaration.record_index,
+            "declared_path": origin.declaration.declared_path,
+        }
+        for node_id, origin in sorted(origins.items())
+        if origin.declaration is not None
+    }
+    return {"origins": values} if values else {}
+
+
+def external_origins(lattice: Lattice, node_ids: Iterable[str]) -> dict[str, DocumentOrigin]:
+    """Select known external origins without resolving or reading any paths.
+
+    Args:
+        lattice: Graph holding the participants.
+        node_ids: Candidate participants, including possible duplicates and unknown ids.
+
+    Returns:
+        Known external participants once each, ordered by id.
+    """
+    origins: dict[str, DocumentOrigin] = {}
+    for node_id in sorted(set(node_ids)):
+        node = lattice.nodes_by_id.get(node_id)
+        if node is not None:
+            origins.update(node_origins(node))
+    return origins
+
+
+def node_origins(node: Node) -> dict[str, DocumentOrigin]:
+    """Select one node's origin when it is external.
+
+    Args:
+        node: The candidate participant.
+
+    Returns:
+        The node id mapped to its origin, or an empty mapping for an inline node.
+    """
+    origin = node.origin
+    if origin is None or origin.declaration is None:
+        return {}
+    return {node.id: origin}
+
+
+def edge_origins(lattice: Lattice, source_id: str, edge: Edge) -> dict[str, DocumentOrigin]:
+    """Select the external origins of an edge's source and target file.
+
+    The target file id comes from the parsed ref, so a broken edge still names a known file
+    whose section is missing.
+
+    Args:
+        lattice: Graph holding the participants.
+        source_id: The id of the node declaring the edge.
+        edge: The declared edge.
+
+    Returns:
+        Known external participants once each, ordered by id.
+    """
+    return external_origins(lattice, (source_id, parse_ref(edge.target_ref).file_id))
+
+
+def format_origins(origins: Mapping[str, DocumentOrigin]) -> str:
+    """Return an appendable plain-text suffix naming sorted participant origins.
+
+    Args:
+        origins: Participant ids and their pure origins.
+
+    Returns:
+        Empty text for no origins, otherwise a suffix ordered by participant id.
+    """
+    if not origins:
+        return ""
+    return "; origins: " + "; ".join(
+        f"{node_id!r}: {format_document_origin(origin)}"
+        for node_id, origin in sorted(origins.items())
+    )

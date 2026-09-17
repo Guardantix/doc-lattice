@@ -1,6 +1,7 @@
 """Shared fixtures and helpers for CLI integration tests."""
 
 import os
+from dataclasses import replace
 from io import StringIO
 from pathlib import Path
 
@@ -8,9 +9,18 @@ from rich.console import Console
 from typer.testing import CliRunner
 
 from doc_lattice.cli import app
-from doc_lattice.cli.runtime import CliRuntime
-from doc_lattice.config import ProjectConfig
-from doc_lattice.model import Lattice
+from doc_lattice.cli.application import create_app
+from doc_lattice.cli.runtime import CliRuntime, default_runtime
+from doc_lattice.config import Config, ProjectConfig
+from doc_lattice.loader import build_lattice
+from doc_lattice.model import (
+    DocumentOrigin,
+    ExternalDeclaration,
+    Lattice,
+    NodeMeta,
+    ParsedDoc,
+    RawEdge,
+)
 
 runner = CliRunner()
 
@@ -110,3 +120,38 @@ def _clean_docs(tmp_path: Path) -> None:
         "---\nid: down\nderives_from:\n  - ref: up#sec\n---\n# Down\nbody\n",
         encoding="utf-8",
     )
+
+
+def _external_reporting_app(root, *, authority=None, ambiguous=False):
+
+    project = ProjectConfig(Config(), root, (root,))
+    lattice = build_lattice(
+        [
+            ParsedDoc(
+                root / "up.md",
+                NodeMeta(id="up", authority="derived"),
+                "# Notes\n\n# Notes\n" if ambiguous else "# Notes\nbody\n",
+            ),
+            ParsedDoc(
+                root / "down.md",
+                NodeMeta(
+                    id="down",
+                    authority=authority,
+                    derives_from=[RawEdge(ref="up#notes"), RawEdge(ref="missing")],
+                ),
+                "body\n",
+                origin=DocumentOrigin(
+                    root / "down.md", ExternalDeclaration("meta/[red]index.yml", 6, "./down.md")
+                ),
+            ),
+        ]
+    )
+
+    def factory(*, no_color):
+        return replace(
+            default_runtime(no_color=no_color),
+            load_config=lambda _config, _cwd: project,
+            load_lattice=lambda _project, **_kwargs: lattice,
+        )
+
+    return create_app(runtime_factory=factory)

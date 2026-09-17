@@ -1,6 +1,7 @@
 """Tests for check, lint, and impact report rendering."""
 
 from collections import Counter
+from dataclasses import replace
 from io import StringIO
 from pathlib import Path
 from typing import get_args
@@ -10,7 +11,7 @@ from rich.console import Console
 from doc_lattice.check import EdgeStatus, summarize_statuses
 from doc_lattice.constants import EDGE_STATES, EdgeState
 from doc_lattice.lint import LadderViolation, LintResult, SkippedEdge
-from doc_lattice.model import CollisionMember, Node, TargetId
+from doc_lattice.model import CollisionMember, DocumentOrigin, ExternalDeclaration, Node, TargetId
 from doc_lattice.report_render import (
     _STATE_COLORS,
     _state_summary,
@@ -437,3 +438,30 @@ def test_rich_markup_in_a_heading_label_is_escaped_not_interpreted():
     render_statuses(console, [status], summarize_statuses([status]))
 
     assert "[bold]hi[/bold]" in stream.getvalue()
+
+
+def test_external_human_status_violation_skip_and_impact_show_literal_origins():
+
+    origin = DocumentOrigin(
+        Path("docs/[red]down.md"),
+        ExternalDeclaration("meta/[red]index.yml", 2, "./docs/[red]down.md"),
+    )
+    origins = {"down": origin}
+    buffer = StringIO()
+    console = Console(file=buffer, no_color=True)
+    status = EdgeStatus("down", "missing", None, "BROKEN", None, None, origins=origins)
+    render_statuses(console, [status], {"BROKEN": 1})
+    result = LintResult(
+        (LadderViolation("down", "binding", TargetId("up"), "up", "derived", origins=origins),),
+        (SkippedEdge("down", "up", TargetId("up"), "source-unannotated", origins=origins),),
+    )
+    render_lint(console, result)
+    node = Node("down", None, None, None, origin.markdown_path, "body", (), ())
+    render_impact(console, [(replace(node, origin=origin), 1)])
+    lines = [line for line in buffer.getvalue().splitlines() if "origins:" in line]
+    assert len(lines) == 4
+    for line in lines:
+        assert "meta/[red]index.yml" in line
+        assert "record nodes[2]" in line
+        assert "docs/[red]down.md" in line
+    assert any("SKIPPED" in line and "source-unannotated" in line for line in lines)

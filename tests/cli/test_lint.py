@@ -7,7 +7,7 @@ from doc_lattice.cli import app
 from doc_lattice.cli.github import escape_github_property
 from doc_lattice.path_utils import format_path_for_display
 
-from .helpers import runner
+from .helpers import _external_reporting_app, runner
 
 
 def _write_lint_docs(root: Path) -> None:
@@ -296,3 +296,14 @@ def test_lint_github_annotates_a_violation_and_an_ambiguity_at_their_own_severit
     assert result.stdout.startswith("::error file=docs/down.md,title=doc-lattice ladder violation")
     assert "\n::warning file=docs/down.md,title=doc-lattice AMBIGUOUS::" in result.stdout
     assert result.exit_code == 1
+
+
+def test_external_unranked_github_annotation_attaches_to_markdown(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    result = runner.invoke(_external_reporting_app(tmp_path), ["lint", "--format", "github"])
+    assert result.exit_code == 0, (result.stdout, result.stderr, result.exception)
+    assert "::warning file=down.md," in result.stdout
+    assert "source-unannotated" in result.stdout
+    assert "meta/[red]index.yml" in result.stdout
+    assert "record nodes[6]" in result.stdout
+    assert "file=meta/" not in result.stdout

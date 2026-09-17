@@ -12,6 +12,7 @@ from .markdown_compat import (
 )
 from .model import (
     CollisionMember,
+    DocumentOrigin,
     Edge,
     FileSections,
     Lattice,
@@ -20,9 +21,9 @@ from .model import (
     ParsedDoc,
     SectionRecord,
     TargetId,
+    format_document_origin,
     parse_ref,
 )
-from .path_utils import format_path_for_display
 from .sections import ancestor_chains, build_toc, section_spans, split_body_lines
 from .text_utils import safe_heading_label
 
@@ -201,7 +202,10 @@ def build_lattice(docs: list[ParsedDoc]) -> Lattice:
     collisions: dict[TargetId, tuple[CollisionMember, ...]] = {}
     ancestor_context: dict[TargetId, tuple[str, ...]] = {}
 
+    origins: dict[str, DocumentOrigin] = {}
     for doc in docs:
+        origin = doc.origin or DocumentOrigin(doc.path)
+        shown = format_document_origin(origin)
         file_id = doc.meta.id
         file_sections = doc.sections if doc.sections is not None else derive_file_sections(doc.body)
         total_lines = file_sections.total_lines
@@ -210,8 +214,9 @@ def build_lattice(docs: list[ParsedDoc]) -> Lattice:
             Location(path=doc.path, kind="file", span=(1, total_lines)),
             index,
             sources,
-            f"file {format_path_for_display(doc.path)}",
+            f"file {shown}",
         )
+        origins[file_id] = origin
         anchored: list[TargetId] = []
         spans: dict[TargetId, tuple[int, int]] = {}
         for record in file_sections.sections:
@@ -228,7 +233,7 @@ def build_lattice(docs: list[ParsedDoc]) -> Lattice:
                 Location(path=doc.path, kind="section", span=span),
                 index,
                 sources,
-                f"anchor {tid.as_ref()!r} in {format_path_for_display(doc.path)}",
+                f"anchor {tid.as_ref()!r} in {shown}",
             )
         _record_ancestors(anchored, spans, ancestors)
 
@@ -248,6 +253,7 @@ def build_lattice(docs: list[ParsedDoc]) -> Lattice:
             body=doc.body,
             derives_from=tuple(edges),
             tickets=tuple(doc.meta.tickets),
+            origin=origins[doc.meta.id],
         )
 
     file_id_by_path = {node.path: node_id for node_id, node in nodes.items()}
@@ -288,9 +294,14 @@ def _resolve_edges(doc: ParsedDoc, index: dict[TargetId, Location]) -> list[Edge
     for raw in doc.meta.derives_from:
         target_id = parse_ref(raw.ref)
         if target_id in deduped:
+            origin_suffix = (
+                f"; declared at {format_document_origin(doc.origin)}"
+                if doc.origin is not None and doc.origin.declaration is not None
+                else ""
+            )
             warnings.warn(
                 f"node {doc.meta.id!r} derives from {target_id.as_ref()!r} more than once;"
-                " keeping the last occurrence",
+                f" keeping the last occurrence{origin_suffix}",
                 stacklevel=2,
             )
         deduped[target_id] = Edge.resolve(raw.ref, raw.seen, index)

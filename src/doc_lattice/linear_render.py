@@ -7,6 +7,7 @@ from rich.markup import escape
 
 from .check import EdgeStatus, ambiguous_json
 from .constants import Severity
+from .model import format_origins, origins_json
 from .report_render import render_ambiguous
 from .text_utils import strip_control_chars
 from .tickets import Finding
@@ -53,6 +54,7 @@ def findings_json(findings: Sequence[Finding], ambiguous: Sequence[EdgeStatus] =
     return {
         "findings": [
             {
+                **origins_json(finding.origins),
                 "severity": finding.severity,
                 "node_id": finding.node_id,
                 "node_title": finding.node_title,
@@ -106,7 +108,8 @@ def render_findings(
             detail = render_safe(f"{finding.ticket_ref} ({finding.reason})")
         console.print(
             f"[{color}]{finding.severity:<{_SEVERITY_COLUMN_WIDTH}}[/{color}] "
-            f"{render_safe(finding.node_id)}  {detail}  drift: {refs}",
+            f"{render_safe(finding.node_id)}  {detail}  drift: {refs}"
+            f"{render_safe(format_origins(finding.origins))}",
             highlight=False,
             soft_wrap=True,
         )

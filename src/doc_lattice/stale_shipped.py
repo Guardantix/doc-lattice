@@ -5,7 +5,7 @@ from collections.abc import Mapping
 from .check import check_lattice
 from .constants import BlockedReason, Severity
 from .impact import expand_targets, impact
-from .model import Lattice, TargetId
+from .model import Lattice, TargetId, external_origins
 from .tickets import Finding, Ticket
 
 # The three Linear state types absent here (triage, canceled, duplicate) carry no
@@ -118,6 +118,13 @@ def stale_shipped(
     findings: list[Finding] = []
     for node_id, drifted_refs in trigger.items():
         node = lattice.nodes_by_id[node_id]
+        participants = [node_id]
+        participants.extend(
+            edge.target_id.file_id
+            for edge in node.derives_from
+            if edge.target_ref in drifted_refs and edge.target_id is not None
+        )
+        origins = external_origins(lattice, participants)
         for ref in dict.fromkeys(node.tickets):
             ticket = tickets.get(ref)
             severity: Severity
@@ -141,6 +148,7 @@ def stale_shipped(
                     ticket_ref=ref,
                     reason=reason,
                     ticket=ticket,
+                    origins=origins,
                 )
             )
     findings.sort(key=lambda f: (_SEVERITY_RANK[f.severity], f.node_id, f.ticket_ref))

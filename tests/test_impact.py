@@ -1,5 +1,6 @@
 """Tests for impact."""
 
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -8,7 +9,15 @@ from doc_lattice.check import ambiguous_edges
 from doc_lattice.error_types import ValidationError
 from doc_lattice.impact import expand_targets, impact, impact_json
 from doc_lattice.loader import build_lattice
-from doc_lattice.model import NodeMeta, ParsedDoc, RawEdge, TargetId
+from doc_lattice.model import (
+    DocumentOrigin,
+    ExternalDeclaration,
+    Node,
+    NodeMeta,
+    ParsedDoc,
+    RawEdge,
+    TargetId,
+)
 
 
 def _doc(path: str, body: str, **meta) -> ParsedDoc:
@@ -317,3 +326,22 @@ def test_impact_json_reports_an_empty_ambiguous_block_by_default():
     )
 
     assert impact_json(impact(lattice, "a"))["ambiguous"] == []
+
+
+def test_impact_json_keeps_external_declaration_on_affected_node():
+
+    node = Node("down", None, None, None, Path("docs/down.md"), "body", (), ())
+    node = replace(
+        node,
+        origin=DocumentOrigin(
+            node.path, ExternalDeclaration("meta/moved.yml", 7, "./docs/down.md")
+        ),
+    )
+    row = impact_json([(node, 1)])["affected"][0]
+    assert row["path"] == "docs/down.md"
+    assert row["origins"]["down"] == {
+        "markdown_path": "docs/down.md",
+        "manifest_path": "meta/moved.yml",
+        "record_index": 7,
+        "declared_path": "./docs/down.md",
+    }

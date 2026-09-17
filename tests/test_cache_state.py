@@ -11,7 +11,7 @@ ROOT = "/abs/current-root"
 def _entry(*roots: str) -> Entry:
     return Entry(
         file_sha256="a" * 64,
-        stats={root: StatRecord(size=1, mtime_ns=1) for root in roots},
+        stats={root: StatRecord(device=1, inode=1, size=1, mtime_ns=1) for root in roots},
         payload=FilePayload(
             meta=None,
             body="",
@@ -72,13 +72,13 @@ def test_claim_with_refreshed_stat_updates_current_root_only() -> None:
     other_root = "/abs/other-root"
     cached_entry = _entry(other_root)
     state = RunState.begin(_snapshot({"a.md": cached_entry}, [other_root]), ROOT)
-    refreshed = StatRecord(size=7, mtime_ns=9)
+    refreshed = StatRecord(device=1, inode=1, size=7, mtime_ns=9)
 
     state.claim("a.md", refreshed)
     completed = state.complete()
 
     assert completed.entries["a.md"].stats == {
-        other_root: StatRecord(size=1, mtime_ns=1),
+        other_root: StatRecord(device=1, inode=1, size=1, mtime_ns=1),
         ROOT: refreshed,
     }
 
@@ -119,7 +119,9 @@ def test_undiscovered_shared_entry_loses_only_current_root_claim() -> None:
 
     completed = state.complete()
 
-    assert completed.entries["shared.md"].stats == {other_root: StatRecord(size=1, mtime_ns=1)}
+    assert completed.entries["shared.md"].stats == {
+        other_root: StatRecord(device=1, inode=1, size=1, mtime_ns=1)
+    }
 
 
 def test_complete_evicts_oldest_root_and_scrubs_entry_claim() -> None:

@@ -11,18 +11,30 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - Internal: the Markdown load cache retains complete file facts for id-less and untracked
   documents, including their body after any recognized fence, body line offset, and sections.
   Cold parses and both cache-hit tiers now return the same facts for later enrollment, while
-  inline-only output and content hashes remain unchanged. Cache version 7 entries are discarded
-  and rebuilt as version 8. [AD-12](ARCHITECTURE.md#ad-12-the-load-cache-is-a-disposable-opt-in-accelerator)
-  records the per-file facts contract; registration joins remain separate work.
+  inline-only output and content hashes remain unchanged. The `cache_trust_stat` tier now also
+  requires an unchanged device and inode, so a retargeted symlink whose new target matches the
+  old one's size and modification time is re-read rather than served stale. Cache version 7
+  entries are discarded and rebuilt as version 8. [AD-12](ARCHITECTURE.md#ad-12-the-load-cache-is-a-disposable-opt-in-accelerator)
+  records the per-file facts contract; registration is rebuilt separately on each load.
 
 ### Added
 
 - Internal: the engine can validate the sidecar manifests ARCHITECTURE.md's AD-51 specifies into
   a typed registration index, refusing a malformed or unusable manifest or record, any YAML
-  anchor, alias, or merge key, and two records claiming one Markdown file. Nothing is loaded as a
-  node yet, and every released command still refuses the `sidecar_manifests` key as unknown. The
+  anchor, alias, or merge key, and two records claiming one Markdown file. The
   two error codes this reserves, `MANIFEST_ERROR` and `REGISTRATION_CONFLICT`, are listed in
   [README.md](README.md#error-codes) and cannot be raised by any command yet.
+
+- Internal: registered Markdown files now become lattice nodes through the sidecar configuration
+  seam, including outside discovery roots and on cache hits. Each load rechecks ownership,
+  reads the resolved target, and retains the registration's declared identity even when its
+  spelling contains collapsible path segments. Foreign
+  frontmatter stays outside content hashes, accepted registrations suppress the id-less warning,
+  and external-node diagnostics carry Markdown and manifest-record origins, including broken
+  references to a missing section in a known external file. The default command
+  configuration loader still refuses `sidecar_manifests`; user-facing enrollment remains
+  separate work. [AD-51](ARCHITECTURE.md#ad-51-a-document-another-tool-owns-is-enrolled-by-a-sidecar-manifest-and-its-metadata-never-enters-the-file)
+  records the enrollment and origin contracts.
 
 ## [7.3.0] - 2026-09-13
 

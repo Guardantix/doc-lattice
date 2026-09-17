@@ -5,7 +5,7 @@ from collections.abc import Sequence
 
 from .check import EdgeStatus, ambiguous_json
 from .error_types import ValidationError
-from .model import Lattice, Node, TargetId, parse_ref
+from .model import Lattice, Node, TargetId, node_origins, origins_json, parse_ref
 
 
 def impact_json(affected: list[tuple[Node, int]], ambiguous: Sequence[EdgeStatus] = ()) -> dict:
@@ -29,6 +29,7 @@ def impact_json(affected: list[tuple[Node, int]], ambiguous: Sequence[EdgeStatus
                 "path": str(node.path),
                 "tickets": list(node.tickets),
                 "depth": node_depth,
+                **origins_json(node_origins(node)),
             }
             for node, node_depth in affected
         ],

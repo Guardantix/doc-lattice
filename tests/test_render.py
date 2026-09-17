@@ -1,10 +1,21 @@
 """Tests for graph rendering."""
 
 import json
+from dataclasses import replace
 from pathlib import Path
 
+from external_origin_helpers import _external_lattice
+
 from doc_lattice.loader import build_lattice
-from doc_lattice.model import Lattice, NodeMeta, ParsedDoc, RawEdge, TargetId
+from doc_lattice.model import (
+    DocumentOrigin,
+    ExternalDeclaration,
+    Lattice,
+    NodeMeta,
+    ParsedDoc,
+    RawEdge,
+    TargetId,
+)
 from doc_lattice.render import to_dot, to_json, to_mermaid
 
 
@@ -350,3 +361,47 @@ def test_identical_components_in_different_files_each_keep_their_row():
     assert '// ambiguous zzz#notes: "Notes" (line 1), "Notes" (line 3)' in dot
     assert '%% ambiguous up#notes: "Notes" (line 1), "Notes" (line 3)' in mermaid
     assert '%% ambiguous zzz#notes: "Notes" (line 1), "Notes" (line 3)' in mermaid
+
+
+def test_graph_external_origins_include_nodes_edges_and_collision_comments():
+    lattice = _external_lattice(ambiguous=True)
+    payload = to_json(lattice, set())
+    assert list(payload["nodes"][0]["origins"]) == ["down"]
+    assert list(payload["edges"][0]["origins"]) == ["down", "up"]
+    assert list(payload["ambiguous_targets"][0]["origins"]) == ["up"]
+    for rendered in (to_dot(lattice, set()), to_mermaid(lattice, set())):
+        comment = next(line for line in rendered.splitlines() if "ambiguous up#" in line)
+        assert "meta/up.yml" in comment
+        assert "record nodes[4]" in comment
+
+
+def test_external_comment_paths_cannot_inject_graph_statements_or_controls():
+    lattice = _external_lattice(ambiguous=True)
+    origin = DocumentOrigin(
+        Path("docs/up.md"),
+        ExternalDeclaration(
+            'meta/evil\n"; injected -> node; //\x1b[red]\u0085.yml',
+            0,
+            "./docs/up.md\r\n%%{init: {}}",
+        ),
+    )
+    lattice = replace(
+        lattice,
+        nodes_by_id={
+            **lattice.nodes_by_id,
+            "up": replace(lattice.nodes_by_id["up"], origin=origin),
+        },
+    )
+    for renderer in (to_dot, to_mermaid):
+        rendered = renderer(lattice, set())
+        assert "\x1b" not in rendered
+        assert "\u0085" not in rendered
+        assert "\r" not in rendered
+        assert len([line for line in rendered.splitlines() if "injected" in line]) == 1
+        comment = next(line for line in rendered.splitlines() if "injected" in line)
+        assert comment.lstrip().startswith(("// ambiguous", "%% ambiguous"))
+        assert "\\n" in comment
+    raw = to_json(lattice, set())["ambiguous_targets"][0]["origins"]["up"]
+    assert origin.declaration is not None
+    assert raw["manifest_path"] == origin.declaration.manifest_path
+    assert raw["declared_path"] == origin.declaration.declared_path

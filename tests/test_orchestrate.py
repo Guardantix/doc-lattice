@@ -12,8 +12,14 @@ from doc_lattice import loader, orchestrate
 from doc_lattice.cache import CacheHit, CacheMiss, LookupPolicy, cache_path, lookup, store
 from doc_lattice.cache.schema import Entry, reconstruct_facts
 from doc_lattice.check import check_lattice, statuses_json, summarize_statuses
-from doc_lattice.config import load_config
-from doc_lattice.error_types import DuplicateIdError, FrontmatterError, UnreadableDocError
+from doc_lattice.config import SidecarProjectConfig, load_config, load_sidecar_config
+from doc_lattice.error_types import (
+    DuplicateIdError,
+    FrontmatterError,
+    ManifestError,
+    RegistrationConflictError,
+    UnreadableDocError,
+)
 from doc_lattice.model import FileFacts, NodeMeta, ParsedDoc, TargetId
 from doc_lattice.orchestrate import load_lattice
 from doc_lattice.resolve import cached_target_hash
@@ -803,3 +809,487 @@ def test_the_shadowed_and_misplaced_warnings_are_separately_filterable():
     first, second = (str(entry.message) for entry in captured)
     assert first.startswith("misplaced ")
     assert second.startswith("shadowed ")
+
+
+def _sidecar_project(tmp_path, *, cache=False, trust_stat=False, manifests=("nodes.yml",)):
+    """Write sidecar config while leaving documents and manifests to the caller."""
+
+    config = "lattice_format: 2\nsidecar_manifests:\n"
+    config += "".join(f"  - {name}\n" for name in manifests)
+    if cache:
+        config += f"cache_key: testslot\ncache_trust_stat: {str(trust_stat).lower()}\n"
+    (tmp_path / ".doc-lattice.yml").write_text(config, encoding="utf-8")
+    return load_sidecar_config(None, tmp_path)
+
+
+def _manifest(tmp_path, records, name="nodes.yml"):
+    """Write literal record metadata using JSON, which is also valid YAML."""
+    (tmp_path / name).write_text(json.dumps({"nodes": records}), encoding="utf-8")
+
+
+@pytest.mark.parametrize("cache_policy", [None, False, True], ids=["uncached", "verify", "stat"])
+@pytest.mark.parametrize("component_is_file", [False, True], ids=["missing", "not-directory"])
+def test_external_collapsible_path_reads_target_and_retains_identity(
+    tmp_path, monkeypatch, cache_policy, component_is_file
+):
+    monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path / "cache"))
+    if component_is_file:
+        (tmp_path / "component").write_text("not a directory\n")
+    target = tmp_path / "doc.md"
+    target.write_text("# Body\n")
+    declared = "component/../doc.md"
+    identity = tmp_path / declared
+    _manifest(tmp_path, [{"path": declared, "meta": {"id": "external"}}])
+    project = _sidecar_project(
+        tmp_path, cache=cache_policy is not None, trust_stat=cache_policy is True
+    )
+
+    for require_verified in (False, False, True):
+        lattice = load_lattice(project, require_verified=require_verified)
+        node = lattice.nodes_by_id["external"]
+        assert node.path == identity
+        assert lattice.index[TargetId("external", "body")].path == identity
+        assert node.body == "# Body\n"
+        assert node.origin is not None
+        assert node.origin.markdown_path == identity
+        assert node.origin.declaration is not None
+        assert node.origin.declaration.declared_path == declared
+    if cache_policy is not None:
+        snapshot = store.load(cache_path("testslot", os.environ))
+        assert snapshot.cache is not None
+        assert set(snapshot.cache.entries) == {declared}
+
+    target.write_text("---\nderives_from: []\n---\n")
+    with pytest.raises(FrontmatterError) as caught:
+        load_lattice(project)
+    assert caught.value.source == identity
+    assert "nodes[0]" in "; ".join(caught.value.__notes__)
+
+
+@pytest.mark.parametrize("cache", [False, True])
+@pytest.mark.parametrize(
+    "prefix",
+    [
+        "",
+        "---\nname: skill\ndescription: foreign\n---\n",
+        "---\n---\n",
+        "---\nscalar\n---\n",
+        "---\n- item\n---\n",
+        "\ufeff---\nname: skill\n---\n",
+        "---\r\nname: skill\r\n---\r\n",
+        "---\rname: skill\r---\r",
+    ],
+)
+def test_external_enrollment_preserves_file_and_consumes_foreign_envelope(
+    tmp_path, monkeypatch, cache, prefix
+):
+    monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path / "cache"))
+    path = tmp_path / "skill.md"
+    data = (prefix + "# Skill\n\n## Detail {#detail}\n").encode()
+    path.write_bytes(data)
+    _manifest(tmp_path, [{"path": "./skill.md", "meta": {"id": "skill"}}])
+    project = _sidecar_project(tmp_path, cache=cache)
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        lattice = load_lattice(project)
+    node = lattice.nodes_by_id["skill"]
+    assert node.path == tmp_path / "skill.md"
+    assert node.body == "# Skill\n\n## Detail {#detail}\n"
+    assert node.origin is not None
+    assert node.origin.declaration is not None
+    assert node.origin.markdown_path == path
+    assert node.origin.declaration.manifest_path == "nodes.yml"
+    assert node.origin.declaration.record_index == 0
+    assert node.origin.declaration.declared_path == "./skill.md"
+    assert TargetId("skill", "detail") in lattice.index
+    assert path.read_bytes() == data
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        "---\nid: inline\n---\n# Body\n",
+        "# Body\n<!-- doc-lattice\nid: inline\n-->\n",
+        "---\nname: skill\n---\n<!-- doc-lattice\nid: inline\n-->\n",
+    ],
+)
+def test_external_enrollment_refuses_other_ownership(tmp_path, text):
+
+    (tmp_path / "skill.md").write_text(text)
+    _manifest(tmp_path, [{"path": "skill.md", "meta": {"id": "skill"}}])
+    with pytest.raises(RegistrationConflictError, match=r"nodes\[0\]"):
+        load_lattice(_sidecar_project(tmp_path))
+
+
+@pytest.mark.parametrize(
+    ("text", "error"),
+    [
+        ("---\nname: skill\n", UnreadableDocError),
+        ("---\nname: [\n---\n", UnreadableDocError),
+        ("---\nderives_from: []\n---\n", FrontmatterError),
+        ("---\nid: inline\nname: skill\n---\n", FrontmatterError),
+        ("\ufeff<!-- doc-lattice\nid: inline\n-->\n", FrontmatterError),
+    ],
+)
+def test_external_parser_errors_preserve_document_source_with_record_note(tmp_path, text, error):
+    path = tmp_path / "skill.md"
+    path.write_text(text)
+    _manifest(tmp_path, [{"path": "skill.md", "meta": {"id": "skill"}}])
+    with pytest.raises(error) as caught:
+        load_lattice(_sidecar_project(tmp_path))
+    assert caught.value.source == path
+    assert "nodes[0]" in "; ".join(caught.value.__notes__)
+    assert "nodes.yml" in "; ".join(caught.value.__notes__)
+
+
+@pytest.mark.parametrize("trust_stat", [False, True])
+def test_external_warm_hits_rejoin_manifest_metadata_and_origins(tmp_path, monkeypatch, trust_stat):
+    monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path / "cache"))
+    (tmp_path / "skill.md").write_text("---\nname: foreign\n---\n# Body\n")
+    record = {"path": "skill.md", "meta": {"id": "external", "title": "Before"}}
+    _manifest(tmp_path, [record])
+    project = _sidecar_project(tmp_path, cache=True, trust_stat=trust_stat)
+    initial = load_lattice(project)
+    initial_hash = cached_target_hash(initial, TargetId("external"), {})
+
+    def forbidden(*_args, **_kwargs):
+        pytest.fail("warm facts must be reused without parsing or section derivation")
+
+    monkeypatch.setattr(orchestrate, "parse_document", forbidden)
+    monkeypatch.setattr(orchestrate, "derive_file_sections", forbidden)
+    monkeypatch.setattr(loader, "derive_file_sections", forbidden)
+    assert load_lattice(project) == initial
+    record["meta"]["title"] = "After"
+    _manifest(tmp_path, [record])
+    refreshed = load_lattice(project)
+    assert refreshed.nodes_by_id["external"].title == "After"
+    assert cached_target_hash(refreshed, TargetId("external"), {}) == initial_hash
+    _manifest(tmp_path, [record], "moved.yml")
+    moved_project = _sidecar_project(
+        tmp_path, cache=True, trust_stat=trust_stat, manifests=("./moved.yml",)
+    )
+    moved = load_lattice(moved_project)
+    moved_origin = moved.nodes_by_id["external"].origin
+    assert moved_origin is not None
+    assert moved_origin.declaration is not None
+    assert moved_origin.declaration.manifest_path == "./moved.yml"
+    assert cached_target_hash(moved, TargetId("external"), {}) == initial_hash
+
+
+@pytest.mark.parametrize("trust_stat", [False, True])
+def test_external_warm_content_and_foreign_metadata_refresh(tmp_path, monkeypatch, trust_stat):
+    monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path / "cache"))
+    path = tmp_path / "skill.md"
+    path.write_text("---\nname: foreign\n---\n# A\n# A\n")
+    _manifest(tmp_path, [{"path": "skill.md", "meta": {"id": "external"}}])
+    project = _sidecar_project(tmp_path, cache=True, trust_stat=trust_stat)
+    first = load_lattice(project)
+    hash_ = cached_target_hash(first, TargetId("external"), {})
+    path.write_text("---\nname: changed\ndescription: extra\n---\n# A\n# A\n")
+    second = load_lattice(project)
+    assert cached_target_hash(second, TargetId("external"), {}) == hash_
+    assert [member.line for member in second.collisions[TargetId("external", "a")]] == [5, 6]
+    path.write_text("---\nname: changed\n---\n# Different content\n")
+    third = load_lattice(project)
+    assert cached_target_hash(third, TargetId("external"), {}) != hash_
+
+
+@pytest.mark.parametrize("trust_stat", [False, True])
+def test_external_warm_enrollment_removal_restores_skip_warning(tmp_path, monkeypatch, trust_stat):
+
+    monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path / "cache"))
+    docs = tmp_path / "docs"
+    docs.mkdir()
+    path = docs / "skill.md"
+    path.write_text("---\nname: skill\n---\n# Body\n")
+    _manifest(tmp_path, [{"path": "docs/skill.md", "meta": {"id": "external"}}])
+    enrolled = _sidecar_project(tmp_path, cache=True, trust_stat=trust_stat)
+    removed = SidecarProjectConfig(enrolled.project, ())
+    with pytest.warns(UserWarning, match="declares no"):
+        assert load_lattice(removed).nodes_by_id == {}
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        assert set(load_lattice(enrolled).nodes_by_id) == {"external"}
+    with pytest.warns(UserWarning, match="declares no"):
+        assert load_lattice(removed).nodes_by_id == {}
+
+
+@pytest.mark.parametrize("trust_stat", [False, True])
+@pytest.mark.parametrize("transition", ["owner", "inline", "retarget", "delete"])
+def test_external_warm_ownership_checks_run_again(tmp_path, monkeypatch, trust_stat, transition):
+
+    monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path / "cache"))
+    a = tmp_path / "a.md"
+    b = tmp_path / "b.md"
+    a.write_text("# Identical\n")
+    b.write_text("# Identical\n")
+    alias = tmp_path / "alias.md"
+    alias.symlink_to(a)
+    records = [
+        {"path": "alias.md", "meta": {"id": "a"}},
+        {"path": "b.md", "meta": {"id": "b"}},
+    ]
+    _manifest(tmp_path, records)
+    project = _sidecar_project(tmp_path, cache=True, trust_stat=trust_stat)
+    load_lattice(project)
+    saved = cache_path("testslot", os.environ).read_bytes()
+    if transition == "owner":
+        records.append({"path": "a.md", "meta": {"id": "second-owner"}})
+        _manifest(tmp_path, records)
+    elif transition == "inline":
+        a.write_text("---\nid: inline\n---\n# Identical\n")
+    elif transition == "retarget":
+        alias.unlink()
+        alias.symlink_to(b)
+    else:
+        (tmp_path / "nodes.yml").unlink()
+    error = ManifestError if transition == "delete" else RegistrationConflictError
+    with pytest.raises(error):
+        load_lattice(project)
+    assert cache_path("testslot", os.environ).read_bytes() == saved
+
+
+def test_registered_spelling_wins_over_earlier_alias_and_ignore_globs(tmp_path):
+
+    docs = tmp_path / "docs"
+    docs.mkdir()
+    original = docs / "z.md"
+    original.write_text("# Body\n")
+    alias = docs / "a.md"
+    alias.symlink_to(original)
+    _manifest(tmp_path, [{"path": "./docs/z.md", "meta": {"id": "external"}}])
+    project = _sidecar_project(tmp_path)
+    assert load_lattice(project).nodes_by_id["external"].path == original
+    ignored = SidecarProjectConfig(
+        replace(
+            project.project,
+            config=project.project.config.model_copy(update={"ignore_globs": ["*.md"]}),
+        ),
+        project.sidecar_manifests,
+    )
+    assert load_lattice(ignored).nodes_by_id["external"].path == original
+
+
+def test_external_and_inline_references_resolve_in_both_directions(tmp_path):
+    docs = tmp_path / "docs"
+    docs.mkdir()
+    (docs / "inline.md").write_text(
+        "---\nid: inline\nderives_from:\n  - ref: external#detail\n---\n# Inner {#inner}\n"
+    )
+    (tmp_path / "external.md").write_text("# Detail {#detail}\n")
+    _manifest(
+        tmp_path,
+        [
+            {
+                "path": "external.md",
+                "meta": {
+                    "id": "external",
+                    "derives_from": [{"ref": "inline#inner"}],
+                },
+            }
+        ],
+    )
+    lattice = load_lattice(_sidecar_project(tmp_path))
+    assert lattice.nodes_by_id["inline"].derives_from[0].target_id == TargetId("external", "detail")
+    assert lattice.nodes_by_id["external"].derives_from[0].target_id == TargetId("inline", "inner")
+
+
+@pytest.mark.parametrize("other_external", [False, True])
+def test_external_duplicate_ids_name_markdown_and_manifest(tmp_path, other_external):
+    docs = tmp_path / "docs"
+    docs.mkdir()
+    (tmp_path / "external.md").write_text("# Body\n")
+    records = [{"path": "external.md", "meta": {"id": "duplicate"}}]
+    if other_external:
+        (docs / "second.md").write_text("# Other\n")
+        records.append({"path": "docs/second.md", "meta": {"id": "duplicate"}})
+    else:
+        (docs / "second.md").write_text("---\nid: duplicate\n---\n# Other\n")
+    _manifest(tmp_path, records)
+    with pytest.raises(DuplicateIdError) as caught:
+        load_lattice(_sidecar_project(tmp_path))
+    for text in ["external.md", "second.md", "nodes.yml", "nodes[0]"]:
+        assert text in str(caught.value)
+    if other_external:
+        assert "nodes[1]" in str(caught.value)
+
+
+def test_external_duplicate_explicit_anchors_name_manifest(tmp_path):
+    (tmp_path / "external.md").write_text("# A {#repeat}\n# B {#repeat}\n")
+    _manifest(tmp_path, [{"path": "external.md", "meta": {"id": "external"}}])
+    with pytest.raises(DuplicateIdError, match=r"nodes\[0\]"):
+        load_lattice(_sidecar_project(tmp_path))
+
+
+def test_external_duplicate_edge_warning_names_manifest(tmp_path):
+    (tmp_path / "external.md").write_text("# Body\n")
+    _manifest(
+        tmp_path,
+        [
+            {
+                "path": "external.md",
+                "meta": {
+                    "id": "external",
+                    "derives_from": [{"ref": "unknown"}, {"ref": "unknown"}],
+                },
+            }
+        ],
+    )
+    with pytest.warns(UserWarning, match=r"nodes\[0\]"):
+        lattice = load_lattice(_sidecar_project(tmp_path))
+    assert len(lattice.nodes_by_id["external"].derives_from) == 1
+
+
+@pytest.mark.parametrize("cache", [False, True])
+@pytest.mark.parametrize("declared_path", ["external.md", "absent/../external.md"])
+def test_external_decode_error_preserves_source_and_record_note(
+    tmp_path, monkeypatch, cache, declared_path
+):
+    monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path / "cache"))
+    path = tmp_path / "external.md"
+    path.write_bytes(b"\xff")
+    _manifest(tmp_path, [{"path": declared_path, "meta": {"id": "external"}}])
+    with pytest.raises(UnreadableDocError) as caught:
+        load_lattice(_sidecar_project(tmp_path, cache=cache))
+    assert caught.value.source == tmp_path / declared_path
+    assert "nodes[0]" in "; ".join(caught.value.__notes__)
+
+
+@pytest.mark.parametrize("trust_stat", [False, True])
+def test_external_verified_load_bypasses_stat_staleness_without_persisting(
+    tmp_path, monkeypatch, trust_stat
+):
+    monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path / "cache"))
+    path = tmp_path / "external.md"
+    path.write_text("# First\n")
+    _manifest(tmp_path, [{"path": "external.md", "meta": {"id": "external"}}])
+    project = _sidecar_project(tmp_path, cache=True, trust_stat=trust_stat)
+    load_lattice(project)
+    saved = cache_path("testslot", os.environ).read_bytes()
+    stat = path.stat()
+    path.write_text("# Other\n")
+    os.utime(path, ns=(stat.st_atime_ns, stat.st_mtime_ns))
+    verified = load_lattice(project, require_verified=True, persist_cache=False)
+    assert verified.nodes_by_id["external"].body == "# Other\n"
+    assert cache_path("testslot", os.environ).read_bytes() == saved
+
+
+def _twin_files(first: Path, first_text: str, second: Path, second_text: str) -> None:
+    """Write two distinct files whose size and nanosecond mtime both match."""
+    assert len(first_text.encode()) == len(second_text.encode())
+    first.write_text(first_text)
+    second.write_text(second_text)
+    ns = first.stat().st_mtime_ns
+    os.utime(first, ns=(ns, ns))
+    os.utime(second, ns=(ns, ns))
+
+
+def test_retargeted_registered_symlink_misses_the_stat_tier(tmp_path, monkeypatch):
+    monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path / "cache"))
+    targets = tmp_path / "targets"
+    targets.mkdir()
+    _twin_files(targets / "a.md", "# Alpha\n", targets / "b.md", "# Bravo\n")
+    link = tmp_path / "link.md"
+    link.symlink_to(Path("targets") / "a.md")
+    _manifest(tmp_path, [{"path": "link.md", "meta": {"id": "external"}}])
+    project = _sidecar_project(tmp_path, cache=True, trust_stat=True)
+    assert load_lattice(project).nodes_by_id["external"].body == "# Alpha\n"
+    link.unlink()
+    link.symlink_to(Path("targets") / "b.md")
+    assert load_lattice(project).nodes_by_id["external"].body == "# Bravo\n"
+
+
+def test_retargeted_registered_symlink_cannot_hide_inline_metadata(tmp_path, monkeypatch):
+    monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path / "cache"))
+    targets = tmp_path / "targets"
+    targets.mkdir()
+    inline = "---\nid: inline\n---\n"
+    _twin_files(targets / "a.md", " " * len(inline), targets / "b.md", inline)
+    link = tmp_path / "link.md"
+    link.symlink_to(Path("targets") / "a.md")
+    _manifest(tmp_path, [{"path": "link.md", "meta": {"id": "external"}}])
+    project = _sidecar_project(tmp_path, cache=True, trust_stat=True)
+    load_lattice(project)
+    link.unlink()
+    link.symlink_to(Path("targets") / "b.md")
+    with pytest.raises(RegistrationConflictError, match="already tracked by its inline metadata"):
+        load_lattice(project)
+
+
+def test_retargeted_discovered_symlink_misses_the_stat_tier(tmp_path, monkeypatch):
+    monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path / "cache"))
+    docs = tmp_path / "docs"
+    docs.mkdir()
+    targets = tmp_path / "targets"
+    targets.mkdir()
+    _twin_files(
+        targets / "a.md",
+        "---\nid: x\n---\n# Alpha\n",
+        targets / "b.md",
+        "---\nid: x\n---\n# Bravo\n",
+    )
+    link = docs / "link.md"
+    link.symlink_to(Path("..") / "targets" / "a.md")
+    _with_cache(tmp_path, trust_stat=True)
+    project = load_config(None, tmp_path)
+    assert load_lattice(project).nodes_by_id["x"].body == "# Alpha\n"
+    link.unlink()
+    link.symlink_to(Path("..") / "targets" / "b.md")
+    assert load_lattice(project).nodes_by_id["x"].body == "# Bravo\n"
+
+
+def test_manifest_registered_as_node_is_refused_before_reading(tmp_path):
+
+    _manifest(tmp_path, [{"path": "nodes.md", "meta": {"id": "manifest"}}], "nodes.md")
+    with pytest.raises(RegistrationConflictError, match="must never be a node"):
+        load_lattice(_sidecar_project(tmp_path, manifests=("nodes.md",)))
+
+
+@pytest.mark.parametrize("trust_stat", [False, True])
+def test_cached_inline_alias_of_manifest_is_refused(tmp_path, monkeypatch, trust_stat):
+    """Fresh valid manifests cannot parse inline; genuine stale stat facts can still be tracked."""
+
+    monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path / "cache"))
+    docs = tmp_path / "docs"
+    docs.mkdir()
+    target = tmp_path / "nodes.yml"
+    manifest = json.dumps({"nodes": [{"path": "external.md", "meta": {"id": "external"}}]})
+    old = "---\nid: stale\n---\n" + " " * (len(manifest) - len("---\nid: stale\n---\n"))
+    target.write_text(old)
+    stat = target.stat()
+    (docs / "alias.md").symlink_to(target)
+    _with_cache(tmp_path, trust_stat=True)
+    load_lattice(load_config(None, tmp_path))
+    target.write_text(manifest)
+    os.utime(target, ns=(stat.st_atime_ns, stat.st_mtime_ns))
+    (tmp_path / "external.md").write_text("# Body\n")
+    project = _sidecar_project(tmp_path, cache=True, trust_stat=True)
+    if not trust_stat:
+        # Force the same genuine cached facts through the acquisition boundary to exercise
+        # the join independently of the policy's deliberate stale-stat allowance.
+        resolve = lookup.resolve
+
+        def stale_hit(entry, path, policy):
+            return resolve(entry, path, replace(policy, trust_stat=True))
+
+        monkeypatch.setattr(lookup, "resolve", stale_hit)
+    with pytest.raises(RegistrationConflictError, match="inline node"):
+        load_lattice(project, require_verified=not trust_stat)
+
+
+@pytest.mark.parametrize(
+    ("text", "explanation"),
+    [
+        ("---\nid: inline\n---\n# Body\n", "tracked"),
+        ("# Body\n<!-- doc-lattice\nid: inline\n-->\n", "first line"),
+        ("---\nid: inline\n---\n<!-- doc-lattice\nid: shadowed\n-->\n", "ignored"),
+    ],
+)
+def test_external_ownership_refusal_explains_inline_classification(tmp_path, text, explanation):
+    (tmp_path / "external.md").write_text(text)
+    _manifest(tmp_path, [{"path": "external.md", "meta": {"id": "external"}}])
+    with pytest.raises(RegistrationConflictError) as caught:
+        load_lattice(_sidecar_project(tmp_path))
+    assert explanation in str(caught.value)
+    assert "external.md" in str(caught.value)
+    assert "nodes[0]" in str(caught.value)

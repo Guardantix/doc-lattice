@@ -15,7 +15,7 @@ from doc_lattice.cli.github import escape_github_property
 from doc_lattice.constants import EdgeState
 from doc_lattice.path_utils import format_path_for_display
 
-from .helpers import _clean_docs, runner
+from .helpers import _clean_docs, _external_reporting_app, runner
 
 _SRC = Path(__file__).resolve().parents[2] / "src"
 
@@ -889,3 +889,23 @@ def test_check_github_annotation_names_the_colliding_headings(tmp_path: Path, mo
         f"down -> up#notes is AMBIGUOUS in {upstream} "
         '(ambiguous with "Notes" (line 4), "Notes" (line 6))\n'
     )
+
+
+def test_external_broken_and_ambiguous_github_messages_keep_markdown_attachment(
+    tmp_path, monkeypatch
+):
+    monkeypatch.chdir(tmp_path)
+    result = runner.invoke(
+        _external_reporting_app(tmp_path, ambiguous=True), ["check", "--format", "github"]
+    )
+    assert result.exit_code == 1, (result.stdout, result.stderr, result.exception)
+    lines = result.stdout.splitlines()
+    assert len(lines) == 2
+    for line in lines:
+        assert "::error file=down.md," in line
+        assert "meta/[red]index.yml" in line
+        assert "record nodes[6]" in line
+    assert "line 1" in lines[0]
+    assert "line 3" in lines[0]
+    assert "up.md" in lines[0]
+    assert "missing is BROKEN" in lines[1]

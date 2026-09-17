@@ -21,7 +21,7 @@ def _sample_cache_file() -> CacheFile:
         entries={
             "docs/a.md": Entry(
                 file_sha256="a" * 64,
-                stats={"/abs/root": StatRecord(size=10, mtime_ns=123)},
+                stats={"/abs/root": StatRecord(device=1, inode=1, size=10, mtime_ns=123)},
                 payload=FilePayload(
                     meta=NodeMeta.model_validate({"id": "a"}),
                     body="# A\n",

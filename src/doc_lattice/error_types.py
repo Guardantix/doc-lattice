@@ -118,7 +118,7 @@ class ManifestError(ProjectError):
 
 
 class RegistrationConflictError(ProjectError):
-    """Two sidecar records, in one manifest or in two, resolve to the same Markdown target."""
+    """Sidecar ownership conflicts with another record, inline metadata, or a manifest target."""
 
     def __init__(self, message: str) -> None:
         super().__init__(message, code="REGISTRATION_CONFLICT")

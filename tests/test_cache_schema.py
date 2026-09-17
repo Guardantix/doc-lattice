@@ -29,7 +29,7 @@ ROOT = "/abs/current-root"
 
 
 def _fake_stat(size: int = 10, mtime_ns: int = 123) -> SimpleNamespace:
-    return SimpleNamespace(st_size=size, st_mtime_ns=mtime_ns)
+    return SimpleNamespace(st_dev=5, st_ino=7, st_size=size, st_mtime_ns=mtime_ns)
 
 
 def _entry(facts: FileFacts, data: bytes = b"raw bytes\n") -> Entry:
@@ -65,11 +65,11 @@ def test_cache_file_round_trips_through_json() -> None:
     assert isinstance(reloaded.entries["docs/a.md"].payload.meta, NodeMeta)
 
 
-def test_stat_record_captures_size_and_mtime() -> None:
+def test_stat_record_captures_identity_size_and_mtime() -> None:
     result = stat_record(
         _fake_stat(size=42, mtime_ns=999)  # ty: ignore[invalid-argument-type]
     )
-    assert result == StatRecord(size=42, mtime_ns=999)
+    assert result == StatRecord(device=5, inode=7, size=42, mtime_ns=999)
 
 
 def test_make_entry_hashes_bytes_resets_stats_and_preserves_file_payload() -> None:
@@ -88,7 +88,7 @@ def test_make_entry_hashes_bytes_resets_stats_and_preserves_file_payload() -> No
     entry = _entry(facts, data)
 
     assert entry.file_sha256 == sha256(data).hexdigest()
-    assert entry.stats == {ROOT: StatRecord(size=len(data), mtime_ns=123)}
+    assert entry.stats == {ROOT: StatRecord(device=5, inode=7, size=len(data), mtime_ns=123)}
     assert entry.disposition == "tracked"
     assert entry.payload == FilePayload(
         meta=meta,

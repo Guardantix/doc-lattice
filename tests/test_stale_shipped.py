@@ -4,6 +4,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, cast
 
 import pytest
+from external_origin_helpers import _external_lattice
 from hypothesis import given
 from hypothesis import strategies as st
 
@@ -334,3 +335,13 @@ def test_an_ambiguous_edge_still_triggers_the_audit():
 
     findings = stale_shipped(lattice, build_audit_trigger(lattice, None), {}, {})
     assert [finding.node_id for finding in findings] == ["down"]
+
+
+def test_ticket_findings_carry_source_and_resolved_drifted_origins():
+    lattice = _external_lattice()
+    findings = stale_shipped(lattice, {"down": ("up#notes", "missing")}, {}, {})
+    assert len(findings) == 1
+    assert list(findings[0].origins) == ["down", "up"]
+    declaration = findings[0].origins["up"].declaration
+    assert declaration is not None
+    assert declaration.record_index == 4

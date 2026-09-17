@@ -1,12 +1,14 @@
 """Domain types for resolved Linear tickets and the findings they produce."""
 
-from dataclasses import dataclass
+from collections.abc import Mapping
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Annotated
 
 from pydantic import AfterValidator, BaseModel, ConfigDict
 
 from .constants import BlockedReason, LinearStateType, Severity
+from .model import DocumentOrigin
 from .text_utils import strip_control_chars
 
 CleanStr = Annotated[str, AfterValidator(strip_control_chars)]
@@ -64,3 +66,4 @@ class Finding:
     ticket_ref: str
     reason: BlockedReason | None
     ticket: Ticket | None
+    origins: Mapping[str, DocumentOrigin] = field(default_factory=dict)
