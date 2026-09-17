@@ -22,14 +22,29 @@ Normal reconcile needs either a downstream id or `--all` (running it with neithe
   without loading the lattice or planning a new batch. It cannot be combined with a downstream id,
   `--all`, `--ref`, or `--dry-run`; those combinations exit 2. `--format json` is supported.
 
-An `AMBIGUOUS` edge is the one exception to every "skipped" above. Reconcile refuses the whole run
-rather than skipping it, because writing `seen` there would lock a hash to an id that document
-order can hand to a different heading. The refusal is run-scoped and precedes the already-OK
-check, so a single ambiguous edge anywhere in the selection exits 2 and writes nothing, even when
-that edge already held its planned hash and even under `--dry-run`. Run `doc-lattice check` to
-list every `AMBIGUOUS` edge at once, disambiguate each one (reword a colliding heading, or give
-the target an explicit `{#anchor}` marker), then re-run. See the drift-state table in
-[README.md](README.md) for what `AMBIGUOUS` means.
+An `AMBIGUOUS` edge is one of two exceptions to every "skipped" above; a drifting external
+downstream, described next, is the other. Reconcile refuses the whole run rather than skipping it,
+because writing `seen` there would lock a hash to an id that document order can hand to a different
+heading. The refusal is run-scoped and precedes the already-OK check, so a single ambiguous edge
+anywhere in the selection exits 2 and writes nothing, even when that edge already held its planned
+hash and even under `--dry-run`. Run `doc-lattice check` to list every `AMBIGUOUS` edge at once,
+disambiguate each one (reword a colliding heading, or give the target an explicit `{#anchor}`
+marker), then re-run. See the drift-state table in [README.md](README.md) for what `AMBIGUOUS`
+means.
+
+External downstream metadata remains manifest-owned in this release. For each selected edge, after
+selector matching, BROKEN and collision handling, and the unchanged-`seen` skip, reconcile refuses
+with `VALIDATION_ERROR` if the edge is STALE or UNRECONCILED and belongs to an externally declared
+downstream. Downstream nodes are visited in id order and each node's edges in declared order, so
+when a selection holds both an `AMBIGUOUS` edge and a drifting external one, the refusal names
+whichever is reached first; either way nothing is written. Each refusal names one edge, so run
+`doc-lattice check` to list them all. The pure guard runs before rewrite planning or staging, so a
+mixed batch writes no inline `seen` values either. It exits 2 with no success output in either human
+or JSON format, and applies to `--dry-run` as well. An inline downstream may still reconcile an
+external upstream, and an external downstream with no remaining drift does not block other selected
+inline updates. An external-only selection with no update is a normal successful no-op. Follow the
+[manual external acknowledgement workflow](README.md#manual-external-acknowledgement) after
+reviewing an external downstream's upstream change.
 
 ## Dry-run previews
 
@@ -87,12 +102,19 @@ A real reconcile checks for recovery immediately after config and lock setup, be
 lattice. A `prepared` journal rolls transaction-owned after images back to their exact before
 images; unrelated edits are preserved. A `committed` journal keeps the committed destinations and
 finishes artifact cleanup. Automatic recovery is reported once on stderr, then the newly requested
-reconcile proceeds. This ordering ensures the new plan sees recovered files.
+reconcile proceeds. This ordering ensures the new plan sees recovered files. A missing or invalid
+manifest then stops the lattice load with its ordinary error after recovery; `reconcile --recover`
+does not load the lattice or read manifests.
 
 An incomplete automatic recovery stops the command instead. If any destination stayed unresolved,
 or the run found orphaned artifacts, reconcile reports them on stderr and exits 2 without loading
 the lattice, planning, or writing, since planning against a tree that was never fully restored
 would reconcile from unrecovered bytes.
+
+The external-downstream refusal is later than this recovery and load path. A real run may restore
+an outstanding journal and persist an eligible load-cache update before the planner refuses an
+external edge. The refusal guarantees no new batch rewrite or staging. `--dry-run` remains
+namespace- and cache-read-only: it performs neither recovery nor cache persistence.
 
 ## Transaction artifacts
 

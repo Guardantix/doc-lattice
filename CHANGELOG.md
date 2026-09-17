@@ -17,24 +17,35 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   entries are discarded and rebuilt as version 8. [AD-12](ARCHITECTURE.md#ad-12-the-load-cache-is-a-disposable-opt-in-accelerator)
   records the per-file facts contract; registration is rebuilt separately on each load.
 
+- `reconcile` now refuses, with `VALIDATION_ERROR`, any selected STALE or UNRECONCILED edge whose
+  downstream is externally declared. The guard runs after selection, BROKEN and collision
+  handling, and the unchanged-`seen` skip, but before planning or staging, so a mixed batch writes
+  no new batch updates and emits no success output. It applies to `--dry-run`; inline downstreams
+  may still reconcile external upstreams. [README.md](README.md#manual-external-acknowledgement)
+  owns the manual acknowledgement workflow for external downstreams until GTX-757 ships a
+  manifest rewriter.
+
 ### Added
 
-- Internal: the engine can validate the sidecar manifests ARCHITECTURE.md's AD-51 specifies into
-  a typed registration index, refusing a malformed or unusable manifest or record, any YAML
-  anchor, alias, or merge key, and two records claiming one Markdown file. The
-  two error codes this reserves, `MANIFEST_ERROR` and `REGISTRATION_CONFLICT`, are listed in
-  [README.md](README.md#error-codes) and cannot be raised by any command yet.
-
-- Internal: registered Markdown files now become lattice nodes through the sidecar configuration
-  seam, including outside discovery roots and on cache hits. Each load rechecks ownership,
-  reads the resolved target, and retains the registration's declared identity even when its
-  spelling contains collapsible path segments. Foreign
-  frontmatter stays outside content hashes, accepted registrations suppress the id-less warning,
-  and external-node diagnostics carry Markdown and manifest-record origins, including broken
-  references to a missing section in a known external file. The default command
-  configuration loader still refuses `sidecar_manifests`; user-facing enrollment remains
-  separate work. [AD-51](ARCHITECTURE.md#ad-51-a-document-another-tool-owns-is-enrolled-by-a-sidecar-manifest-and-its-metadata-never-enters-the-file)
+- `sidecar_manifests` is now an ordinary optional configuration key. Every lattice load validates
+  and enrolls its manifests, including files outside `docs_roots`, while manifest I/O remains in
+  lattice loading. A manifest is a non-empty `nodes` list of exact root-relative POSIX `.md` paths
+  and `NodeMeta` records, with no YAML anchors, aliases, or merge keys. Ownership conflicts,
+  malformed manifests, and foreign frontmatter using reserved lattice keys fail closed with the
+  documented `REGISTRATION_CONFLICT`, `MANIFEST_ERROR`, or `FRONTMATTER_ERROR` code. Foreign
+  frontmatter is excluded from hashes, so foreign-frontmatter-only edits do not make a node stale.
+  Human and JSON diagnostics carry both Markdown and manifest origins.
+  [AD-51](ARCHITECTURE.md#ad-51-a-document-another-tool-owns-is-enrolled-by-a-sidecar-manifest-and-its-metadata-never-enters-the-file)
   records the enrollment and origin contracts.
+
+### Migration
+
+Before adding `sidecar_manifests`, upgrade every pre-commit hook, CI workflow, and installed-tool
+pin that loads the repository to a release that supports it. Older releases reject the new key
+before loading the lattice. Keep `lattice_format: 2`; sidecar enrollment does not change the
+lattice format or existing hashes. Do not run a blanket `doc-lattice reconcile --all` for this
+upgrade. Review and acknowledge external downstream drift through the manual workflow in
+[README.md](README.md#manual-external-acknowledgement) only when it is present.
 
 ## [7.3.0] - 2026-09-13
 

@@ -59,8 +59,9 @@ released, and credit you by the name or handle you prefer unless you ask us not 
 
 ## Scope
 
-doc-lattice is a local command-line tool. It reads a YAML configuration file and Markdown
-documents from a project directory, and `reconcile` writes back into that directory. It executes
+doc-lattice is a local command-line tool. It reads a YAML configuration file, the YAML sidecar
+manifests that configuration declares, and Markdown documents from a project directory, and
+`reconcile` writes back into that directory. It executes
 no code from the project directory; the only program it runs is `git`, with fixed arguments and
 resolved to an absolute path outside the directory it was pointed at, so a `git` carried by the
 project itself is refused rather than run. Its
@@ -73,13 +74,14 @@ credentialed call and what it publishes.
 
 In scope, as examples rather than an exhaustive list:
 
-* A path in configuration or in a document that escapes the project root, defeating the
-  containment checks that `path_utils.safe_resolve()` and the reconcile boundary apply.
+* A path in configuration, a sidecar manifest, or a document that escapes the project root,
+  defeating the containment checks that `path_utils.safe_resolve()` and the reconcile boundary
+  apply.
 * A `reconcile` run that writes, moves, or deletes a file outside the destinations it planned,
   or that loses data across a crash in a way its transaction and recovery contract says it
   cannot. [RECONCILE.md](RECONCILE.md) owns that contract.
-* Parsing a configuration file or document that leads to code execution, or to reads or writes
-  the invoking user did not authorize.
+* Parsing a configuration file, sidecar manifest, or document that leads to code execution, or
+  to reads or writes the invoking user did not authorize.
 * A cache file that changes the result of a later run into something the documents on disk do
   not support.
 * Anything that sends `LINEAR_API_KEY` somewhere other than the Linear GraphQL endpoint, or that

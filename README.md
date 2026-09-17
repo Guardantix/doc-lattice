@@ -524,6 +524,12 @@ conflict, and rolls the batch back if anything fails before the commit. Its temp
 a project-root journal plus staged before and after images, covered by the `.gitignore` block that
 `doc-lattice init` prints.
 
+Reconcile never rewrites an enrolled external downstream.
+[RECONCILE.md](https://github.com/Guardantix/doc-lattice/blob/main/RECONCILE.md#selectors) owns
+when a selection that reaches one is refused instead; acknowledge that drift with the
+[manual external acknowledgement workflow](#manual-external-acknowledgement) after reviewing the
+upstream change.
+
 Human output is one record per line: each per-file record
 (`reconciled 'pc-design.md': art-direction#accent`, or the same line led by `would reconcile`
 under `--dry-run`) and the `nothing to reconcile` all-clear stay on one line at any terminal
@@ -533,6 +539,23 @@ console.
 
 See [RECONCILE.md](https://github.com/Guardantix/doc-lattice/blob/main/RECONCILE.md) for
 selector details, dry-run and JSON output, the durability contract, and recovery.
+
+#### Manual external acknowledgement
+
+Reconcile never writes an external downstream's manifest record in this release. After reviewing
+the upstream change, acknowledge a selected external edge by editing its matching manifest record:
+
+1. If `cache_trust_stat: true` is enabled, disable it before the workflow. The acknowledgement
+   must be based on the bytes `check` reads now, not an intentionally stale stat-cache hit.
+2. Run `doc-lattice check --format json` and find the `STALE` or `UNRECONCILED` finding by its
+   `source_id` and `target_ref`.
+3. Copy that finding's `actual` value into `seen` on the matching `derives_from` entry in the
+   manifest record's `meta`. Match the edge by its exact ref, not by record position alone.
+4. Run `doc-lattice check` again. The edge should report `OK` after the reviewed acknowledgement.
+
+`actual` is doc-lattice's target hash, not a file checksum. For a section ref it hashes the
+canonical section and its ancestor-heading context; for a file ref it hashes the canonical body.
+Do not substitute a source-control, manifest, or whole-file checksum for it.
 
 ## Frontmatter reference
 
@@ -675,8 +698,10 @@ key and the code point for the first document it finds, one run at a time.
 
 ### Files with no `id`
 
-Only a file declaring an `id` joins the lattice. How the rest are treated depends on what they
-wrote, because silently dropping a file also silently drops every edge it declares:
+Only a file declaring an `id`, or one a [sidecar manifest](#sidecar-manifests) registers, joins
+the lattice; that section owns how a registered file's own frontmatter is treated. How the rest
+are treated depends on what they wrote, because silently dropping a file also silently drops
+every edge it declares:
 
 | The file | Treatment |
 |----------|-----------|
@@ -863,6 +888,56 @@ directory holds at least one Markdown file.
 
 For 2.0, `binding_layers` is unsupported. Delete it from 1.x configs; there is no replacement.
 `lint`'s fixed binding > derived > exploratory authority ladder is unchanged.
+
+### Sidecar manifests
+
+`sidecar_manifests` enrolls Markdown files whose frontmatter another tool owns. Omit the optional
+key when there is no external enrollment. When present, it is a non-empty list of exact manifest
+paths and accepts no globs; null and an empty list are config errors. Relative paths resolve from
+the project root. Add the key to an existing config by hand. It is intentionally absent from the
+generated configuration block above, because `init` does not create a manifest or know which
+external files you own. `sidecar_coverage` is not available yet and remains an unknown, refused
+configuration key.
+
+```yaml
+sidecar_manifests:
+  - metadata/doc-lattice-nodes.yml
+```
+
+Each manifest is a YAML mapping with exactly one key, `nodes`, containing a non-empty list. Each
+record has exactly `path` and `meta`: `path` is a project-root-relative POSIX spelling of a `.md`
+file, and `meta` is the same strict `NodeMeta` schema in the [frontmatter reference](#frontmatter-reference),
+including `id`, `derives_from`, and `seen` where applicable.
+
+```yaml
+nodes:
+  - path: skills/release.md
+    meta:
+      id: release-skill
+      authority: derived
+      derives_from:
+        - ref: release-policy#approval
+          seen: 647cc64481bee8d8541ef7d1733b5204
+```
+
+Manifests are read only while a command loads the lattice. They reject YAML anchors, aliases, and
+merge keys anywhere, so write every value explicitly. The manifest and each registered Markdown
+file must resolve to a regular file inside the project root.
+
+External ownership is singular. A registration enrolls its file even outside `docs_roots` and
+overrides discovery when the file is inside a root; `ignore_globs` does not suppress it. Two
+records cannot resolve to the same file, and a registered file cannot also be an inline node or a
+manifest. A foreign frontmatter block using `id`, `authority`, `derives_from`, or `tickets` is
+ambiguous ownership and is refused. A foreign tool that needs one of those reserved keys cannot
+be enrolled yet.
+
+The external file's body, after any foreign frontmatter fence, supplies its section and file
+hashes. Its manifest metadata never enters those hashes, so a foreign-frontmatter-only edit does
+not make an edge STALE. Every lattice load rebuilds the manifest registration and ownership join,
+including warm-cache loads; cached file facts may be reused, but registration is never reused.
+Human diagnostics name both the Markdown file and its manifest record. JSON findings add an
+`origins` entry for every external participant with its Markdown path, manifest path, record
+index, and declared path.
 
 ### Load cache (opt-in)
 
@@ -1228,14 +1303,14 @@ documented migration surface.
 
 | Code | Raised when |
 |------|-------------|
-| `CONFIG_ERROR` | An explicit `--config PATH` names a file that does not exist, or the selected `.doc-lattice.yml` is unreadable, fails to parse as YAML, fails its schema, or names a `docs_roots` entry that escapes the project root or exists as something other than a directory or a regular `.md` file. A `linear_team` *in that file* that is not a valid team key lands here too; the same value passed to `init --linear-team` does not, because `init` writes a config and never reads one. `links` adds its own selection-time causes: a `link_sources` list that is omitted or empty, an entry the selector grammar cannot read, an entry that matches no file, and a directory the selection walk cannot scan or an entry it cannot inspect. A `legacy_marker_sources` declaration adds three more, all refused before any document is parsed: the key written as null or as an empty list, an entry the grammar cannot read, and an entry that matches no selected source. An absent default config is not an error; it is zero-config mode, except under `links`, which has no zero-config mode to fall back to. |
-| `VALIDATION_ERROR` | A value parsed cleanly but failed domain validation: an impact token that resolves to no id (from `impact` or from `linear`), a `reconcile` node id that names no node, a `reconcile --ref` matching no edge on the node it named, or any input `init` checks before it writes anything (enumerated below). Command-shape and parser usage failures are *not* this; they stay uncoded. |
+| `CONFIG_ERROR` | An explicit `--config PATH` names a file that does not exist, or the selected `.doc-lattice.yml` is unreadable, fails to parse as YAML, fails its schema, or names a `docs_roots` entry that escapes the project root or exists as something other than a directory or a regular `.md` file. A `linear_team` *in that file* that is not a valid team key lands here too; the same value passed to `init --linear-team` does not, because `init` writes a config and never reads one. `links` adds its own selection-time causes: a `link_sources` list that is omitted or empty, an entry the selector grammar cannot read, an entry that matches no file, and a directory the selection walk cannot scan or an entry it cannot inspect. A `legacy_marker_sources` declaration adds three more, all refused before any document is parsed: the key written as null or as an empty list, an entry the grammar cannot read, and an entry that matches no selected source. A `sidecar_manifests` declaration is refused the same way, before any manifest is read, when it is written as null, declared as an empty list, or holds an entry that is empty, not a string, or carries a control character; a manifest that cannot be used once the lattice loads is `MANIFEST_ERROR` instead. An absent default config is not an error; it is zero-config mode, except under `links`, which has no zero-config mode to fall back to. |
+| `VALIDATION_ERROR` | A value parsed cleanly but failed domain validation: an impact token that resolves to no id (from `impact` or from `linear`), a `reconcile` node id that names no node, a `reconcile --ref` matching no edge on the node it named, or any input `init` checks before it writes anything (enumerated below). It also refuses an otherwise selected STALE or UNRECONCILED edge whose downstream node is externally declared, before any rewrite plan or staging begins. Command-shape and parser usage failures are *not* this; they stay uncoded. |
 | `DUPLICATE_ID` | Two files claim the same `id`, or two headings within one file resolve to the same anchor id. The error names both registration sites. |
 | `BROKEN_REF` | An operation that requires a resolved edge was aimed at one that does not resolve, in practice a single-node `reconcile` whose `--ref` names the broken edge. This is *not* the ordinary unresolved ref: that is the coherent `BROKEN` finding `check` reports with exit 1, and a broad `reconcile` skips it rather than failing. |
 | `UNREADABLE_DOC` | A discovered document cannot be read or decoded as UTF-8, it opens a `---` frontmatter fence it never closes, or its frontmatter YAML cannot be parsed. A reconcile also raises it when the structure it must rewrite is malformed, and when it refuses a rewrite it cannot verify, having found the result unparseable, self-referential, or not a faithful reproduction. `links` raises it once a document has been chosen: a selected link source that is a dangling symlink, that resolves through a symlink to a directory, or that is a special file, and a link target the filesystem will not resolve, stat, or read. |
 | `FRONTMATTER_ERROR` | Tracked lattice frontmatter failed schema validation: an unknown key, a wrong type, a control character in a text value, or a correctly typed value outside its own domain, such as an `id` containing `#` or a `layer` or `authority` that is not one of its supported words. It also covers an id-less block that declared `authority`, `derives_from`, or `tickets` and so named no owner for the edges it declares. |
-| `MANIFEST_ERROR` | A sidecar manifest cannot be used: it is missing, is not a regular file, resolves outside the project root, cannot be read or parsed, does not hold a mapping whose only key is a non-empty `nodes` list, or spells a YAML anchor, alias, or merge key anywhere. It also covers one record in it: a record that is not a mapping of exactly `path` and `meta`, a `path` that is not a relative POSIX spelling of a `.md` file, `meta` that fails the frontmatter schema, and a target that is missing, not a regular file, or outside the project root. The message names the manifest, and for a record its position and declared path. No command raises it yet: the `sidecar_manifests` key that names manifests is still refused as an unknown key until the enrollment [AD-51](ARCHITECTURE.md#ad-51-a-document-another-tool-owns-is-enrolled-by-a-sidecar-manifest-and-its-metadata-never-enters-the-file) records ships. |
-| `REGISTRATION_CONFLICT` | Two sidecar records, in one manifest or in two, resolve to the same Markdown file. The message names both manifests, both record positions, and both declared paths. Like `MANIFEST_ERROR`, no command raises it until the enrollment ships. |
+| `MANIFEST_ERROR` | A sidecar manifest cannot be used: it is missing, is not a regular file, resolves outside the project root, cannot be read or parsed, does not hold a mapping whose only key is a non-empty `nodes` list, or spells a YAML anchor, alias, or merge key anywhere. It also covers one record in it: a record that is not a mapping of exactly `path` and `meta`, a `path` that is not a relative POSIX spelling of a `.md` file, `meta` that fails the frontmatter schema, and a target that is missing, not a regular file, or outside the project root. The message names the manifest, and for a record its position and declared path. |
+| `REGISTRATION_CONFLICT` | Sidecar ownership is incoherent: two records resolve to the same Markdown file, a registered file is also an inline node, or a manifest is also a node. The message names the Markdown path and the relevant manifest record or records. |
 | `LINEAR_ERROR` | The `linear` command could not obtain a usable response: a missing or rejected `LINEAR_API_KEY`, a transport failure, any HTTP error status (429 and 5xx after the retry budget is exhausted, every other status refused on the first attempt), a refused redirect, GraphQL errors, a missing, oversized, or malformed payload, or more distinct ticket refs than one run accepts. |
 | `RECONCILE_IN_PROGRESS` | A reconcile could not establish or keep an exclusive claim on the project root: either another process already holds the lock, so the run refuses rather than writing alongside it, or the directory the run locked is no longer the one at that path, because the project root was renamed, replaced, or removed while the run held it. Every mutating step revalidates the claim first, so that second case refuses before writing anything. |
 | `RECONCILE_CONFLICT` | A reconcile destination's bytes changed between validation and the write, so the transaction was refused and rolled back rather than applied over an edit it never read. |

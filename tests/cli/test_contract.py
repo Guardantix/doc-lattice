@@ -8,7 +8,6 @@ import select
 import subprocess
 import sys
 import time
-from dataclasses import replace
 from pathlib import Path
 from types import ModuleType
 
@@ -20,13 +19,10 @@ import doc_lattice.cli as cli_mod
 import doc_lattice.cli.runtime as runtime_module
 from doc_lattice import __version__
 from doc_lattice.cli import app
-from doc_lattice.cli.application import create_app
 from doc_lattice.cli.errors import EXIT_TOOL_ERROR
 from doc_lattice.cli.github import escape_github_property
 from doc_lattice.cli.runtime import default_runtime
-from doc_lattice.config import load_sidecar_config
 from doc_lattice.error_types import ConfigError
-from doc_lattice.orchestrate import load_lattice
 from doc_lattice.path_utils import format_path_for_display
 
 from .helpers import _control_characters, _run, runner
@@ -949,7 +945,7 @@ def test_multi_line_config_diagnostic_survives_the_stderr_renderer(tmp_path: Pat
     assert lines[2] == (
         "  bogus: Extra inputs are not permitted (accepted keys: cache_key, cache_trust_stat, "
         "docs_roots, ignore_globs, lattice_format, legacy_marker_sources, linear_team, "
-        "link_sources)"
+        "link_sources, sidecar_manifests)"
     )
 
 
@@ -1989,30 +1985,6 @@ def test_ambiguous_output_is_byte_identical_across_every_cache_tier(tmp_path: Pa
         assert "Notes" in runs[2].stdout, argv
 
 
-def _sidecar_test_app():
-    """Exercise real command adapters through the internal sidecar configuration seam."""
-
-    def factory(*, no_color):
-        runtime = default_runtime(no_color=no_color)
-        loaded = None
-
-        def config_loader(config, cwd):
-            nonlocal loaded
-            loaded = load_sidecar_config(config, cwd)
-            return loaded.project
-
-        def lattice_loader(project, *, require_verified=False, persist_cache=True):
-            assert loaded is not None
-            assert project is loaded.project
-            return load_lattice(
-                loaded, require_verified=require_verified, persist_cache=persist_cache
-            )
-
-        return replace(runtime, load_config=config_loader, load_lattice=lattice_loader)
-
-    return create_app(runtime_factory=factory)
-
-
 def _external_cli_project(root: Path, cache_policy):
     """A blessed inline -> external -> inline chain, with file and section dependents."""
     (root / "docs").mkdir()
@@ -2055,7 +2027,32 @@ def _external_cli_setup(tmp_path, monkeypatch, cache_policy):
     monkeypatch.chdir(tmp_path)
     monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path / "cache"))
     monkeypatch.setenv("NO_COLOR", "1")
-    return _sidecar_test_app()
+    return app
+
+
+@pytest.mark.parametrize(
+    ("declaration", "reason"),
+    [
+        ("sidecar_manifests:", "sidecar_manifests is written as null"),
+        ("sidecar_manifests: []", "sidecar_manifests is declared but names no manifest"),
+        (
+            "sidecar_coverage: {select: ['skills/**']}",
+            "sidecar_coverage: Extra inputs are not permitted",
+        ),
+    ],
+)
+def test_public_cli_refuses_invalid_or_reserved_sidecar_keys(
+    tmp_path, monkeypatch, declaration, reason
+):
+    (tmp_path / ".doc-lattice.yml").write_text(f"lattice_format: 2\n{declaration}\n")
+    monkeypatch.chdir(tmp_path)
+
+    result = runner.invoke(app, ["check", "--format", "json"])
+
+    assert result.exit_code == 2
+    assert result.stdout == ""
+    assert "CONFIG_ERROR" in result.stderr
+    assert reason in result.stderr
 
 
 @pytest.mark.parametrize("format_", ["human", "github", "json"])
@@ -2313,7 +2310,7 @@ def test_manifest_reassignment_refreshes_cli_origins_without_markdown_edits(
         ["graph", "--format", "json"],
     ],
 )
-def test_inline_only_commands_are_identical_through_the_sidecar_seam(
+def test_inline_only_commands_are_identical_across_cache_policies(
     lattice_dir, monkeypatch, cache_policy, command
 ):
     monkeypatch.chdir(lattice_dir)
@@ -2327,9 +2324,8 @@ def test_inline_only_commands_are_identical_through_the_sidecar_seam(
             f"cache_trust_stat: {str(cache_policy).lower()}\n",
             encoding="utf-8",
         )
-    application = _sidecar_test_app()
     for _ in range(2):
-        actual = runner.invoke(application, command)
+        actual = runner.invoke(app, command)
         assert (actual.exit_code, actual.stdout, actual.stderr) == (
             expected.exit_code,
             expected.stdout,

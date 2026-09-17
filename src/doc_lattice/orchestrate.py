@@ -6,7 +6,7 @@ from collections.abc import Callable
 from pathlib import Path
 
 from .cache import CacheHit, LookupPolicy, RunState, cache_path, lookup, make_entry, store
-from .config import ProjectConfig, SidecarProjectConfig
+from .config import ProjectConfig
 from .constants import COMMENT_ENVELOPE_OPEN, FrontmatterDisposition
 from .discovery import decode_doc, discover_doc_candidates, read_doc_bytes
 from .error_types import DocumentError, RegistrationConflictError
@@ -18,7 +18,7 @@ from .sidecar_manifest import RegistrationIndex, build_registration_index
 
 
 def load_lattice(
-    project: ProjectConfig | SidecarProjectConfig,
+    project: ProjectConfig,
     *,
     require_verified: bool = False,
     persist_cache: bool = True,
@@ -30,7 +30,7 @@ def load_lattice(
     rewritten after a successful build.
 
     Args:
-        project: Loaded ordinary or sidecar-aware config with contained docs roots.
+        project: Loaded config with contained docs roots and optional manifest declarations.
         require_verified: Force the verify tier for every file, disabling the stat fast tier.
             Set only by the reconcile CLI path, whose writes must never derive from stale
             content.
@@ -52,9 +52,7 @@ def load_lattice(
         ManifestError: If a fresh manifest or its declared target fails validation.
         RegistrationConflictError: If metadata owners collide or a manifest is also a node.
     """
-    declarations = ()
-    if isinstance(project, SidecarProjectConfig):
-        declarations, project = project.sidecar_manifests, project.project
+    declarations = project.config.sidecar_manifests or ()
     registrations = build_registration_index(declarations, project.project_root)
     if project.config.cache_key is None:
         return _assemble(

@@ -2910,8 +2910,10 @@ GTX-752 is the capability, split into this decision (GTX-754), loading (GTX-755)
 piece chooses its own. It changes no code.
 **Decision:** An opt-in configuration key names YAML manifests whose records associate a
 project-relative Markdown path with ordinary node metadata. The Markdown file is the node's
-content and section source and is never written. The manifest is the node's metadata source and
-is the only file reconcile rewrites for it.
+content and section source and is never written. The manifest is the node's metadata source.
+Manifest I/O belongs only to lattice loading; the interim reconcile contract refuses a selected
+external downstream that needs its `seen` acknowledgement rather than rewriting its manifest.
+GTX-757 is future work for a manifest rewriter.
 
 **What this does not prove.** Declared edges are a gate requiring human review of the dependency
 a person declared. They are not a proof that the downstream prose is semantically correct, and
@@ -2920,8 +2922,8 @@ moves and the decision the skill derives from does not, nothing goes STALE. Inli
 the same limit, and a sidecar neither widens nor narrows it.
 
 **An additive key, refused by every engine that predates it.** Enrollment is a new top-level
-`sidecar_manifests` key listing manifest paths exactly, with no globs, so a deleted manifest is a
-configuration error rather than a quietly smaller registration set. Null and an empty list are
+`sidecar_manifests` key listing manifest paths exactly, with no globs, so a deleted manifest is an
+exit-2 error rather than a quietly smaller registration set. Null and an empty list are
 refused at config load, the AD-49 rule for a policy that names nothing. The version-skew guard
 is AD-44's: an older engine rejects the unknown key before loading, so it cannot report a green
 graph with the external nodes missing. `lattice_format` does not bump. An inline-only project's
@@ -2975,8 +2977,9 @@ found, with its own identity and escape rules.
   spelling as document identity, unlike AD-8's single-file `docs_roots` entry, which stores the
   resolved path, while ownership compares resolved targets.
 - A manifest's resolved target must exist and be a regular file, checked before it is opened, the
-  same requirement a registered Markdown target carries. A missing manifest is a configuration
-  error, and a FIFO or other special file is refused rather than read, since opening one can
+  same requirement a registered Markdown target carries. A missing manifest is a
+  `MANIFEST_ERROR` when the lattice loads, not a config-load error, so it cannot block journal
+  recovery, and a FIFO or other special file is refused rather than read, since opening one can
   block every lattice-loading command.
 - A manifest is never a document. A manifest whose resolved target is also the resolved target of
   any loaded node, registered or discovered, is an error naming both. Otherwise a record, or a
@@ -3013,13 +3016,15 @@ reassignment between manifests, and symlink retargeting, which change what a nod
 changing either file. So nothing enrollment determines is cached. A Markdown entry stores what
 its own bytes determine, the inline classification and the body after the fence among them,
 which serves either reading without a mode flag. A manifest's validated records, which its bytes
-alone determine, may be cached under that manifest's own fingerprint tiers. The join of
+alone determine, may be cached under that manifest's own fingerprint tiers in future. The join of
 configuration, manifests, resolved targets, and Markdown facts, and every ownership check in it,
-runs on every load, cache hits included. Reconcile still verifies bytes (AD-12) and reads
-manifests fresh. GTX-755 bumps `CACHE_VERSION` under the rule in `constants.py` if the stored
-meaning changes.
+runs on every load, cache hits included. Reconcile still verifies Markdown bytes (AD-12) and
+reads manifests fresh. Public admission in GTX-766 does not change the cached file-fact
+representation introduced by GTX-769: registration is outside the cache and the existing facts
+are reused.
 
-**Coverage is independent of discovery and of registration.** An optional `sidecar_coverage` key
+**Future coverage is independent of discovery and of registration (GTX-756).** A future optional
+`sidecar_coverage` key
 holds a mapping with exactly two keys: `select`, a required non-empty list of selector strings,
 and `exempt`, an optional list of mappings each carrying exactly `path` and `reason`, both
 non-empty strings. As for `sidecar_manifests`, a null or empty `sidecar_coverage`, `select`, or
@@ -3046,7 +3051,8 @@ that list would hide the omissions coverage exists to report.
   read is not the one the configuration declares, and exit 1 means a coherent graph that has
   drifted (AD-1).
 
-**Reconcile keys updates by node, writes once per manifest, and finds records by identity.** The
+**Future external reconcile keys updates by node, writes once per manifest, and finds records by
+identity (GTX-757).** The
 planner today keys an update by downstream document path and ref, so substituting a manifest
 path for the Markdown path would merge two nodes that share a manifest and an upstream ref.
 
@@ -3068,7 +3074,7 @@ path for the Markdown path would merge two nodes that share a manifest and an up
   containment checks, before the fresh read and at the transaction boundary.
 - Human and JSON reporting stay per node and name both locations. The output shape belongs to
   RECONCILE.md and GTX-757. Until GTX-757 ships, a reconcile selection that would update an
-  external node refuses with an actionable message (GTX-755).
+  external node refuses with an actionable message (GTX-766).
 
 **The advisory review's four contracts.** GTX-752's advisory review proposed four: node identity
 separate from the rewritten file, coverage independent of discovery, foreign envelope ownership
@@ -3076,18 +3082,19 @@ decided together with hashing, and enrollment-aware cache validity. The sections
 four. The last is met by not caching what enrollment determines rather than by invalidating on
 enrollment changes, because an invalidation rule has to enumerate every way enrollment can
 change, and missing one serves a warm run a stale node the cold run would not produce. A join
-recomputed on every load has no such list to get wrong, and the per-file and per-manifest
-entries it reads keep the warm path free of re-parsing.
+recomputed on every load has no such list to get wrong. Cached per-file facts keep the warm path
+free of Markdown re-parsing; the shipped implementation reads and parses manifests fresh on every
+load.
 
-**Enrollment implementation (GTX-770).** The internal `load_sidecar_config` seam feeds the same
-orchestration as ordinary configuration. Each load rebuilds the registration index and joins
-resolved discovery candidates with registered targets before ownership can be hidden by alias
-deduplication. Cached and uncached loads share assembly and warning decisions; they differ only
-in how they obtain Markdown file facts and whether a successful load persists cache state.
-Registered files are read and stat-ed through their validated resolved targets, while declared
-spellings remain the node identities, cache keys, and parser diagnostic paths.
-The default command configuration loader continues to refuse `sidecar_manifests` until the
-user-facing enrollment work enables it.
+**Enrollment implementation (GTX-766, GTX-770).** Ordinary `Config` accepts `sidecar_manifests` through
+the same validators that the prior sidecar seam used, so every lattice-loading command enrolls
+the declared records. Config loading validates the declaration, while manifest I/O remains in
+lattice loading. Each load rebuilds the registration index and joins resolved discovery candidates
+with registered targets before ownership can be hidden by alias deduplication. Cached and
+uncached loads share assembly and warning decisions; they differ only in how they obtain Markdown
+file facts and whether a successful load persists cache state. Registered files are read and
+stat-ed through their validated resolved targets, while declared spellings remain the node
+identities, cache keys, and parser diagnostic paths.
 
 Assembly attaches a pure typed origin before the loader registers ids: the Markdown identity
 path and, for an external node, the declared manifest path, zero-based record index, and exact
@@ -3105,9 +3112,8 @@ serves drift, ambiguity, authority, impact, graph, and ticket findings.
 Broken section references retain the known file's origin even when the section does not exist.
 
 **Consequences:** AD-44's decline of a sidecar manifest no longer governs. Its envelope,
-auto-slug, hash, and `lattice_format` decisions are untouched. GTX-755, GTX-756, and GTX-757 each
-update README.md, RECONCILE.md, and CHANGELOG.md for the behavior they ship, and record the
-AD-3, AD-12, or AD-31 amendment their implementation requires. The costs are chosen ones.
-Foreign-frontmatter-only edits are invisible to drift, tools that use a reserved key in their own
-frontmatter cannot be enrolled yet, the enrollment join runs on every load, and a coverage
-omission blocks read-only commands such as `impact` as well as `check`.
+auto-slug, hash, and `lattice_format` decisions are untouched. GTX-756 and GTX-757 remain future
+work and update README.md, RECONCILE.md, and CHANGELOG.md when they ship, with any AD-3, AD-12,
+or AD-31 amendment they require. The current costs are chosen ones. Foreign-frontmatter-only
+edits are invisible to drift, tools that use a reserved key in their own frontmatter cannot be
+enrolled yet, and the enrollment join runs on every load.
