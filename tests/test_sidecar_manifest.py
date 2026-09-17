@@ -9,7 +9,7 @@ from cli.helpers import _contents, _stub_runtime
 from link_gate_helpers import _write
 
 from doc_lattice.cli.errors import EXIT_TOOL_ERROR, exit_on_project_error
-from doc_lattice.config import load_sidecar_config
+from doc_lattice.config import load_config
 from doc_lattice.error_types import ManifestError, ProjectError, RegistrationConflictError
 from doc_lattice.path_utils import format_path_for_display
 from doc_lattice.sidecar_manifest import build_registration_index
@@ -97,8 +97,8 @@ def test_the_private_seam_resolves_from_the_config_parent_whatever_the_cwd(
     _write(root, ".doc-lattice.yml", f"lattice_format: 2\nsidecar_manifests: [{_MANIFEST}]\n")
     _write(root, _MANIFEST, f"nodes:\n{_VALID_RECORD}")
 
-    loaded = load_sidecar_config(config, elsewhere)
-    index = build_registration_index(loaded.sidecar_manifests, loaded.project.project_root)
+    loaded = load_config(config, elsewhere)
+    index = build_registration_index(loaded.config.sidecar_manifests or (), loaded.project_root)
 
     assert index.registrations[0].target == (root / "skills/a.md").resolve()
     assert index.manifests[0].resolved == (root / _MANIFEST).resolve()

@@ -1,5 +1,6 @@
 """Tests for reconcile."""
 
+from hashlib import sha256
 from pathlib import Path
 
 import pytest
@@ -20,7 +21,15 @@ from doc_lattice.error_types import (
 from doc_lattice.frontmatter_parser import parse_meta, split_frontmatter
 from doc_lattice.hashing import content_hash
 from doc_lattice.loader import build_lattice
-from doc_lattice.model import NodeMeta, ParsedDoc, RawEdge, TargetId, parse_ref
+from doc_lattice.model import (
+    DocumentOrigin,
+    ExternalDeclaration,
+    NodeMeta,
+    ParsedDoc,
+    RawEdge,
+    TargetId,
+    parse_ref,
+)
 from doc_lattice.orchestrate import load_lattice
 from doc_lattice.reconcile import apply_reconcile, plan_rewrites, reconcile
 from doc_lattice.yaml_boundary import YAML_LOAD_ERRORS
@@ -2632,7 +2641,8 @@ def test_the_alias_relocation_candidate_is_pinned_either_way_its_verdict_lands()
         assert "--" not in envelope.removeprefix("<!-- doc-lattice\n")
 
 
-def test_reconcile_refuses_to_bless_an_ambiguous_edge():
+@pytest.mark.parametrize("external", [False, True])
+def test_reconcile_refuses_to_bless_an_ambiguous_edge(external):
     lattice = build_lattice(
         [
             ParsedDoc(path=Path("docs/up.md"), meta=NodeMeta(id="up"), body="# Notes\n\n# Notes\n"),
@@ -2640,6 +2650,13 @@ def test_reconcile_refuses_to_bless_an_ambiguous_edge():
                 path=Path("docs/down.md"),
                 meta=NodeMeta.model_validate({"id": "down", "derives_from": [{"ref": "up#notes"}]}),
                 body="# Down\n",
+                origin=(
+                    DocumentOrigin(
+                        Path("docs/down.md"), ExternalDeclaration("nodes.yml", 0, "docs/down.md")
+                    )
+                    if external
+                    else None
+                ),
             ),
         ]
     )
@@ -2654,3 +2671,67 @@ def test_reconcile_refuses_to_bless_an_ambiguous_edge():
     assert "no seen values were written" in message
     # The refusal names one edge, so it has to point at the command that lists them all.
     assert "run 'doc-lattice check' to list every ambiguous edge before re-running" in message
+
+
+def _external_reconcile_lattice(edges):
+    """Build an external downstream with pure origins and no filesystem reads."""
+    return build_lattice(
+        [
+            ParsedDoc(Path("up.md"), NodeMeta(id="up"), "upstream\n"),
+            ParsedDoc(Path("other.md"), NodeMeta(id="other"), "other upstream\n"),
+            ParsedDoc(
+                Path("skills/down.md"),
+                NodeMeta(id="external", derives_from=edges),
+                "external body\n",
+                origin=DocumentOrigin(
+                    Path("skills/down.md"),
+                    ExternalDeclaration("meta/nodes.yml", 2, "./skills/down.md"),
+                ),
+            ),
+        ]
+    )
+
+
+@pytest.mark.parametrize("seen", [None, "old"])
+@pytest.mark.parametrize("ref", [None, "up"])
+@pytest.mark.parametrize("reconcile_all", [False, True])
+def test_planner_refuses_a_selected_external_update(seen, ref, reconcile_all):
+    lattice = _external_reconcile_lattice([RawEdge(ref="up", seen=seen)])
+
+    with pytest.raises(ValidationError) as excinfo:
+        reconcile(lattice, "external", ref=ref, reconcile_all=reconcile_all)
+
+    assert excinfo.value.code == "VALIDATION_ERROR"
+    message = str(excinfo.value)
+    for context in (
+        "external",
+        "up",
+        "skills/down.md",
+        "meta/nodes.yml",
+        "nodes[2]",
+        "seen",
+        "review",
+        "by hand",
+    ):
+        assert context in message
+
+
+@pytest.mark.parametrize("reconcile_all", [False, True])
+def test_planner_skips_ok_external_edges_before_refusing_excluded_drift(reconcile_all):
+    lattice = _external_reconcile_lattice(
+        [RawEdge(ref="up", seen=sha256(b"upstream").hexdigest()[:32]), RawEdge(ref="other")]
+    )
+
+    assert reconcile(lattice, "external", ref="up", reconcile_all=reconcile_all) == {}
+
+
+@pytest.mark.parametrize("reconcile_all", [False, True])
+def test_planner_preserves_broken_external_edge_handling(reconcile_all):
+    lattice = _external_reconcile_lattice([RawEdge(ref="missing")])
+
+    assert reconcile(lattice, "external", ref=None, reconcile_all=reconcile_all) == {}
+    if reconcile_all:
+        assert reconcile(lattice, "external", ref="missing", reconcile_all=True) == {}
+    else:
+        with pytest.raises(BrokenRefError):
+            reconcile(lattice, "external", ref="missing", reconcile_all=False)

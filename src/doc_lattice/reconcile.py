@@ -37,7 +37,7 @@ from ruamel.yaml.tokens import (
 from .error_types import BrokenRefError, FrontmatterError, UnreadableDocError, ValidationError
 from .frontmatter_parser import FrontmatterParts, refuse_double_hyphen, split_frontmatter_parts
 from .hashing import normalize_newlines
-from .model import Lattice, TargetId, format_collision, parse_ref
+from .model import Lattice, TargetId, format_collision, format_document_origin, parse_ref
 from .path_utils import format_path_for_display
 from .resolve import cached_target_hash
 from .yaml_boundary import YAML_LOAD_ERRORS, is_merge_key_scalar
@@ -1509,6 +1509,9 @@ def reconcile(
     edge is skipped (it does not block the node's reconcilable edges); only a single-node
     ``--ref`` aimed directly at a broken edge is refused, and a single-node ``--ref`` that
     matches no edge on the node is reported rather than silently doing nothing.
+    Until manifest rewriting is supported, a selected external node's edge that needs a new
+    ``seen`` refuses the whole plan. An external upstream or an already-OK external edge does
+    not prevent inline updates.
 
     Args:
         lattice: The built lattice (its upstream content is the reconcile snapshot).
@@ -1523,7 +1526,8 @@ def reconcile(
     Raises:
         ValidationError: If ``downstream_id`` is not in the lattice, if ``ref`` is given but
             matches no edge on the node (both only when not ``reconcile_all``), or if an edge
-            resolves to a target id that sits in a slug-collision component.
+            resolves to a target id that sits in a slug-collision component, or if a selected
+            update would change an external node's manifest record.
         BrokenRefError: If ``ref`` targets an edge that has no resolvable target.
     """
     if not reconcile_all and downstream_id not in lattice.nodes_by_id:
@@ -1570,6 +1574,14 @@ def reconcile(
             new_seen = cached_target_hash(lattice, edge.target_id, cache)
             if edge.seen is not None and new_seen == edge.seen:
                 continue
+            if node.origin is not None and node.origin.declaration is not None:
+                raise ValidationError(
+                    f"cannot reconcile {node_id!r} -> {edge.target_ref!r} at "
+                    f"{format_document_origin(node.origin)}: updating an external node's seen "
+                    "is not supported in this release; review the upstream, then update this "
+                    "manifest record's seen by hand using the matching edge's actual value "
+                    "from 'doc-lattice check --format json' with cache_trust_stat disabled"
+                )
             plan[node.path][edge.target_ref] = new_seen
     if targeting_specific_ref and not ref_matched:
         raise ValidationError(

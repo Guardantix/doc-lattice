@@ -43,6 +43,251 @@ _SRC = Path(__file__).resolve().parents[2] / "src"
 _HOSTILE_DOC_NAME = "pwn\x1b[31m\x1b[Aevil.md"
 
 
+def _sidecar_reconcile_project(root: Path, *, external_seen="old", upstream_only=False):
+    """An inline node sorts first, and depends on both an inline and an external upstream."""
+    (root / "docs").mkdir(parents=True)
+    (root / "skills").mkdir()
+    (root / ".doc-lattice.yml").write_text(
+        "lattice_format: 2\nsidecar_manifests: [nodes.yml]\n"
+        "cache_key: sidecar-reconcile\ncache_trust_stat: true\n"
+    )
+    (root / "docs/up.md").write_text("---\nid: up\n---\n# Rule {#rule}\nupstream\n")
+    (root / "docs/stable.md").write_text("---\nid: stable\n---\nstable\n")
+    (root / "docs/down.md").write_text(
+        "---\nid: a-inline\nderives_from:\n  - ref: up#rule\n  - ref: z-external\n---\n# Down\n"
+    )
+    (root / "skills/skill.md").write_text(
+        "---\nname: foreign-skill\ndescription: other tool metadata\n---\n# Skill\nbody\n"
+    )
+    edges = (
+        []
+        if upstream_only
+        else [
+            {"ref": "up#rule", "seen": external_seen},
+            {"ref": "stable", "seen": sha256(b"stable").hexdigest()[:32]},
+        ]
+    )
+    (root / "nodes.yml").write_text(
+        json.dumps(
+            {
+                "nodes": [
+                    {
+                        "path": "./skills/skill.md",
+                        "meta": {"id": "z-external", "derives_from": edges},
+                    }
+                ]
+            }
+        )
+    )
+
+
+@pytest.mark.parametrize("dry_run", [False, True], ids=["write", "dry-run"])
+@pytest.mark.parametrize("fmt", ["human", "json"])
+@pytest.mark.parametrize("seen", [None, "old"], ids=["unreconciled", "stale"])
+@pytest.mark.parametrize("warm", [False, True], ids=["cold", "warm"])
+def test_external_update_refuses_mixed_batch_before_rewrites(  # noqa: PLR0913
+    tmp_path, monkeypatch, dry_run, fmt, seen, warm
+):
+    project = tmp_path / "repo"
+    cache = tmp_path / "cache"
+    _sidecar_reconcile_project(project, external_seen=seen)
+    monkeypatch.chdir(project)
+    monkeypatch.setenv("XDG_CACHE_HOME", str(cache))
+    if warm:
+        assert runner.invoke(app, ["check"]).exit_code == 1
+        assert (cache / "doc-lattice/sidecar-reconcile/load-cache.json").exists()
+    before = _tree_snapshot(project)
+    cache_before = _tree_snapshot(cache)
+
+    def refuse_rewrite_phase(*_args, **_kwargs):
+        pytest.fail("external refusal reached rewrite planning or transaction staging")
+
+    monkeypatch.setattr(reconcile_command, "plan_rewrites", refuse_rewrite_phase)
+    monkeypatch.setattr(reconcile_command, "commit_rewrites", refuse_rewrite_phase)
+    argv = ["reconcile", "--all", "--format", fmt]
+    if dry_run:
+        argv.append("--dry-run")
+
+    result = runner.invoke(app, argv)
+
+    assert result.exit_code == 2, (result.stdout, result.stderr, result.exception)
+    assert result.stdout == ""
+    for context in (
+        "VALIDATION_ERROR",
+        "z-external",
+        "up#rule",
+        "skills/skill.md",
+        "nodes.yml",
+        "nodes[0]",
+        "seen",
+        "review",
+        "by hand",
+    ):
+        assert context in result.stderr
+    assert _tree_snapshot(project) == before
+    if dry_run:
+        assert _tree_snapshot(cache) == cache_before
+        assert cache.exists() == warm
+
+
+@pytest.mark.parametrize("dry_run", [False, True], ids=["write", "dry-run"])
+@pytest.mark.parametrize(
+    ("selector", "external_ok", "upstream_only", "refs"),
+    [
+        (["a-inline"], False, False, ["up#rule", "z-external"]),
+        (["--all", "--ref", "z-external"], False, False, ["z-external"]),
+        (["z-external", "--ref", "stable"], False, False, []),
+        (["--all", "--ref", "stable"], False, False, []),
+        (["--all", "--ref", "absent"], False, False, []),
+        (["--all"], True, False, ["up#rule", "z-external"]),
+        (["--all"], False, True, ["up#rule", "z-external"]),
+    ],
+    ids=[
+        "inline",
+        "narrowed-all",
+        "narrowed-external",
+        "selected-ok",
+        "no-match",
+        "external-ok",
+        "external-upstream-only",
+    ],
+)
+def test_permitted_external_involvement_reconciles(  # noqa: PLR0913
+    tmp_path, monkeypatch, dry_run, selector, external_ok, upstream_only, refs
+):
+    project = tmp_path / "repo"
+    cache = tmp_path / "cache"
+    actual = sha256(b"# Rule\nupstream").hexdigest()[:32]
+    _sidecar_reconcile_project(
+        project, external_seen=actual if external_ok else "old", upstream_only=upstream_only
+    )
+    monkeypatch.chdir(project)
+    monkeypatch.setenv("XDG_CACHE_HOME", str(cache))
+    before = _tree_snapshot(project)
+    argv = ["reconcile", *selector, "--format", "json"]
+    if dry_run:
+        argv.append("--dry-run")
+
+    result = runner.invoke(app, argv)
+
+    assert result.exit_code == 0, (result.stdout, result.stderr, result.exception)
+    expected_hashes = {
+        "up#rule": actual,
+        "z-external": sha256(b"# Skill\nbody").hexdigest()[:32],
+    }
+    assert json.loads(result.stdout) == {
+        "dry_run": dry_run,
+        "reconciled": [
+            {"path": str(project / "docs/down.md"), "ref": ref, "new_seen": expected_hashes[ref]}
+            for ref in refs
+        ],
+    }
+    after = _tree_snapshot(project)
+    if dry_run or not refs:
+        assert after == before
+    else:
+        assert after.pop("docs/down.md") != before.pop("docs/down.md")
+        assert after == before
+        checked = runner.invoke(app, ["check", "--format", "json"])
+        edges = json.loads(checked.stdout)["edges"]
+        assert all(
+            edge["state"] == "OK"
+            for edge in edges
+            if edge["source_id"] == "a-inline" and edge["target_ref"] in refs
+        )
+    if dry_run:
+        assert not cache.exists()
+
+
+@pytest.mark.parametrize("recover_only", [False, True], ids=["automatic", "explicit"])
+@pytest.mark.parametrize("manifest_error", ["missing", "invalid"])
+def test_sidecar_manifest_error_does_not_block_recovery(
+    tmp_path, monkeypatch, recover_only, manifest_error
+):
+    _sidecar_reconcile_project(tmp_path)
+    manifest = tmp_path / "nodes.yml"
+    if manifest_error == "missing":
+        manifest.unlink()
+    else:
+        manifest.write_text("nodes: []\n")
+    destination = tmp_path / "docs/down.md"
+    original = destination.read_bytes()
+    interrupted = b"transaction after image\n"
+    destination.write_bytes(interrupted)
+    artifacts = _write_cli_transaction(tmp_path, destination, original, interrupted)
+    monkeypatch.chdir(tmp_path)
+    result = runner.invoke(
+        app, ["reconcile", "--recover" if recover_only else "--all", "--format", "json"]
+    )
+
+    assert destination.read_bytes() == original
+    assert all(not path.exists() for path in artifacts)
+    if recover_only:
+        assert result.exit_code == 0, (result.stderr, result.exception)
+        assert json.loads(result.stdout)["action"] == "rolled_back"
+        assert result.stderr == ""
+    else:
+        assert result.exit_code == 2
+        assert result.stdout == ""
+        assert "recovered reconcile transaction: rolled_back" in result.stderr
+        assert "MANIFEST_ERROR" in result.stderr
+        assert result.stderr.index("rolled_back") < result.stderr.index("MANIFEST_ERROR")
+
+
+def test_recovery_precedes_external_update_refusal(tmp_path, monkeypatch):
+    _sidecar_reconcile_project(tmp_path)
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path / "cache"))
+    destination = tmp_path / "docs/down.md"
+    original = destination.read_bytes()
+    interrupted = b"transaction after image\n"
+    artifacts = _write_cli_transaction(tmp_path, destination, original, interrupted)
+    destination.write_bytes(interrupted)
+    manifest_before = (tmp_path / "nodes.yml").read_bytes()
+
+    result = runner.invoke(app, ["reconcile", "--all", "--format", "json"])
+
+    assert result.exit_code == 2
+    assert result.stdout == ""
+    assert "recovered reconcile transaction: rolled_back" in result.stderr
+    assert "VALIDATION_ERROR" in result.stderr
+    assert "z-external" in result.stderr
+    assert result.stderr.index("rolled_back") < result.stderr.index("VALIDATION_ERROR")
+    assert destination.read_bytes() == original
+    assert all(not path.exists() for path in artifacts)
+    assert (tmp_path / "nodes.yml").read_bytes() == manifest_before
+
+
+def test_check_actual_allows_manual_acknowledgement_of_external_section(tmp_path, monkeypatch):
+    _sidecar_reconcile_project(tmp_path)
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path / "cache"))
+    config = tmp_path / ".doc-lattice.yml"
+    config.write_text(
+        config.read_text().replace("cache_trust_stat: true", "cache_trust_stat: false")
+    )
+    assert runner.invoke(app, ["reconcile", "a-inline"]).exit_code == 0
+    skill_before = (tmp_path / "skills/skill.md").read_bytes()
+
+    checked = runner.invoke(app, ["check", "--format", "json"])
+
+    assert checked.exit_code == 1
+    edge = next(
+        edge
+        for edge in json.loads(checked.stdout)["edges"]
+        if edge["source_id"] == "z-external" and edge["target_ref"] == "up#rule"
+    )
+    assert edge["state"] == "STALE"
+    assert edge["actual"] == sha256(b"# Rule\nupstream").hexdigest()[:32]
+    manifest = tmp_path / "nodes.yml"
+    records = json.loads(manifest.read_text())
+    records["nodes"][0]["meta"]["derives_from"][0]["seen"] = edge["actual"]
+    manifest.write_text(json.dumps(records))
+
+    assert runner.invoke(app, ["check"]).exit_code == 0
+    assert (tmp_path / "skills/skill.md").read_bytes() == skill_before
+
+
 def _tree_snapshot(root: Path) -> dict[str, tuple[str, bytes]]:
     """Capture every namespace entry without following symlinks or reading special files."""
     snapshot: dict[str, tuple[str, bytes]] = {}

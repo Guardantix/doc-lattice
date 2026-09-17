@@ -12,7 +12,7 @@ from doc_lattice import loader, orchestrate
 from doc_lattice.cache import CacheHit, CacheMiss, LookupPolicy, cache_path, lookup, store
 from doc_lattice.cache.schema import Entry, reconstruct_facts
 from doc_lattice.check import check_lattice, statuses_json, summarize_statuses
-from doc_lattice.config import SidecarProjectConfig, load_config, load_sidecar_config
+from doc_lattice.config import load_config
 from doc_lattice.error_types import (
     DuplicateIdError,
     FrontmatterError,
@@ -819,7 +819,7 @@ def _sidecar_project(tmp_path, *, cache=False, trust_stat=False, manifests=("nod
     if cache:
         config += f"cache_key: testslot\ncache_trust_stat: {str(trust_stat).lower()}\n"
     (tmp_path / ".doc-lattice.yml").write_text(config, encoding="utf-8")
-    return load_sidecar_config(None, tmp_path)
+    return load_config(None, tmp_path)
 
 
 def _manifest(tmp_path, records, name="nodes.yml"):
@@ -1004,7 +1004,9 @@ def test_external_warm_enrollment_removal_restores_skip_warning(tmp_path, monkey
     path.write_text("---\nname: skill\n---\n# Body\n")
     _manifest(tmp_path, [{"path": "docs/skill.md", "meta": {"id": "external"}}])
     enrolled = _sidecar_project(tmp_path, cache=True, trust_stat=trust_stat)
-    removed = SidecarProjectConfig(enrolled.project, ())
+    removed = replace(
+        enrolled, config=enrolled.config.model_copy(update={"sidecar_manifests": None})
+    )
     with pytest.warns(UserWarning, match="declares no"):
         assert load_lattice(removed).nodes_by_id == {}
     with warnings.catch_warnings():
@@ -1060,13 +1062,7 @@ def test_registered_spelling_wins_over_earlier_alias_and_ignore_globs(tmp_path):
     _manifest(tmp_path, [{"path": "./docs/z.md", "meta": {"id": "external"}}])
     project = _sidecar_project(tmp_path)
     assert load_lattice(project).nodes_by_id["external"].path == original
-    ignored = SidecarProjectConfig(
-        replace(
-            project.project,
-            config=project.project.config.model_copy(update={"ignore_globs": ["*.md"]}),
-        ),
-        project.sidecar_manifests,
-    )
+    ignored = replace(project, config=project.config.model_copy(update={"ignore_globs": ["*.md"]}))
     assert load_lattice(ignored).nodes_by_id["external"].path == original
 
 

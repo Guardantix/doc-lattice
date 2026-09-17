@@ -1,9 +1,8 @@
 """Load and validate .doc-lattice.yml, with project-root containment of docs_roots and
 lexical validation of the link source keys.
 
-The sidecar enrollment key AD-51 records is parsed here but not yet accepted: ``load_config``
-still refuses ``sidecar_manifests`` as an unknown key, and only ``load_sidecar_config`` reads it,
-for the engine pieces that are built before a command enables it.
+Sidecar manifest declarations are validated lexically here. Manifest I/O and enrollment belong
+to lattice loading, so a missing or invalid manifest cannot prevent journal recovery.
 """
 
 import re
@@ -71,6 +70,7 @@ class Config(BaseModel):
     # they did not write. link_sources needs no such distinction: both of its shapes are the same
     # refusal, since the gate has no file set without it.
     legacy_marker_sources: list[str] | None = None
+    sidecar_manifests: list[str] | None = None
     linear_team: str | None = None
     cache_key: str | None = None
     cache_trust_stat: bool = False
@@ -164,26 +164,12 @@ class Config(BaseModel):
             raise ValueError(msg)
         return self
 
-
-class SidecarConfig(Config):
-    """The config schema with AD-51's ``sidecar_manifests`` key, which no command accepts yet.
-
-    Kept apart from ``Config`` rather than added to it with a separate refusal, because the
-    unknown-key diagnostic lists the accepted keys from the validating model's own fields: a
-    field on ``Config`` would be advertised by every config error while still being refused.
-    Enabling the key moves the field onto ``Config`` and retires this class.
-    """
-
-    sidecar_manifests: list[str] | None = None
-
     @field_validator("sidecar_manifests", mode="before")
     @classmethod
     def _reject_a_null_manifest_list(cls, value: object) -> object:
         """Refuse ``sidecar_manifests:`` with nothing after it, as AD-49 refuses a null policy.
 
-        Named apart from ``Config._reject_a_written_null`` on purpose: pydantic registers field
-        validators by method name, so reusing that name here would replace the inherited
-        ``legacy_marker_sources`` check rather than add this one beside it.
+        Omission skips this validator; a written null must not silently unregister every node.
         """
         if value is None:
             msg = (
@@ -260,64 +246,8 @@ def load_config(config_path: Path | None, cwd: Path) -> ProjectConfig:
     Raises:
         ConfigError: If the file is missing, invalid, has unknown keys, names a docs root
             that resolves outside the project root, or names an existing docs root that is
-            neither a directory nor a regular ``.md`` file.
-    """
-    _, project = _load_project(config_path, cwd, Config)
-    return project
-
-
-@dataclass(frozen=True, slots=True)
-class SidecarProjectConfig:
-    """A loaded project plus the manifest paths its ``sidecar_manifests`` key declares.
-
-    ``sidecar_manifests`` holds each entry exactly as the config spelled it, in order, and is
-    empty when the key is omitted. A declared key is never empty, since the schema refuses that.
-    """
-
-    project: ProjectConfig
-    sidecar_manifests: tuple[str, ...]
-
-
-def load_sidecar_config(config_path: Path | None, cwd: Path) -> SidecarProjectConfig:
-    """Load config as ``load_config`` does, additionally accepting ``sidecar_manifests``.
-
-    Not reachable from any command: ``load_config`` keeps refusing the key until the AD-51
-    enrollment is enabled, and this is the seam the pieces built before then validate through.
-
-    Args:
-        config_path: Explicit ``--config`` path, or None to look in ``cwd``.
-        cwd: The current working directory.
-
-    Returns:
-        The loaded project and the declared manifest paths.
-
-    Raises:
-        ConfigError: For every failure ``load_config`` reports, and for a ``sidecar_manifests``
-            written as null, declared empty, or holding an entry that is not a usable path
-            string. The message names the config file and the key.
-    """
-    config, project = _load_project(config_path, cwd, SidecarConfig)
-    return SidecarProjectConfig(
-        project=project, sidecar_manifests=tuple(config.sidecar_manifests or ())
-    )
-
-
-def _load_project[ModelT: Config](
-    config_path: Path | None, cwd: Path, model: type[ModelT]
-) -> tuple[ModelT, ProjectConfig]:
-    """Read and validate the config file against ``model``, then resolve the project around it.
-
-    Args:
-        config_path: Explicit ``--config`` path, or None to look in ``cwd``.
-        cwd: The current working directory.
-        model: The schema to validate against, which also supplies the accepted-key help.
-
-    Returns:
-        The validated config as ``model``, and the project built from it.
-
-    Raises:
-        ConfigError: If the file is missing, unreadable, invalid, lacks ``lattice_format``, or
-            names an unusable docs root.
+            neither a directory nor a regular ``.md`` file. Manifest declarations are validated
+            here, but their files and targets are checked only when the lattice loads.
     """
     if config_path is not None:
         if not config_path.exists():
@@ -338,9 +268,9 @@ def _load_project[ModelT: Config](
         project_root = cwd.resolve()
 
     try:
-        config = model.model_validate(raw)
+        config = Config.model_validate(raw)
     except ValidationError as exc:
-        raise ConfigError(_format_validation_error(exc, source, model)) from exc
+        raise ConfigError(_format_validation_error(exc, source, Config)) from exc
 
     # Required only when a config file was actually read: a zero-config run has no file to
     # carry the key, not no skew to catch. Skew lives in each section's `seen` hash, so a
@@ -361,7 +291,7 @@ def _load_project[ModelT: Config](
         raise ConfigError(msg)
 
     roots = _resolve_roots(config.docs_roots, project_root)
-    return config, ProjectConfig(
+    return ProjectConfig(
         config=config, project_root=project_root, resolved_roots=roots, config_path=source
     )
 
