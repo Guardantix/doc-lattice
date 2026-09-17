@@ -5,6 +5,7 @@ import typer
 from ...check import ambiguity_annotation_message
 from ...constants import VALID_REPORT_FORMATS
 from ...lint import lint_json, lint_lattice
+from ...model import format_origins
 from ...report_render import render_lint
 from ..errors import EXIT_FINDING, exit_on_project_error
 from ..github import Annotation, write_annotations
@@ -59,9 +60,21 @@ def register_lint(app: typer.Typer) -> None:
                             lattice.nodes_by_id[violation.source_id].path,
                             "doc-lattice ladder violation",
                             f"{violation.source_id} ({violation.source_authority}) -> "
-                            f"{violation.target_ref} ({violation.target_authority})",
+                            f"{violation.target_ref} ({violation.target_authority})"
+                            + format_origins(violation.origins),
                         )
                         for violation in result.violations
+                    ),
+                    *(
+                        Annotation(
+                            lattice.nodes_by_id[skipped.source_id].path,
+                            "doc-lattice unranked edge",
+                            f"{skipped.source_id} -> {skipped.target_ref} "
+                            f"({skipped.reason})" + format_origins(skipped.origins),
+                            "warning",
+                        )
+                        for skipped in result.skipped
+                        if skipped.origins
                     ),
                     *(
                         Annotation(

@@ -1,16 +1,20 @@
 """Classify every derives_from edge against its locked seen hash."""
 
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 
 from .constants import EDGE_STATES, EdgeState
 from .model import (
     CollisionMember,
+    DocumentOrigin,
     Edge,
     Lattice,
     TargetId,
     collision_members_json,
+    external_origins,
     format_collision,
+    format_origins,
+    origins_json,
 )
 from .path_utils import format_path_for_display
 from .resolve import cached_target_hash
@@ -31,16 +35,34 @@ class EdgeStatus:
     expected: str | None
     actual: str | None
     collision: tuple[CollisionMember, ...] = ()
+    origins: Mapping[str, DocumentOrigin] = field(default_factory=dict)
 
 
-def _ambiguous(source_id: str, edge: Edge, collision: tuple[CollisionMember, ...]) -> EdgeStatus:
+def _edge_origins(lattice: Lattice, source_id: str, edge: Edge) -> dict[str, DocumentOrigin]:
+    """Select the source and the Markdown owner of a resolved edge target."""
+    participants = [source_id]
+    if edge.target_id is not None:
+        participants.append(lattice.file_id_by_path[lattice.index[edge.target_id].path])
+    return external_origins(lattice, participants)
+
+
+def _ambiguous(
+    lattice: Lattice, source_id: str, edge: Edge, collision: tuple[CollisionMember, ...]
+) -> EdgeStatus:
     """Build the one AMBIGUOUS record shape every command reads.
 
     ``actual`` is None rather than the live hash: naming a hash for a target the tool refuses to
     identify would read as a drift comparison that was actually made.
     """
     return EdgeStatus(
-        source_id, edge.target_ref, edge.target_id, "AMBIGUOUS", edge.seen, None, collision
+        source_id,
+        edge.target_ref,
+        edge.target_id,
+        "AMBIGUOUS",
+        edge.seen,
+        None,
+        collision,
+        _edge_origins(lattice, source_id, edge),
     )
 
 
@@ -64,7 +86,7 @@ def ambiguous_edges(lattice: Lattice) -> tuple[EdgeStatus, ...]:
                 continue
             collision = lattice.collisions.get(edge.target_id)
             if collision is not None:
-                found.append(_ambiguous(node_id, edge, collision))
+                found.append(_ambiguous(lattice, node_id, edge, collision))
     return tuple(found)
 
 
@@ -83,6 +105,7 @@ def ambiguous_json(statuses: Sequence[EdgeStatus]) -> list[dict]:
             "target_ref": status.target_ref,
             "target_id": status.target_id.as_ref() if status.target_id else None,
             "collision": collision_members_json(status.collision),
+            **origins_json(status.origins),
         }
         for status in statuses
         if status.state == "AMBIGUOUS"
@@ -130,6 +153,7 @@ def ambiguity_annotation_message(lattice: Lattice, status: EdgeStatus) -> str:
     return (
         f"{status.source_id} -> {status.target_ref} is AMBIGUOUS in "
         f"{_collision_file(lattice, status)} ({format_collision(status.collision)})"
+        + format_origins(status.origins)
     )
 
 
@@ -175,6 +199,7 @@ def statuses_json(statuses: list[EdgeStatus], summary: Mapping[EdgeState, int]) 
                 "expected": status.expected,
                 "actual": status.actual,
                 "collision": collision_members_json(status.collision),
+                **origins_json(status.origins),
             }
             for status in statuses
         ],
@@ -213,16 +238,29 @@ def _classify(
     compared against ``seen``: a missing ``seen`` is UNRECONCILED, a mismatch is STALE, and
     a match is OK.
     """
+    origins = _edge_origins(lattice, source_id, edge)
     if edge.target_id is None:
-        return EdgeStatus(source_id, edge.target_ref, None, "BROKEN", edge.seen, None)
+        return EdgeStatus(
+            source_id, edge.target_ref, None, "BROKEN", edge.seen, None, origins=origins
+        )
     collision = lattice.collisions.get(edge.target_id)
     if collision is not None:
-        return _ambiguous(source_id, edge, collision)
+        return _ambiguous(lattice, source_id, edge, collision)
     actual = cached_target_hash(lattice, edge.target_id, cache)
     if edge.seen is None:
-        return EdgeStatus(source_id, edge.target_ref, edge.target_id, "UNRECONCILED", None, actual)
+        return EdgeStatus(
+            source_id,
+            edge.target_ref,
+            edge.target_id,
+            "UNRECONCILED",
+            None,
+            actual,
+            origins=origins,
+        )
     state: EdgeState = "OK" if actual == edge.seen else "STALE"
-    return EdgeStatus(source_id, edge.target_ref, edge.target_id, state, edge.seen, actual)
+    return EdgeStatus(
+        source_id, edge.target_ref, edge.target_id, state, edge.seen, actual, origins=origins
+    )
 
 
 def has_drift(statuses: list[EdgeStatus]) -> bool:

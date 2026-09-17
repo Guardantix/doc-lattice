@@ -5,7 +5,10 @@ from .model import (
     Lattice,
     TargetId,
     collision_members_json,
+    external_origins,
     format_collision_members,
+    format_origins,
+    origins_json,
 )
 
 
@@ -85,7 +88,9 @@ def _ambiguous_lines(lattice: Lattice, prefix: str) -> list[str]:
         One line per ambiguous target, ordered by target ref.
     """
     return [
-        f"{prefix} ambiguous {target_id.as_ref()}: " + format_collision_members(members)
+        f"{prefix} ambiguous {target_id.as_ref()}: "
+        + format_collision_members(members)
+        + format_origins(external_origins(lattice, (target_id.file_id,)))
         for target_id, members in _ambiguous_components(lattice)
     ]
 
@@ -228,6 +233,7 @@ def to_json(
             "layer": node.layer,
             "authority": node.authority,
             "path": str(node.path),
+            **origins_json(external_origins(lattice, (node_id,))),
         }
         for node_id, node in sorted(lattice.nodes_by_id.items())
     ]
@@ -237,6 +243,7 @@ def to_json(
             "downstream": source_id,
             "stale": is_stale,
             "ambiguous": is_ambiguous,
+            **origins_json(external_origins(lattice, (upstream, source_id))),
         }
         for upstream, source_id, is_stale, is_ambiguous in _graph_edges(lattice, stale_edges)
     ]
@@ -244,6 +251,7 @@ def to_json(
         {
             "target_id": target_id.as_ref(),
             "members": collision_members_json(members),
+            **origins_json(external_origins(lattice, (target_id.file_id,))),
         }
         for target_id, members in _ambiguous_components(lattice)
     ]

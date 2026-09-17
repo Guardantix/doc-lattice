@@ -14,6 +14,7 @@ from ...check import (
     summarize_statuses,
 )
 from ...constants import VALID_EDGE_STATES, VALID_REPORT_FORMATS
+from ...model import format_origins
 from ...report_render import render_statuses
 from ..errors import EXIT_FINDING, EXIT_TOOL_ERROR, exit_on_project_error
 from ..github import Annotation, write_annotations
@@ -123,7 +124,8 @@ def register_check(app: typer.Typer) -> None:
                         # member lines are in the upstream one, which has to be named.
                         ambiguity_annotation_message(lattice, status)
                         if status.collision
-                        else f"{status.source_id} -> {status.target_ref} is {status.state}",
+                        else f"{status.source_id} -> {status.target_ref} is {status.state}"
+                        + format_origins(status.origins),
                     )
                     for status in displayed
                     if status.state != "OK"

@@ -14,7 +14,15 @@ from doc_lattice.lint import (
     lint_lattice,
 )
 from doc_lattice.loader import build_lattice
-from doc_lattice.model import Lattice, NodeMeta, ParsedDoc, RawEdge, TargetId
+from doc_lattice.model import (
+    DocumentOrigin,
+    ExternalDeclaration,
+    Lattice,
+    NodeMeta,
+    ParsedDoc,
+    RawEdge,
+    TargetId,
+)
 
 
 def _doc(id_, authority=None, derives=(), body="x\n"):
@@ -310,3 +318,40 @@ def test_a_clean_lattice_reports_an_empty_ambiguous_block():
     )
 
     assert lint_json(lint_lattice(lattice))["ambiguous"] == []
+
+
+def _external_lattice(*, ambiguous=False, authority="binding"):
+
+    return build_lattice(
+        [
+            ParsedDoc(
+                Path("docs/up.md"),
+                NodeMeta(id="up", authority="derived"),
+                "# Notes\n\n# Notes\n" if ambiguous else "# Notes\nbody\n",
+                origin=DocumentOrigin(
+                    Path("docs/up.md"), ExternalDeclaration("meta/up.yml", 4, "./docs/up.md")
+                ),
+            ),
+            ParsedDoc(
+                Path("docs/down.md"),
+                NodeMeta(
+                    id="down",
+                    authority=authority,
+                    tickets=["GTX-770"],
+                    derives_from=[RawEdge(ref="up#notes", seen="old"), RawEdge(ref="missing")],
+                ),
+                "body\n",
+                origin=DocumentOrigin(
+                    Path("docs/down.md"), ExternalDeclaration("meta/down.yml", 1, "docs/down.md")
+                ),
+            ),
+        ]
+    )
+
+
+def test_external_lint_origins_include_section_owner_and_skipped_endpoints():
+    violation = lint_json(lint_lattice(_external_lattice()))["violations"][0]
+    assert list(violation["origins"]) == ["down", "up"]
+    skipped = lint_json(lint_lattice(_external_lattice(authority=None)))["skipped"][0]
+    assert list(skipped["origins"]) == ["down", "up"]
+    assert skipped["origins"]["up"]["record_index"] == 4

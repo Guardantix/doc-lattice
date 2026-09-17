@@ -1,10 +1,11 @@
 """Validate the authority ladder over derives_from edges. Pure: no I/O."""
 
-from dataclasses import dataclass
+from collections.abc import Mapping
+from dataclasses import dataclass, field
 
 from .check import EdgeStatus, ambiguous_edges, ambiguous_json
 from .constants import AUTHORITY_LADDER, Authority, SkipReason
-from .model import Lattice, TargetId
+from .model import DocumentOrigin, Lattice, TargetId, external_origins, origins_json
 from .resolve import node_for_path
 
 
@@ -17,6 +18,7 @@ class LadderViolation:
     target_id: TargetId
     target_ref: str
     target_authority: Authority
+    origins: Mapping[str, DocumentOrigin] = field(default_factory=dict)
 
 
 @dataclass(frozen=True, slots=True)
@@ -27,6 +29,7 @@ class SkippedEdge:
     target_ref: str
     target_id: TargetId
     reason: SkipReason
+    origins: Mapping[str, DocumentOrigin] = field(default_factory=dict)
 
 
 @dataclass(frozen=True, slots=True)
@@ -60,6 +63,7 @@ def lint_json(result: LintResult) -> dict:
                 "target_id": violation.target_id.as_ref(),
                 "target_ref": violation.target_ref,
                 "target_authority": violation.target_authority,
+                **origins_json(violation.origins),
             }
             for violation in result.violations
         ],
@@ -69,6 +73,7 @@ def lint_json(result: LintResult) -> dict:
                 "target_ref": skipped.target_ref,
                 "target_id": skipped.target_id.as_ref(),
                 "reason": skipped.reason,
+                **origins_json(skipped.origins),
             }
             for skipped in result.skipped
         ],
@@ -119,14 +124,17 @@ def lint_lattice(lattice: Lattice) -> LintResult:
             if target_id is None:
                 continue  # broken edge: reported by check, not counted here
             target_authority = _target_authority(lattice, target_id)
+            origins = external_origins(
+                lattice, (node_id, lattice.file_id_by_path[lattice.index[target_id].path])
+            )
             if source_authority is None:
                 skipped.append(
-                    SkippedEdge(node_id, edge.target_ref, target_id, "source-unannotated")
+                    SkippedEdge(node_id, edge.target_ref, target_id, "source-unannotated", origins)
                 )
                 continue
             if target_authority is None:
                 skipped.append(
-                    SkippedEdge(node_id, edge.target_ref, target_id, "target-unannotated")
+                    SkippedEdge(node_id, edge.target_ref, target_id, "target-unannotated", origins)
                 )
                 continue
             if _rank(target_authority) < _rank(source_authority):
@@ -137,6 +145,7 @@ def lint_lattice(lattice: Lattice) -> LintResult:
                         target_id=target_id,
                         target_ref=edge.target_ref,
                         target_authority=target_authority,
+                        origins=origins,
                     )
                 )
     return LintResult(

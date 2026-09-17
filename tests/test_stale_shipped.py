@@ -11,7 +11,7 @@ from doc_lattice.check import check_lattice
 from doc_lattice.constants import VALID_LINEAR_STATE_TYPES, VALID_SEVERITIES
 from doc_lattice.error_types import ValidationError
 from doc_lattice.loader import build_lattice
-from doc_lattice.model import NodeMeta, ParsedDoc, RawEdge
+from doc_lattice.model import DocumentOrigin, ExternalDeclaration, NodeMeta, ParsedDoc, RawEdge
 from doc_lattice.stale_shipped import (
     _SEVERITY_RANK,
     _STATE_SEVERITY,
@@ -334,3 +334,42 @@ def test_an_ambiguous_edge_still_triggers_the_audit():
 
     findings = stale_shipped(lattice, build_audit_trigger(lattice, None), {}, {})
     assert [finding.node_id for finding in findings] == ["down"]
+
+
+def _external_lattice(*, ambiguous=False, authority="binding"):
+
+    return build_lattice(
+        [
+            ParsedDoc(
+                Path("docs/up.md"),
+                NodeMeta(id="up", authority="derived"),
+                "# Notes\n\n# Notes\n" if ambiguous else "# Notes\nbody\n",
+                origin=DocumentOrigin(
+                    Path("docs/up.md"), ExternalDeclaration("meta/up.yml", 4, "./docs/up.md")
+                ),
+            ),
+            ParsedDoc(
+                Path("docs/down.md"),
+                NodeMeta(
+                    id="down",
+                    authority=authority,
+                    tickets=["GTX-770"],
+                    derives_from=[RawEdge(ref="up#notes", seen="old"), RawEdge(ref="missing")],
+                ),
+                "body\n",
+                origin=DocumentOrigin(
+                    Path("docs/down.md"), ExternalDeclaration("meta/down.yml", 1, "docs/down.md")
+                ),
+            ),
+        ]
+    )
+
+
+def test_ticket_findings_carry_source_and_resolved_drifted_origins():
+    lattice = _external_lattice()
+    findings = stale_shipped(lattice, {"down": ("up#notes", "missing")}, {}, {})
+    assert len(findings) == 1
+    assert list(findings[0].origins) == ["down", "up"]
+    declaration = findings[0].origins["up"].declaration
+    assert declaration is not None
+    assert declaration.record_index == 4

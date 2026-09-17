@@ -13,7 +13,7 @@ from rich.markup import escape
 from .check import EdgeStatus
 from .constants import EDGE_STATES, EdgeState
 from .lint import LintResult
-from .model import Node, format_collision
+from .model import Node, format_collision, format_origins
 from .path_utils import format_path_for_display
 
 _STATE_COL_WIDTH = 13  # widest EdgeState ("UNRECONCILED") is 12 chars, plus one trailing space
@@ -82,6 +82,7 @@ def _status_row(status: EdgeStatus) -> str:
     return (
         f"[{color}]{status.state:<{_STATE_COL_WIDTH}}[/{color}] "
         f"{escape(status.source_id)} -> {escape(status.target_ref)}{detail}"
+        f"{escape(format_origins(status.origins))}"
     )
 
 
@@ -132,10 +133,18 @@ def render_lint(console: Console, result: LintResult) -> None:
         console.print(
             f"[red]VIOLATION[/red]  {escape(violation.source_id)} "
             f"({violation.source_authority}) -> {escape(violation.target_ref)} "
-            f"({violation.target_authority})",
+            f"({violation.target_authority}){escape(format_origins(violation.origins))}",
             highlight=False,
             soft_wrap=True,
         )
+    for skipped in result.skipped:
+        if skipped.origins:
+            console.print(
+                f"SKIPPED  {escape(skipped.source_id)} -> {escape(skipped.target_ref)} "
+                f"({skipped.reason}){escape(format_origins(skipped.origins))}",
+                highlight=False,
+                soft_wrap=True,
+            )
     console.print(_skip_summary(result), highlight=False, soft_wrap=True)
 
 
@@ -185,8 +194,14 @@ def render_impact(
     for node, _impact_depth_not_shown in affected:
         tickets = ", ".join(node.tickets) if node.tickets else "-"
         displayed_path = escape(format_path_for_display(node.path))
+        origins = (
+            {node.id: node.origin}
+            if node.origin is not None and node.origin.declaration is not None
+            else {}
+        )
         console.print(
-            f"{escape(node.id)}  ({displayed_path})  tickets: {escape(tickets)}",
+            f"{escape(node.id)}  ({displayed_path})  tickets: {escape(tickets)}"
+            f"{escape(format_origins(origins))}",
             highlight=False,
             soft_wrap=True,
         )
