@@ -524,13 +524,11 @@ conflict, and rolls the batch back if anything fails before the commit. Its temp
 a project-root journal plus staged before and after images, covered by the `.gitignore` block that
 `doc-lattice init` prints.
 
-An enrolled external downstream is deliberately not rewritten. If a selected external downstream
-has a STALE or UNRECONCILED edge, reconcile exits 2 with `VALIDATION_ERROR` before it plans or
-stages any rewrite, including inline rewrites in the same batch. The refusal produces no success
-output in human or JSON format, and it applies to `--dry-run` too. An external upstream is fine:
-an inline downstream may reconcile an edge to it normally. A selection containing an external
-downstream but no edge that needs an acknowledgement does not block other selected inline updates;
-an external-only selection with no update is a successful no-op. Use the
+An enrolled external downstream is deliberately not rewritten: if a selected external downstream
+has an edge that needs a new `seen`, reconcile refuses the whole batch with `VALIDATION_ERROR`,
+under `--dry-run` too, while an external upstream reconciles normally. See
+[RECONCILE.md](https://github.com/Guardantix/doc-lattice/blob/main/RECONCILE.md#selectors) for
+the exact refusal contract, and use the
 [manual external acknowledgement workflow](#manual-external-acknowledgement) after reviewing the
 upstream change.
 

@@ -37,7 +37,14 @@ from ruamel.yaml.tokens import (
 from .error_types import BrokenRefError, FrontmatterError, UnreadableDocError, ValidationError
 from .frontmatter_parser import FrontmatterParts, refuse_double_hyphen, split_frontmatter_parts
 from .hashing import normalize_newlines
-from .model import Lattice, TargetId, format_collision, format_document_origin, parse_ref
+from .model import (
+    Lattice,
+    TargetId,
+    format_collision,
+    format_document_origin,
+    node_origins,
+    parse_ref,
+)
 from .path_utils import format_path_for_display
 from .resolve import cached_target_hash
 from .yaml_boundary import YAML_LOAD_ERRORS, is_merge_key_scalar
@@ -1574,11 +1581,11 @@ def reconcile(
             new_seen = cached_target_hash(lattice, edge.target_id, cache)
             if edge.seen is not None and new_seen == edge.seen:
                 continue
-            if node.origin is not None and node.origin.declaration is not None:
+            if external := node_origins(node):
                 raise ValidationError(
                     f"cannot reconcile {node_id!r} -> {edge.target_ref!r} at "
-                    f"{format_document_origin(node.origin)}: updating an external node's seen "
-                    "is not supported in this release; review the upstream, then update this "
+                    f"{format_document_origin(external[node.id])}: updating an external node's "
+                    "seen is not supported in this release; review the upstream, then update this "
                     "manifest record's seen by hand using the matching edge's actual value "
                     "from 'doc-lattice check --format json' with cache_trust_stat disabled"
                 )
