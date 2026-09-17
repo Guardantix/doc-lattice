@@ -2,10 +2,11 @@
 
 Pure and filesystem-free, so ``config`` can validate a selector at load without reaching the
 walk that expands it, and ``scaffold`` can spell one for a literal root without reaching the
-filesystem at all. The walk itself lives in ``link_check``.
+filesystem at all. The walk itself lives in ``path_selection``.
 
-Two config keys are written in this grammar and are matched by different means. ``link_sources``
-is expanded against the filesystem by that walk, which is what turns a selector into files.
+The source keys use this grammar by different means. ``link_sources`` and
+``sidecar_coverage.select`` are expanded against the filesystem by that walk, which is what
+turns a selector into files.
 ``legacy_marker_sources`` is matched against the spellings the walk already retained, by
 ``selector_matches_path`` here, so a compatibility declaration can never add a file to the gate;
 the two therefore have to agree about what a selector means, which is why the matcher is a
@@ -29,8 +30,8 @@ from .text_utils import strip_control_chars
 
 SELECTOR_SEPARATOR = "/"
 RECURSIVE_SEGMENT = "**"
-# The config keys written in this grammar, named here because a diagnostic about a rejected entry
-# has to say which key carried it and both keys' refusals are built by one function below.
+# The link config keys written in this grammar. Coverage supplies its nested key from config;
+# every consumer names the key that carried a rejected entry through one diagnostic helper.
 LINK_SOURCES_KEY = "link_sources"
 LEGACY_MARKER_SOURCES_KEY = "legacy_marker_sources"
 _DOT_SEGMENTS = frozenset({".", ".."})
@@ -48,7 +49,7 @@ def validate_link_selector(entry: str) -> tuple[str, ...]:
     the entry.
 
     Args:
-        entry: One ``link_sources`` entry as written.
+        entry: One selector entry as written.
 
     Returns:
         The segments between separators, at least one.
@@ -98,7 +99,7 @@ def selector_defect_message(key: str, entry: str, defect: ValueError) -> str:
     selection walk -- report the same defect about the same value, and a reader who meets one
     message should not have to recognize the other as the same refusal.
 
-    ``key`` is a parameter rather than the literal ``link_sources`` because a second key is
+    ``key`` is a parameter rather than the literal ``link_sources`` because several keys are
     written in this grammar: a compatibility entry rejected under the name of the key that did
     not carry it sends the reader to the wrong list to repair it.
 
@@ -175,7 +176,7 @@ def _recursive_closure(positions: set[int], segments: tuple[str, ...]) -> set[in
 def selector_matches_path(segments: tuple[str, ...], path: str) -> bool:
     """Report whether one validated selector matches one project-relative POSIX spelling.
 
-    The lexical half of what ``link_check``'s walk does against the filesystem, and it has to
+    The lexical half of what ``path_selection``'s walk does against the filesystem, and it has to
     agree with it: the selector is anchored at the project root, every part but the last is a
     directory the walk would have descended into, and only the last part can satisfy the last
     segment. ``**`` consumes zero or more directories, and as the final segment it also matches

@@ -9,6 +9,8 @@ from pydantic import ValidationError as PydanticValidationError
 import doc_lattice.config as config_module
 from doc_lattice.config import (
     Config,
+    CoverageExemption,
+    SidecarCoverage,
     declares_lattice_format,
     load_config,
 )
@@ -766,18 +768,190 @@ def test_a_compatibility_entry_matching_nothing_is_not_rejected_at_load(tmp_path
     assert load_config(None, tmp_path).config.legacy_marker_sources == ["nowhere/**"]
 
 
-@pytest.mark.parametrize("value", ["{select: ['skills/**']}", "", "{}"])
-def test_the_user_facing_loader_still_refuses_sidecar_coverage(tmp_path: Path, value: str):
+def test_config_defaults_to_no_sidecar_coverage(tmp_path: Path):
+    loaded = load_config(None, tmp_path)
+
+    assert loaded.config.sidecar_coverage is None
+
+
+def test_config_reads_sidecar_coverage_without_selecting_files(tmp_path: Path):
     (tmp_path / ".doc-lattice.yml").write_text(
-        f"lattice_format: 2\nsidecar_coverage: {value}\n", encoding="utf-8"
+        "lattice_format: 2\n"
+        "sidecar_coverage:\n"
+        "  select: [skills/**, '*.md']\n"
+        "  exempt:\n"
+        "    - path: skills/retired.md\n"
+        "      reason: retained as a historical example\n",
+        encoding="utf-8",
+    )
+
+    coverage = load_config(None, tmp_path).config.sidecar_coverage
+
+    assert coverage == SidecarCoverage(
+        select=["skills/**", "*.md"],
+        exempt=[
+            CoverageExemption(path="skills/retired.md", reason="retained as a historical example")
+        ],
+    )
+
+
+def test_config_coverage_omitted_exempt_means_no_exemptions(tmp_path: Path):
+    (tmp_path / ".doc-lattice.yml").write_text(
+        "lattice_format: 2\nsidecar_coverage: {select: ['skills/**']}\n", encoding="utf-8"
+    )
+
+    coverage = load_config(None, tmp_path).config.sidecar_coverage
+
+    assert coverage is not None
+    assert coverage == SidecarCoverage(select=["skills/**"])
+    assert coverage.exempt is None
+
+
+@pytest.mark.parametrize(
+    ("value", "location", "reason"),
+    [
+        pytest.param("", "sidecar_coverage", "written as null", id="coverage-null"),
+        pytest.param(
+            "{}", "sidecar_coverage", "declared but names no selector", id="coverage-empty"
+        ),
+        pytest.param(
+            "[]", "sidecar_coverage", "Input should be a valid dictionary", id="not-mapping"
+        ),
+        pytest.param(
+            "{select: []}",
+            "sidecar_coverage.select",
+            "declared but names no selector",
+            id="select-empty",
+        ),
+        pytest.param(
+            "{select: null}", "sidecar_coverage.select", "written as null", id="select-null"
+        ),
+        pytest.param(
+            "{select: '*.md'}",
+            "sidecar_coverage.select",
+            "Input should be a valid list",
+            id="select-not-list",
+        ),
+        pytest.param(
+            "{select: [1]}",
+            "sidecar_coverage.select.0",
+            "Input should be a valid string",
+            id="select-entry-not-string",
+        ),
+        pytest.param(
+            "{select: ['docs/']}", "sidecar_coverage.select", "separator", id="select-malformed"
+        ),
+        pytest.param(
+            "{select: ['*.md'], exempt: null}",
+            "sidecar_coverage.exempt",
+            "written as null",
+            id="exempt-null",
+        ),
+        pytest.param(
+            "{select: ['*.md'], exempt: []}",
+            "sidecar_coverage.exempt",
+            "declared but names no exemption",
+            id="exempt-empty",
+        ),
+        pytest.param(
+            "{select: ['*.md'], exempt: {path: a, reason: b}}",
+            "sidecar_coverage.exempt",
+            "Input should be a valid list",
+            id="exempt-not-list",
+        ),
+    ],
+)
+def test_config_refuses_invalid_sidecar_coverage_declarations(
+    tmp_path: Path, value: str, location: str, reason: str
+):
+    config = tmp_path / ".doc-lattice.yml"
+    config.write_text(f"lattice_format: 2\nsidecar_coverage: {value}\n", encoding="utf-8")
+
+    with pytest.raises(ConfigError) as info:
+        load_config(None, tmp_path)
+
+    message = str(info.value)
+    assert f"invalid config {format_path_for_display(config)}:" in message
+    assert location in message
+    assert reason in message
+
+
+@pytest.mark.parametrize(
+    ("exemption", "location", "reason"),
+    [
+        pytest.param("{}", "sidecar_coverage.exempt.0.path", "Field required", id="empty"),
+        pytest.param(
+            "{path: '', reason: allowed}",
+            "sidecar_coverage.exempt.0.path",
+            "must not be empty",
+            id="empty-path",
+        ),
+        pytest.param(
+            "{path: allowed.md, reason: ''}",
+            "sidecar_coverage.exempt.0.reason",
+            "must not be empty",
+            id="empty-reason",
+        ),
+        pytest.param(
+            "{path: 1, reason: allowed}",
+            "sidecar_coverage.exempt.0.path",
+            "Input should be a valid string",
+            id="path-not-string",
+        ),
+        pytest.param(
+            "{path: null, reason: allowed}",
+            "sidecar_coverage.exempt.0.path",
+            "Input should be a valid string",
+            id="path-null",
+        ),
+        pytest.param(
+            "{path: allowed.md, reason: 1}",
+            "sidecar_coverage.exempt.0.reason",
+            "Input should be a valid string",
+            id="reason-not-string",
+        ),
+        pytest.param(
+            "{path: allowed.md, reason: null}",
+            "sidecar_coverage.exempt.0.reason",
+            "Input should be a valid string",
+            id="reason-null",
+        ),
+        pytest.param(
+            "{path: allowed.md, reason: allowed, extra: nope}",
+            "sidecar_coverage.exempt.0.extra",
+            "Extra inputs are not permitted",
+            id="unknown-exemption-key",
+        ),
+    ],
+)
+def test_config_refuses_invalid_sidecar_coverage_exemptions(
+    tmp_path: Path, exemption: str, location: str, reason: str
+):
+    config = tmp_path / ".doc-lattice.yml"
+    config.write_text(
+        f"lattice_format: 2\nsidecar_coverage:\n  select: ['*.md']\n  exempt: [{exemption}]\n",
+        encoding="utf-8",
     )
 
     with pytest.raises(ConfigError) as info:
         load_config(None, tmp_path)
 
     message = str(info.value)
-    assert "sidecar_coverage: Extra inputs are not permitted" in message
-    assert "sidecar_coverage" not in message.split("accepted keys:")[1]
+    assert f"invalid config {format_path_for_display(config)}:" in message
+    assert location in message
+    assert reason in message
+
+
+def test_config_refuses_unknown_sidecar_coverage_keys(tmp_path: Path):
+    (tmp_path / ".doc-lattice.yml").write_text(
+        "lattice_format: 2\nsidecar_coverage: {select: ['*.md'], extra: nope}\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ConfigError) as info:
+        load_config(None, tmp_path)
+
+    assert "sidecar_coverage.extra: Extra inputs are not permitted" in str(info.value)
 
 
 def test_unknown_key_help_advertises_sidecar_manifests(tmp_path: Path):
@@ -788,6 +962,7 @@ def test_unknown_key_help_advertises_sidecar_manifests(tmp_path: Path):
 
     assert "accepted keys:" in str(info.value)
     assert "sidecar_manifests" in str(info.value).split("accepted keys:")[1]
+    assert "sidecar_coverage" in str(info.value).split("accepted keys:")[1]
 
 
 def test_config_reads_declared_manifests_verbatim_without_opening_them(tmp_path: Path):

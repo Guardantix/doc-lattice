@@ -10,12 +10,12 @@ from link_gate_helpers import _requires_permission_enforcement, _write
 
 from doc_lattice import link_check as link_check_module
 from doc_lattice import markdown_compat as markdown_compat_module
+from doc_lattice import path_selection as path_selection_module
 from doc_lattice.error_types import ConfigError, UnreadableDocError
 from doc_lattice.link_check import (
     _PARSER,
     LinkFinding,
     _anchor_hrefs,
-    _is_directory,
     _links_in,
     _resolved,
     _split_destination,
@@ -24,6 +24,7 @@ from doc_lattice.link_check import (
     select_legacy_marker_sources,
     select_link_sources,
 )
+from doc_lattice.path_selection import _is_directory
 from doc_lattice.path_utils import format_path_for_display
 
 
@@ -1296,14 +1297,14 @@ def test_recursive_segments_scan_each_directory_a_bounded_number_of_times(tmp_pa
     _write(tmp_path, "/".join(parts) + "/leaf.md", "# leaf\n")
 
     calls = 0
-    real_scan = link_check_module._scan
+    real_scan = path_selection_module._scan
 
-    def counting_scan(directory):
+    def counting_scan(directory, policy):
         nonlocal calls
         calls += 1
-        return real_scan(directory)
+        return real_scan(directory, policy)
 
-    monkeypatch.setattr(link_check_module, "_scan", counting_scan)
+    monkeypatch.setattr(path_selection_module, "_scan", counting_scan)
 
     selected = select_link_sources(tmp_path, ["**/**/**/**/**/*.md"])
 

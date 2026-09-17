@@ -56,10 +56,12 @@ edges.
 **Status:** Accepted; amended by AD-32 and AD-45
 **Context:** Graph and report logic must be testable against synthetic inputs.
 **Decision:** All graph and report logic is filesystem-free and pure. `config`,
-`discovery`, and `orchestrate` own load-path filesystem work. `link_check.py` owns the
-read-only filesystem work of the `links` gate: selector expansion by a no-follow walk,
-containment of both ends of a link, and the source and target reads. It is the one boundary
-that never feeds the lattice. `persistence.py` owns
+`discovery`, and `orchestrate` own load-path filesystem work. `path_selection.py` owns the
+shared no-follow selector walk, retaining every project-relative spelling and its selecting
+declarations. `sidecar_coverage.py` owns load-time coverage containment, regular-file checks, and
+comparison with enrolled targets and exact exemptions. `link_check.py` owns the read-only
+filesystem work of the `links` gate: alias deduplication after shared selection, containment of
+both ends of a link, and the source and target reads. Its results never feed the lattice. `persistence.py` owns
 shared low-level durable staging, replace, create-if-absent, fingerprint, sync, and
 cleanup primitives. `reconcile_transaction.py` owns the reconcile lock capability and
 mechanics, independent live destination preflight for commits, durable commit and
@@ -2473,12 +2475,16 @@ inventory's `github_id` values and its private walk is deleted, so there is one 
 "the ids GitHub allocates" rather than two that agree by discipline. Addressability is unchanged:
 the wider inventory is read, never allocated from, so no cached derivation moves.
 
-**Selection is a no-follow walk of the module's own, not `Path.glob`.** `Path.glob` orders
+**Selection uses the shared no-follow boundary, not `Path.glob`.** `Path.glob` orders
 results unspecifiedly, matches case by platform, stops following symlinks only while expanding
 `**`, and suppresses scanning errors. The walk is POSIX on every platform, case-sensitive by code
 point, never enters a symlinked directory (a link to `/` would otherwise turn `**` into a
 filesystem walk), reports a directory it cannot scan as exit 2, and orders by sorting the union
 of lexical matches before judging them, so YAML order and filesystem order cannot change output.
+GTX-756 extracts the walk into `path_selection.py`, which retains all spellings and sorted unique
+selecting declarations. `select_link_sources` still judges and collapses aliases afterward; its
+errors, ordering, and symlink behavior are unchanged. Coverage chooses the stricter traversal
+policy AD-51 records without changing the `links` contract.
 
 **Containment after selection, so an escaping source is a finding.** `docs_roots` resolution
 rejects an escaping entry at load and discovery skips one with a warning; both are wrong here,
@@ -3023,15 +3029,16 @@ reads manifests fresh. Public admission in GTX-766 does not change the cached fi
 representation introduced by GTX-769: registration is outside the cache and the existing facts
 are reused.
 
-**Future coverage is independent of discovery and of registration (GTX-756).** A future optional
-`sidecar_coverage` key
-holds a mapping with exactly two keys: `select`, a required non-empty list of selector strings,
+**Coverage is independent of discovery and of registration (GTX-756).** The optional
+`sidecar_coverage` key holds a mapping with only these keys: `select`, a required non-empty list of selector strings,
 and `exempt`, an optional list of mappings each carrying exactly `path` and `reason`, both
 non-empty strings. As for `sidecar_manifests`, a null or empty `sidecar_coverage`, `select`, or
 declared `exempt` is refused at config load, and an omitted `exempt` means no exemptions. The
 selectors are AD-45's:
-`link_selectors` grammar, expanded by the `links` gate's no-follow walk from the project root,
-which already reports a source that escapes through a symlink rather than skipping it. Discovery's
+`link_selectors` grammar, expanded by the shared `path_selection` no-follow walk from the project
+root. It retains every spelling and all its selecting declarations, before the alias collapse
+`links` applies. Each selector must match a path, and filesystem inspection failures refuse the
+load. Discovery's
 `docs_roots`, ignore globs, missing-file skips, escape warnings, and deduplication play no part,
 because each of those is a way a file can drop out of the list discovery returns, and reusing
 that list would hide the omissions coverage exists to report.
@@ -3040,16 +3047,32 @@ that list would hide the omissions coverage exists to report.
   external registration, or an inline node discovery actually loaded. Validity alone does not
   cover a file, so a valid inline file outside `docs_roots` or matched by an ignore glob is
   uncovered, because its edges are not in the graph any command reads. Coverage never enrolls a
-  file. An untracked or id-less file is uncovered too.
+  file. A contained alias of an enrolled target is covered; an untracked or id-less file is
+  uncovered. Coverage works without any manifest declaration.
 - An exemption names one exact path, never a glob, and a non-empty reason, so exempting today's
-  file waives nothing for a future one. An exemption that matches no path the walk kept is
-  refused as stale, the AD-49 rule for an entry that matches nothing.
-- A selected path that is a symlink escaping the project root is uncovered and reported. It is
-  not skipped.
+  file waives nothing for a future one. Matching is literal against retained project-relative
+  spellings, with no glob expansion, normalization, or resolved-target substitution. An alias
+  exemption cannot transfer to another alias or a newly added earlier-sorting spelling. An
+  exemption that matches no path the walk kept is refused as stale, the AD-49 rule for an entry
+  that matches nothing.
+- The coverage boundary calls `safe_resolve()` and requires a regular file before granting
+  coverage or an exemption. An escaping or dangling symlink and a special file are refused; an
+  exemption cannot waive these checks.
+- Coverage refuses a symlinked directory wherever the selector would otherwise traverse it,
+  without entering it. A covered sibling cannot conceal the refusal. This strengthens coverage
+  specifically; AD-45's `links` behavior stays unchanged.
 - Coverage runs on every load of a configured project, cache hits included, and an uncovered
   file is an exit-2 error for every lattice-loading command. The lattice those commands would
   read is not the one the configuration declares, and exit 1 means a coherent graph that has
-  drifted (AD-1).
+  drifted (AD-1). All uncovered spellings are reported once, in project-relative order, with
+  sorted unique selecting selectors and the register-or-exempt remedy.
+- `orchestrate._assemble` calls coverage immediately after `build_lattice` succeeds, using only
+  the resolved targets actually enrolled in that assembly. Registration, ownership, and loader
+  validation errors therefore take precedence, and exemptions cannot waive them. The gate runs
+  before cache persistence: a failed load returns no lattice and cannot create or change a
+  successful-load cache. Neither selection nor coverage results enter the cache. Config loading
+  validates syntax only, so explicit journal recovery bypasses coverage and automatic recovery
+  completes before coverage can refuse the new load.
 
 **Future external reconcile keys updates by node, writes once per manifest, and finds records by
 identity (GTX-757).** The
@@ -3112,8 +3135,9 @@ serves drift, ambiguity, authority, impact, graph, and ticket findings.
 Broken section references retain the known file's origin even when the section does not exist.
 
 **Consequences:** AD-44's decline of a sidecar manifest no longer governs. Its envelope,
-auto-slug, hash, and `lattice_format` decisions are untouched. GTX-756 and GTX-757 remain future
-work and update README.md, RECONCILE.md, and CHANGELOG.md when they ship, with any AD-3, AD-12,
-or AD-31 amendment they require. The current costs are chosen ones. Foreign-frontmatter-only
+auto-slug, hash, and `lattice_format` decisions are untouched. GTX-756 ships coverage with
+README.md owning its configuration and error contract; it requires no cache-schema change.
+GTX-757 remains future work and updates README.md, RECONCILE.md, and CHANGELOG.md when it ships,
+with any AD-3, AD-12, or AD-31 amendment it requires. The current costs are chosen ones. Foreign-frontmatter-only
 edits are invisible to drift, tools that use a reserved key in their own frontmatter cannot be
 enrolled yet, and the enrollment join runs on every load.

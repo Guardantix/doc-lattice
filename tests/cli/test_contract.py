@@ -16,6 +16,7 @@ from rich.console import Console
 from rich.text import Text
 
 import doc_lattice.cli as cli_mod
+import doc_lattice.cli.commands.linear as linear_command
 import doc_lattice.cli.runtime as runtime_module
 from doc_lattice import __version__
 from doc_lattice.cli import app
@@ -945,7 +946,7 @@ def test_multi_line_config_diagnostic_survives_the_stderr_renderer(tmp_path: Pat
     assert lines[2] == (
         "  bogus: Extra inputs are not permitted (accepted keys: cache_key, cache_trust_stat, "
         "docs_roots, ignore_globs, lattice_format, legacy_marker_sources, linear_team, "
-        "link_sources, sidecar_manifests)"
+        "link_sources, sidecar_coverage, sidecar_manifests)"
     )
 
 
@@ -2036,14 +2037,12 @@ def _external_cli_setup(tmp_path, monkeypatch, cache_policy):
         ("sidecar_manifests:", "sidecar_manifests is written as null"),
         ("sidecar_manifests: []", "sidecar_manifests is declared but names no manifest"),
         (
-            "sidecar_coverage: {select: ['skills/**']}",
-            "sidecar_coverage: Extra inputs are not permitted",
+            "sidecar_coverage: {select: []}",
+            "sidecar_coverage.select is declared but names no selector",
         ),
     ],
 )
-def test_public_cli_refuses_invalid_or_reserved_sidecar_keys(
-    tmp_path, monkeypatch, declaration, reason
-):
+def test_public_cli_refuses_invalid_sidecar_config(tmp_path, monkeypatch, declaration, reason):
     (tmp_path / ".doc-lattice.yml").write_text(f"lattice_format: 2\n{declaration}\n")
     monkeypatch.chdir(tmp_path)
 
@@ -2053,6 +2052,98 @@ def test_public_cli_refuses_invalid_or_reserved_sidecar_keys(
     assert result.stdout == ""
     assert "CONFIG_ERROR" in result.stderr
     assert reason in result.stderr
+
+
+def _coverage_refusal_project(root: Path, coverage: str) -> dict[Path, bytes]:
+    """Create a project where coverage fails before a stale edge could be reconciled."""
+    docs = root / "docs"
+    docs.mkdir()
+    (docs / "up.md").write_text("---\nid: up\n---\n# Up\nbody\n", encoding="utf-8")
+    (docs / "down.md").write_text(
+        "---\nid: down\nderives_from:\n  - {ref: up, seen: old}\n---\n# Down\nbody\n",
+        encoding="utf-8",
+    )
+    (root / "uncovered.md").write_text("# Uncovered\n", encoding="utf-8")
+    (root / ".doc-lattice.yml").write_text(
+        "lattice_format: 2\ncache_key: coverage-refusal\n" + coverage,
+        encoding="utf-8",
+    )
+    return {path: path.read_bytes() for path in root.rglob("*") if path.is_file()}
+
+
+@pytest.mark.parametrize(
+    ("coverage", "detail"),
+    [
+        (
+            "sidecar_coverage: {select: [uncovered.md]}\n",
+            "'uncovered.md': selected by 'uncovered.md'; not enrolled in the loaded lattice",
+        ),
+        (
+            "sidecar_coverage:\n"
+            "  select: [uncovered.md]\n"
+            "  exempt: [{path: gone.md, reason: removed}]\n",
+            "sidecar_coverage.exempt path 'gone.md' matches no selected path",
+        ),
+    ],
+    ids=["uncovered", "stale-exemption"],
+)
+@pytest.mark.parametrize(
+    "argv",
+    [
+        ["check"],
+        ["lint"],
+        ["impact", "up"],
+        ["graph"],
+        ["linear"],
+        ["reconcile", "--all"],
+        ["reconcile", "--all", "--dry-run"],
+    ],
+    ids=["check", "lint", "impact", "graph", "linear", "reconcile", "reconcile-dry-run"],
+)
+def test_lattice_loading_commands_refuse_coverage_before_network_or_writes(
+    tmp_path: Path, monkeypatch, coverage: str, detail: str, argv: list[str]
+):
+    before = _coverage_refusal_project(tmp_path, coverage)
+    cache = tmp_path / "xdg"
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("XDG_CACHE_HOME", str(cache))
+
+    def fail_if_networked(*_args, **_kwargs):
+        pytest.fail("coverage refusal reached the Linear network fetch")
+
+    monkeypatch.setattr(linear_command, "fetch_tickets", fail_if_networked)
+    result = runner.invoke(app, argv)
+
+    assert result.exit_code == 2, (result.stdout, result.stderr, result.exception)
+    assert result.stdout == ""
+    assert "COVERAGE_ERROR" in result.stderr
+    assert detail in result.stderr
+    after = {path: path.read_bytes() for path in tmp_path.rglob("*") if path.is_file()}
+    assert after == before
+    assert not cache.exists()
+    assert not (tmp_path / ".doc-lattice-reconcile.json").exists()
+
+
+def test_coverage_error_keeps_each_human_detail_on_its_own_line(tmp_path: Path, monkeypatch):
+    _coverage_refusal_project(
+        tmp_path,
+        "sidecar_coverage:\n"
+        "  select: [uncovered.md]\n"
+        "  exempt: [{path: gone.md, reason: removed}]\n",
+    )
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("COLUMNS", "60")
+
+    result = runner.invoke(app, ["check"])
+
+    assert result.exit_code == 2
+    assert result.stderr.splitlines() == [
+        "error (COVERAGE_ERROR): sidecar coverage failed:",
+        "  'uncovered.md': selected by 'uncovered.md'; not enrolled in the loaded lattice; "
+        "register this file or add an exact sidecar_coverage.exempt entry with a reason",
+        "  sidecar_coverage.exempt path 'gone.md' matches no selected path; remove this stale "
+        "exemption or correct its exact project-relative spelling",
+    ]
 
 
 @pytest.mark.parametrize("format_", ["human", "github", "json"])

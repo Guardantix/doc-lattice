@@ -1,8 +1,9 @@
 """Load and validate .doc-lattice.yml, with project-root containment of docs_roots and
 lexical validation of the link source keys.
 
-Sidecar manifest declarations are validated lexically here. Manifest I/O and enrollment belong
-to lattice loading, so a missing or invalid manifest cannot prevent journal recovery.
+Sidecar manifest and coverage declarations are validated lexically here. Manifest I/O, coverage
+selection, and enrollment belong to lattice loading, so those filesystem checks cannot prevent
+journal recovery.
 """
 
 import re
@@ -48,10 +49,78 @@ _CACHE_KEY_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
 _ROOT_LOCATION = "<config>"
 _BINDING_LAYERS_KEY = "binding_layers"
 SIDECAR_MANIFESTS_KEY = "sidecar_manifests"
+SIDECAR_COVERAGE_KEY = "sidecar_coverage"
 _BINDING_LAYERS_MIGRATION = (
     "binding_layers has been unsupported since 2.0; delete it from 1.x configs, there is "
     "no replacement."
 )
+
+
+class CoverageExemption(BaseModel):
+    """One exact selected path that sidecar coverage may leave uncovered."""
+
+    model_config = ConfigDict(strict=True, extra="forbid")
+
+    path: str
+    reason: str
+
+    @field_validator("path", "reason")
+    @classmethod
+    def _validate_nonempty_text(cls, value: str) -> str:
+        """Refuse an exemption field that names nothing."""
+        if not value:
+            msg = "sidecar coverage exemption path and reason must not be empty"
+            raise ValueError(msg)
+        return value
+
+
+class SidecarCoverage(BaseModel):
+    """The selectors and exact exemptions for sidecar coverage."""
+
+    model_config = ConfigDict(strict=True, extra="forbid")
+
+    select: list[str]
+    exempt: list[CoverageExemption] | None = None
+
+    @field_validator("select", mode="before")
+    @classmethod
+    def _reject_a_null_select_list(cls, value: object) -> object:
+        """Refuse a written null selector declaration."""
+        if value is None:
+            msg = f"{SIDECAR_COVERAGE_KEY}.select is written as null; name the sources to cover"
+            raise ValueError(msg)
+        return value
+
+    @field_validator("select")
+    @classmethod
+    def _validate_select(cls, value: list[str]) -> list[str]:
+        """Require selectors that the shared selector grammar can read."""
+        if not value:
+            msg = f"{SIDECAR_COVERAGE_KEY}.select is declared but names no selector"
+            raise ValueError(msg)
+        _validate_selectors(f"{SIDECAR_COVERAGE_KEY}.select", value)
+        return value
+
+    @field_validator("exempt", mode="before")
+    @classmethod
+    def _reject_a_null_exempt_list(cls, value: object) -> object:
+        """Refuse a written null exemption declaration."""
+        if value is None:
+            msg = (
+                f"{SIDECAR_COVERAGE_KEY}.exempt is written as null; remove the key or name "
+                "exemptions"
+            )
+            raise ValueError(msg)
+        return value
+
+    @field_validator("exempt")
+    @classmethod
+    def _validate_exempt(cls, value: list[CoverageExemption]) -> list[CoverageExemption]:
+        """Refuse a declared exemption list that names nothing."""
+        if not value:
+            msg = f"{SIDECAR_COVERAGE_KEY}.exempt is declared but names no exemption"
+            raise ValueError(msg)
+        return value
 
 
 class Config(BaseModel):
@@ -71,6 +140,7 @@ class Config(BaseModel):
     # refusal, since the gate has no file set without it.
     legacy_marker_sources: list[str] | None = None
     sidecar_manifests: list[str] | None = None
+    sidecar_coverage: SidecarCoverage | None = None
     linear_team: str | None = None
     cache_key: str | None = None
     cache_trust_stat: bool = False
@@ -207,6 +277,18 @@ class Config(BaseModel):
                 raise ValueError(msg)
         return value
 
+    @field_validator("sidecar_coverage", mode="before")
+    @classmethod
+    def _reject_an_empty_or_null_coverage_declaration(cls, value: object) -> object:
+        """Keep omitted coverage distinct from null or an empty mapping a user wrote."""
+        if value is None:
+            msg = f"{SIDECAR_COVERAGE_KEY} is written as null; remove the key or declare selectors"
+            raise ValueError(msg)
+        if isinstance(value, Mapping) and not value:
+            msg = f"{SIDECAR_COVERAGE_KEY} is declared but names no selector"
+            raise ValueError(msg)
+        return value
+
 
 def _validate_selectors(key: str, entries: list[str]) -> None:
     """Raise ``ValueError`` naming the first entry of ``key`` the selector grammar refuses."""
@@ -246,8 +328,9 @@ def load_config(config_path: Path | None, cwd: Path) -> ProjectConfig:
     Raises:
         ConfigError: If the file is missing, invalid, has unknown keys, names a docs root
             that resolves outside the project root, or names an existing docs root that is
-            neither a directory nor a regular ``.md`` file. Manifest declarations are validated
-            here, but their files and targets are checked only when the lattice loads.
+            neither a directory nor a regular ``.md`` file. Manifest and coverage declarations
+            are validated here, but filesystem selection and targets are checked only when the
+            lattice loads.
     """
     if config_path is not None:
         if not config_path.exists():

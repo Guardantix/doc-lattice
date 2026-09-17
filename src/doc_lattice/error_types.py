@@ -44,6 +44,13 @@ class ConfigError(ProjectError):
         super().__init__(message, code="CONFIG_ERROR")
 
 
+class CoverageError(ProjectError):
+    """The declared coverage policy cannot be satisfied by the loaded lattice."""
+
+    def __init__(self, message: str) -> None:
+        super().__init__(message, code="COVERAGE_ERROR")
+
+
 class ValidationError(ProjectError):
     """Input validation error."""
 

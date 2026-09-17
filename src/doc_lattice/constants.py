@@ -10,6 +10,7 @@ from typing import Literal, get_args
 ErrorCode = Literal[
     "UNKNOWN",
     "CONFIG_ERROR",
+    "COVERAGE_ERROR",
     "VALIDATION_ERROR",
     "DUPLICATE_ID",
     "BROKEN_REF",

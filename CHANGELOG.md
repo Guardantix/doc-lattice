@@ -27,6 +27,15 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Added
 
+- Optional `sidecar_coverage` requires selected paths to resolve to nodes actually enrolled in
+  the loaded lattice or have exact-path exemptions with reasons. Coverage is independent of
+  discovery and is checked after validated assembly on every load, before cache persistence.
+  Uncovered paths, stale exemptions, invalid selected paths, empty selections, and traversable
+  symlinked directories refuse with `COVERAGE_ERROR` and exit 2. Explicit journal recovery stays
+  available; automatic recovery precedes the gate. [README.md](README.md#sidecar-coverage) owns
+  configuration, exemption semantics, and diagnostics. The shared selector walk preserves the
+  existing `links` behavior.
+
 - `sidecar_manifests` is now an ordinary optional configuration key. Every lattice load validates
   and enrolls its manifests, including files outside `docs_roots`, while manifest I/O remains in
   lattice loading. A manifest is a non-empty `nodes` list of exact root-relative POSIX `.md` paths
@@ -40,10 +49,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Migration
 
-Before adding `sidecar_manifests`, upgrade every pre-commit hook, CI workflow, and installed-tool
+Before adding `sidecar_manifests` or `sidecar_coverage`, upgrade every pre-commit hook, CI workflow, and installed-tool
 pin that loads the repository to a release that supports it. Older releases reject the new key
-before loading the lattice. Keep `lattice_format: 2`; sidecar enrollment does not change the
-lattice format or existing hashes. Do not run a blanket `doc-lattice reconcile --all` for this
+before loading the lattice. Keep `lattice_format: 2`; sidecar enrollment and coverage do not
+change the lattice format or existing hashes. Coverage adds no cache-schema change. Do not run a blanket `doc-lattice reconcile --all` for this
 upgrade. Review and acknowledge external downstream drift through the manual workflow in
 [README.md](README.md#manual-external-acknowledgement) only when it is present.
 
