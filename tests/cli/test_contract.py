@@ -1,5 +1,6 @@
 """Cross-command and CLI entry-point contract tests."""
 
+import hashlib
 import io
 import json
 import os
@@ -7,6 +8,7 @@ import select
 import subprocess
 import sys
 import time
+from dataclasses import replace
 from pathlib import Path
 from types import ModuleType
 
@@ -18,10 +20,13 @@ import doc_lattice.cli as cli_mod
 import doc_lattice.cli.runtime as runtime_module
 from doc_lattice import __version__
 from doc_lattice.cli import app
+from doc_lattice.cli.application import create_app
 from doc_lattice.cli.errors import EXIT_TOOL_ERROR
 from doc_lattice.cli.github import escape_github_property
 from doc_lattice.cli.runtime import default_runtime
+from doc_lattice.config import load_sidecar_config
 from doc_lattice.error_types import ConfigError
+from doc_lattice.orchestrate import load_lattice
 from doc_lattice.path_utils import format_path_for_display
 
 from .helpers import _control_characters, _run, runner
@@ -1982,3 +1987,318 @@ def test_ambiguous_output_is_byte_identical_across_every_cache_tier(tmp_path: Pa
         runs = [runner.invoke(app, argv) for _ in range(3)]
         assert runs[0].stdout == runs[1].stdout == runs[2].stdout, argv
         assert "Notes" in runs[2].stdout, argv
+
+
+def _sidecar_test_app():
+    """Exercise real command adapters through the internal sidecar configuration seam."""
+
+    def factory(*, no_color):
+        runtime = default_runtime(no_color=no_color)
+        loaded = None
+
+        def config_loader(config, cwd):
+            nonlocal loaded
+            loaded = load_sidecar_config(config, cwd)
+            return loaded.project
+
+        def lattice_loader(project, *, require_verified=False, persist_cache=True):
+            assert loaded is not None
+            assert project is loaded.project
+            return load_lattice(
+                loaded, require_verified=require_verified, persist_cache=persist_cache
+            )
+
+        return replace(runtime, load_config=config_loader, load_lattice=lattice_loader)
+
+    return create_app(runtime_factory=factory)
+
+
+def _external_cli_project(root: Path, cache_policy):
+    """A blessed inline -> external -> inline chain, with file and section dependents."""
+    (root / "docs").mkdir()
+    (root / "skills").mkdir()
+    upstream = "# Rule {#rule}\nold upstream\n"
+    skill_body = "# Usage {#usage}\nold skill\n\n# Extra\nother content\n"
+    # These fixture texts are already canonical except their final newline. Independent
+    # hashes bless the initial edges without using the enrollment or section implementation.
+    # Section content removes the addressed heading's marker; whole-file content retains it.
+    upstream_seen = hashlib.sha256(b"# Rule\nold upstream").hexdigest()[:32]
+    skill_seen = hashlib.sha256(skill_body.rstrip().encode()).hexdigest()[:32]
+    section_seen = hashlib.sha256(b"# Usage\nold skill").hexdigest()[:32]
+    (root / "docs/up.md").write_text(
+        "---\nid: up\nauthority: exploratory\n---\n" + upstream, encoding="utf-8"
+    )
+    (root / "skills/skill.md").write_text(
+        "---\nname: foreign-skill\ndescription: original description\n---\n" + skill_body,
+        encoding="utf-8",
+    )
+    (root / "docs/down.md").write_text(
+        "---\nid: down\nderives_from:\n"
+        f"  - {{ref: skill, seen: {skill_seen}}}\n"
+        f"  - {{ref: 'skill#usage', seen: {section_seen}}}\n---\n# Down\n",
+        encoding="utf-8",
+    )
+    (root / "nodes.yml").write_text(
+        "nodes:\n  - path: ./skills/skill.md\n    meta:\n"
+        "      id: skill\n      authority: binding\n      derives_from:\n"
+        f"        - {{ref: 'up#rule', seen: {upstream_seen}}}\n",
+        encoding="utf-8",
+    )
+    config = "lattice_format: 2\nsidecar_manifests: [nodes.yml]\n"
+    if cache_policy is not None:
+        config += f"cache_key: external-cli\ncache_trust_stat: {str(cache_policy).lower()}\n"
+    (root / ".doc-lattice.yml").write_text(config, encoding="utf-8")
+
+
+def _external_cli_setup(tmp_path, monkeypatch, cache_policy):
+    _external_cli_project(tmp_path, cache_policy)
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path / "cache"))
+    monkeypatch.setenv("NO_COLOR", "1")
+    return _sidecar_test_app()
+
+
+@pytest.mark.parametrize("cache_policy", [None, False, True], ids=["uncached", "verify", "stat"])
+def test_external_nodes_participate_in_real_check_lint_impact_and_graph(
+    tmp_path, monkeypatch, cache_policy
+):
+    application = _external_cli_setup(tmp_path, monkeypatch, cache_policy)
+    skill_path = tmp_path / "skills/skill.md"
+    original_skill = skill_path.read_bytes()
+    origin = {
+        "markdown_path": str(skill_path),
+        "manifest_path": "nodes.yml",
+        "record_index": 0,
+        "declared_path": "./skills/skill.md",
+    }
+    for _ in range(2):
+        checked = runner.invoke(application, ["check", "--format", "json"])
+        assert checked.exit_code == 0, (checked.stdout, checked.stderr, checked.exception)
+        assert checked.stderr == ""
+        edges = json.loads(checked.stdout)["edges"]
+        assert len(edges) == 3
+        assert {edge["state"] for edge in edges} == {"OK"}
+        assert all("origins" in edge for edge in edges)
+        assert all(edge["origins"] == {"skill": origin} for edge in edges)
+
+    linted = runner.invoke(application, ["lint", "--format", "json"])
+    assert linted.exit_code == 1
+    violation = json.loads(linted.stdout)["violations"]
+    assert len(violation) == 1
+    assert violation[0]["source_id"] == "skill"
+    assert violation[0]["origins"] == {"skill": origin}
+
+    affected = runner.invoke(application, ["impact", "up", "--format", "json"])
+    assert affected.exit_code == 0
+    nodes = json.loads(affected.stdout)["affected"]
+    assert [node["id"] for node in nodes] == ["down", "skill"]
+    assert "origins" not in nodes[0]
+    assert nodes[1]["path"] == str(skill_path)
+    assert nodes[1]["origins"] == {"skill": origin}
+
+    graphed = runner.invoke(application, ["graph", "--format", "json"])
+    assert graphed.exit_code == 0
+    graph_nodes = {node["id"]: node for node in json.loads(graphed.stdout)["nodes"]}
+    assert set(graph_nodes) == {"up", "skill", "down"}
+    assert graph_nodes["skill"]["path"] == str(skill_path)
+    assert graph_nodes["skill"]["origins"] == {"skill": origin}
+    assert skill_path.read_bytes() == original_skill
+
+
+@pytest.mark.parametrize("cache_policy", [None, False, True], ids=["uncached", "verify", "stat"])
+def test_external_content_edits_stale_dependents_but_foreign_metadata_does_not(
+    tmp_path, monkeypatch, cache_policy
+):
+    application = _external_cli_setup(tmp_path, monkeypatch, cache_policy)
+    skill_path = tmp_path / "skills/skill.md"
+    original_skill = skill_path.read_bytes()
+    for _ in range(2):
+        before = runner.invoke(application, ["check", "--format", "json"])
+        assert before.exit_code == 0, (before.stdout, before.stderr, before.exception)
+    upstream_path = tmp_path / "docs/up.md"
+    upstream_path.write_text(
+        upstream_path.read_text().replace("old upstream", "revised upstream decision"),
+        encoding="utf-8",
+    )
+    changed = runner.invoke(application, ["check", "--format", "json"])
+    assert changed.exit_code == 1
+    states = [(edge["source_id"], edge["state"]) for edge in json.loads(changed.stdout)["edges"]]
+    assert states == [("down", "OK"), ("down", "OK"), ("skill", "STALE")]
+
+    skill_path.write_text(
+        original_skill.decode().replace(
+            "description: original description", "description: >-\n  revised foreign description"
+        ),
+        encoding="utf-8",
+    )
+    foreign_edit = runner.invoke(application, ["check", "--format", "json"])
+    assert foreign_edit.exit_code == 1
+    assert json.loads(foreign_edit.stdout) == json.loads(changed.stdout)
+    assert foreign_edit.stderr == ""
+
+    skill_path.write_text(
+        skill_path.read_text().replace("old skill", "revised skill instructions"), encoding="utf-8"
+    )
+    body_edit = runner.invoke(application, ["check", "--format", "json"])
+    assert body_edit.exit_code == 1
+    assert {edge["state"] for edge in json.loads(body_edit.stdout)["edges"]} == {"STALE"}
+    human = runner.invoke(application, ["check"])
+    assert human.exit_code == 1
+    assert "STALE" in human.stdout
+    assert "nodes.yml" in human.stdout
+    assert "nodes[0]" in human.stdout
+    assert "skills/skill.md" in human.stdout
+    github = runner.invoke(application, ["check", "--format", "github"])
+    assert github.exit_code == 1
+    assert "file=skills/skill.md" in github.stdout
+    assert "file=docs/down.md" in github.stdout
+    assert "nodes.yml" in github.stdout
+    assert "nodes[0]" in github.stdout
+    assert "file=nodes.yml" not in github.stdout
+
+
+@pytest.mark.parametrize("cache_policy", [None, False, True], ids=["uncached", "verify", "stat"])
+@pytest.mark.parametrize("command", [["check"], ["lint"], ["impact", "up"]])
+@pytest.mark.parametrize(
+    "case",
+    [
+        ("dual", "REGISTRATION_CONFLICT"),
+        ("owner", "REGISTRATION_CONFLICT"),
+        ("duplicate-id", "DUPLICATE_ID"),
+        ("manifest-node", "REGISTRATION_CONFLICT"),
+        ("reserved", "FRONTMATTER_ERROR"),
+        ("deleted", "MANIFEST_ERROR"),
+    ],
+)
+def test_external_declaration_failures_exit_two_after_a_successful_load(
+    tmp_path, monkeypatch, cache_policy, command, case
+):
+    defect, code = case
+    application = _external_cli_setup(tmp_path, monkeypatch, cache_policy)
+    baseline = runner.invoke(application, ["check"])
+    assert baseline.exit_code == 0, (baseline.stdout, baseline.stderr, baseline.exception)
+    manifest = tmp_path / "nodes.yml"
+    if defect == "dual":
+        (tmp_path / "skills/skill.md").write_text("---\nid: skill\n---\n# Skill\n")
+    elif defect == "owner":
+        manifest.write_text(
+            manifest.read_text() + "  - path: skills/../skills/skill.md\n    meta: {id: other}\n"
+        )
+    elif defect == "duplicate-id":
+        manifest.write_text(manifest.read_text().replace("id: skill", "id: up"))
+    elif defect == "manifest-node":
+        (tmp_path / "manifest.md").symlink_to(manifest)
+        manifest.write_text(
+            manifest.read_text() + "  - path: manifest.md\n    meta: {id: manifest}\n"
+        )
+    elif defect == "reserved":
+        (tmp_path / "skills/skill.md").write_text(
+            "---\nname: foreign\nderives_from: []\n---\n# Skill\n"
+        )
+    else:
+        manifest.unlink()
+
+    first = runner.invoke(application, command)
+    second = runner.invoke(application, command)
+    assert first.exit_code == second.exit_code == 2, (first.stdout, first.stderr, first.exception)
+    assert first.stdout == second.stdout == ""
+    assert first.stderr == second.stderr
+    assert code in first.stderr
+    assert "nodes.yml" in first.stderr
+    if defect != "deleted":
+        assert "nodes[" in first.stderr
+        assert (
+            "manifest.md" in first.stderr
+            if defect == "manifest-node"
+            else "skill.md" in first.stderr
+        )
+
+
+@pytest.mark.parametrize("cache_policy", [None, False, True], ids=["uncached", "verify", "stat"])
+@pytest.mark.filterwarnings("always")
+def test_external_registration_removal_restores_cli_warning_on_every_load(
+    tmp_path, monkeypatch, cache_policy
+):
+    application = _external_cli_setup(tmp_path, monkeypatch, cache_policy)
+    config = tmp_path / ".doc-lattice.yml"
+    config.write_text(config.read_text() + "docs_roots: [docs, skills]\n")
+    for _ in range(2):
+        enrolled = runner.invoke(application, ["check"])
+        assert enrolled.exit_code == 0, (enrolled.stdout, enrolled.stderr, enrolled.exception)
+        assert enrolled.stderr == ""
+    config.write_text(config.read_text().replace("sidecar_manifests: [nodes.yml]\n", ""))
+    for _ in range(2):
+        removed = runner.invoke(application, ["check"])
+        assert removed.exit_code == 1
+        assert "BROKEN" in removed.stdout
+        assert "not a lattice node" in removed.stderr
+        assert "skills/skill.md" in removed.stderr
+
+
+@pytest.mark.parametrize("cache_policy", [False, True], ids=["verify", "stat"])
+def test_manifest_reassignment_refreshes_cli_origins_without_markdown_edits(
+    tmp_path, monkeypatch, cache_policy
+):
+    application = _external_cli_setup(tmp_path, monkeypatch, cache_policy)
+    before = runner.invoke(application, ["check", "--format", "json"])
+    assert before.exit_code == 0, (before.stdout, before.stderr, before.exception)
+    original_markdown = (tmp_path / "skills/skill.md").read_bytes()
+    manifest = tmp_path / "nodes.yml"
+    moved = tmp_path / "moved.yml"
+    manifest.rename(moved)
+    (tmp_path / "skills/extra.md").write_text("# Extra\n")
+    moved.write_text(
+        moved.read_text().replace(
+            "nodes:\n", "nodes:\n  - path: skills/extra.md\n    meta: {id: extra}\n"
+        )
+    )
+    config = tmp_path / ".doc-lattice.yml"
+    config.write_text(config.read_text().replace("[nodes.yml]", "[moved.yml]"))
+    for _ in range(2):
+        after = runner.invoke(application, ["check", "--format", "json"])
+        assert after.exit_code == 0
+        edges = json.loads(after.stdout)["edges"]
+        assert len(edges) == 3
+        assert all(edge["origins"]["skill"]["manifest_path"] == "moved.yml" for edge in edges)
+        assert all(edge["origins"]["skill"]["record_index"] == 1 for edge in edges)
+        assert [edge["actual"] for edge in edges] == [
+            edge["actual"] for edge in json.loads(before.stdout)["edges"]
+        ]
+    assert (tmp_path / "skills/skill.md").read_bytes() == original_markdown
+
+
+@pytest.mark.parametrize("cache_policy", [None, False, True], ids=["uncached", "verify", "stat"])
+@pytest.mark.parametrize(
+    "command",
+    [
+        ["check"],
+        ["check", "--format", "json"],
+        ["check", "--format", "github"],
+        ["lint"],
+        ["lint", "--format", "json"],
+        ["impact", "art-direction", "--format", "json"],
+        ["graph", "--format", "json"],
+    ],
+)
+def test_inline_only_commands_are_identical_through_the_sidecar_seam(
+    lattice_dir, monkeypatch, cache_policy, command
+):
+    monkeypatch.chdir(lattice_dir)
+    monkeypatch.setenv("XDG_CACHE_HOME", str(lattice_dir / "cache"))
+    monkeypatch.setenv("NO_COLOR", "1")
+    expected = runner.invoke(app, command)
+    assert expected.exit_code in (0, 1)
+    if cache_policy is not None:
+        (lattice_dir / ".doc-lattice.yml").write_text(
+            "lattice_format: 2\ncache_key: parity\n"
+            f"cache_trust_stat: {str(cache_policy).lower()}\n",
+            encoding="utf-8",
+        )
+    application = _sidecar_test_app()
+    for _ in range(2):
+        actual = runner.invoke(application, command)
+        assert (actual.exit_code, actual.stdout, actual.stderr) == (
+            expected.exit_code,
+            expected.stdout,
+            expected.stderr,
+        )

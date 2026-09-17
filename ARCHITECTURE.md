@@ -3075,6 +3075,28 @@ change, and missing one serves a warm run a stale node the cold run would not pr
 recomputed on every load has no such list to get wrong, and the per-file and per-manifest
 entries it reads keep the warm path free of re-parsing.
 
+**Enrollment implementation (GTX-770).** The internal `load_sidecar_config` seam feeds the same
+orchestration as ordinary configuration. Each load rebuilds the registration index and joins
+resolved discovery candidates with registered targets before ownership can be hidden by alias
+deduplication. Cached and uncached loads share assembly and warning decisions; they differ only
+in how they obtain Markdown file facts and whether a successful load persists cache state.
+The default command configuration loader continues to refuse `sidecar_manifests` until the
+user-facing enrollment work enables it.
+
+Assembly attaches a pure typed origin before the loader registers ids: the Markdown identity
+path and, for an external node, the declared manifest path, zero-based record index, and exact
+declared Markdown spelling. The graph retains that origin without importing the manifest I/O
+boundary. A record index locates a diagnostic in the current load; it is not the write-time
+identity proof reconcile will require. Origins never enter Markdown cache entries or hashes.
+
+Diagnostics involving external nodes name the Markdown and manifest record together. Human
+findings append origin details, and GitHub annotation messages include them while remaining
+attached to the Markdown path. JSON finding records carry an additional `origins` mapping keyed
+by the participating external node ids. Each value holds `markdown_path`, `manifest_path`,
+`record_index`, and `declared_path`; declared strings are preserved verbatim. Records with no
+external participants omit the mapping, preserving inline-only output. The same origin format
+serves drift, ambiguity, authority, impact, graph, and ticket findings.
+
 **Consequences:** AD-44's decline of a sidecar manifest no longer governs. Its envelope,
 auto-slug, hash, and `lattice_format` decisions are untouched. GTX-755, GTX-756, and GTX-757 each
 update README.md, RECONCILE.md, and CHANGELOG.md for the behavior they ship, and record the
