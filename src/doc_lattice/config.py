@@ -26,9 +26,8 @@ from .error_types import ConfigError
 from .link_selectors import (
     LEGACY_MARKER_SOURCES_KEY,
     LINK_SOURCES_KEY,
-    SELECTOR_SEPARATOR,
     selector_defect_message,
-    selector_matches_path,
+    selector_prunes_path,
     validate_link_selector,
 )
 from .path_utils import format_path_for_display, safe_resolve
@@ -60,10 +59,54 @@ _ROOT_LOCATION = "<config>"
 _BINDING_LAYERS_KEY = "binding_layers"
 SIDECAR_MANIFESTS_KEY = "sidecar_manifests"
 SIDECAR_COVERAGE_KEY = "sidecar_coverage"
+# The nested coverage keys, exported for the same reason the link keys are: the module that
+# enforces the policy names them in its diagnostics, and a key spelled twice can drift into a
+# refusal that sends the reader to a list their configuration does not have.
+SIDECAR_COVERAGE_SELECT_KEY = f"{SIDECAR_COVERAGE_KEY}.select"
+SIDECAR_COVERAGE_EXCLUDE_KEY = f"{SIDECAR_COVERAGE_KEY}.exclude"
+SIDECAR_COVERAGE_EXEMPT_KEY = f"{SIDECAR_COVERAGE_KEY}.exempt"
 _BINDING_LAYERS_MIGRATION = (
     "binding_layers has been unsupported since 2.0; delete it from 1.x configs, there is "
     "no replacement."
 )
+
+
+# What a coverage key written as null tells its author to do instead. A table rather than a
+# message per validator, since the three refusals differ in nothing else.
+_NULL_LIST_REMEDY = {
+    "select": "name the sources to cover",
+    "exclude": "remove the key or name exclusions",
+    "exempt": "remove the key or name exemptions",
+}
+
+
+def _require_nonblank(kind: str, value: str, info: ValidationInfo) -> str:
+    """Refuse a coverage record's field that names nothing.
+
+    Whitespace alone is refused as well as the empty string. A blank reason satisfies
+    "non-empty" while documenting nothing, and a blank path can only ever be refused later as a
+    stale exemption, at a distance from the key that carried it.
+
+    The field is named from ``info`` rather than spelled into a message shared by both fields,
+    so a reader is told which of the two they left empty instead of having to read the location
+    off the validation envelope. One function rather than one per record, so the rule the two
+    keys share has a definition rather than a convention.
+
+    Args:
+        kind: The record the field belongs to, as its message spells it.
+        value: The field's value as written.
+        info: Pydantic's field context, which carries the name the message reports.
+
+    Returns:
+        The value unchanged, when it names something.
+
+    Raises:
+        ValueError: If the value is empty or only whitespace.
+    """
+    if not value.strip():
+        msg = f"sidecar coverage {kind} {info.field_name} must not be empty"
+        raise ValueError(msg)
+    return value
 
 
 class CoverageExemption(BaseModel):
@@ -77,20 +120,8 @@ class CoverageExemption(BaseModel):
     @field_validator("path", "reason")
     @classmethod
     def _validate_nonempty_text(cls, value: str, info: ValidationInfo) -> str:
-        """Refuse an exemption field that names nothing.
-
-        Whitespace alone is refused as well as the empty string. A blank reason satisfies
-        "non-empty" while documenting nothing, and a blank path can only ever be refused later
-        as a stale exemption, at a distance from the key that carried it.
-
-        The field is named from ``info`` rather than spelled into a message shared by both, so
-        a reader is told which of the two they left empty instead of having to read the
-        location off the validation envelope.
-        """
-        if not value.strip():
-            msg = f"sidecar coverage exemption {info.field_name} must not be empty"
-            raise ValueError(msg)
-        return value
+        """Refuse an exemption field that names nothing, naming the field left empty."""
+        return _require_nonblank("exemption", value, info)
 
 
 class CoverageExclusion(BaseModel):
@@ -105,16 +136,13 @@ class CoverageExclusion(BaseModel):
     @classmethod
     def _validate_nonempty_text(cls, value: str, info: ValidationInfo) -> str:
         """Refuse an exclusion field that names nothing, naming the field left empty."""
-        if not value.strip():
-            msg = f"sidecar coverage exclusion {info.field_name} must not be empty"
-            raise ValueError(msg)
-        return value
+        return _require_nonblank("exclusion", value, info)
 
     @field_validator("select")
     @classmethod
     def _validate_selector(cls, value: str) -> str:
         """Refuse a selector the shared grammar cannot read, as the sibling keys do."""
-        _validate_selectors(f"{SIDECAR_COVERAGE_KEY}.exclude", [value])
+        _validate_selectors(SIDECAR_COVERAGE_EXCLUDE_KEY, [value])
         return value
 
 
@@ -127,12 +155,19 @@ class SidecarCoverage(BaseModel):
     exclude: list[CoverageExclusion] | None = None
     exempt: list[CoverageExemption] | None = None
 
-    @field_validator("select", mode="before")
+    @field_validator("select", "exclude", "exempt", mode="before")
     @classmethod
-    def _reject_a_null_select_list(cls, value: object) -> object:
-        """Refuse a written null selector declaration."""
+    def _reject_a_null_list(cls, value: object, info: ValidationInfo) -> object:
+        """Refuse a coverage list a user wrote as null, with that key's own remedy.
+
+        One validator over the three keys rather than one apiece: the rule is identical and
+        only the remedy differs, so the remedies read as a table instead of as three bodies a
+        reader has to diff. A field left out entirely never reaches here, which is what keeps
+        an omitted optional key distinct from one written as null.
+        """
         if value is None:
-            msg = f"{SIDECAR_COVERAGE_KEY}.select is written as null; name the sources to cover"
+            remedy = _NULL_LIST_REMEDY[str(info.field_name)]
+            msg = f"{SIDECAR_COVERAGE_KEY}.{info.field_name} is written as null; {remedy}"
             raise ValueError(msg)
         return value
 
@@ -141,21 +176,9 @@ class SidecarCoverage(BaseModel):
     def _validate_select(cls, value: list[str]) -> list[str]:
         """Require selectors that the shared selector grammar can read."""
         if not value:
-            msg = f"{SIDECAR_COVERAGE_KEY}.select is declared but names no selector"
+            msg = f"{SIDECAR_COVERAGE_SELECT_KEY} is declared but names no selector"
             raise ValueError(msg)
-        _validate_selectors(f"{SIDECAR_COVERAGE_KEY}.select", value)
-        return value
-
-    @field_validator("exclude", mode="before")
-    @classmethod
-    def _reject_a_null_exclude_list(cls, value: object) -> object:
-        """Refuse a written null exclusion declaration."""
-        if value is None:
-            msg = (
-                f"{SIDECAR_COVERAGE_KEY}.exclude is written as null; remove the key or name "
-                "exclusions"
-            )
-            raise ValueError(msg)
+        _validate_selectors(SIDECAR_COVERAGE_SELECT_KEY, value)
         return value
 
     @field_validator("exclude")
@@ -163,19 +186,7 @@ class SidecarCoverage(BaseModel):
     def _validate_exclude(cls, value: list[CoverageExclusion]) -> list[CoverageExclusion]:
         """Refuse a declared exclusion list that names nothing."""
         if not value:
-            msg = f"{SIDECAR_COVERAGE_KEY}.exclude is declared but names no exclusion"
-            raise ValueError(msg)
-        return value
-
-    @field_validator("exempt", mode="before")
-    @classmethod
-    def _reject_a_null_exempt_list(cls, value: object) -> object:
-        """Refuse a written null exemption declaration."""
-        if value is None:
-            msg = (
-                f"{SIDECAR_COVERAGE_KEY}.exempt is written as null; remove the key or name "
-                "exemptions"
-            )
+            msg = f"{SIDECAR_COVERAGE_EXCLUDE_KEY} is declared but names no exclusion"
             raise ValueError(msg)
         return value
 
@@ -184,7 +195,7 @@ class SidecarCoverage(BaseModel):
     def _validate_exempt(cls, value: list[CoverageExemption]) -> list[CoverageExemption]:
         """Refuse a declared exemption list that names nothing."""
         if not value:
-            msg = f"{SIDECAR_COVERAGE_KEY}.exempt is declared but names no exemption"
+            msg = f"{SIDECAR_COVERAGE_EXEMPT_KEY} is declared but names no exemption"
             raise ValueError(msg)
         return value
 
@@ -200,13 +211,23 @@ class SidecarCoverage(BaseModel):
         """
         if not self.exclude or not self.exempt:
             return self
+        # Parsed once for the whole check rather than per exemption: the field validator already
+        # put every selector through the grammar, so this is a derived value, not a second gate.
+        pruners = [(entry.select, validate_link_selector(entry.select)) for entry in self.exclude]
         for exemption in self.exempt:
-            pruning = _pruning_exclusion(exemption.path, self.exclude)
+            pruning = next(
+                (
+                    selector
+                    for selector, segments in pruners
+                    if selector_prunes_path(segments, exemption.path)
+                ),
+                None,
+            )
             if pruning is None:
                 continue
             msg = (
-                f"{SIDECAR_COVERAGE_KEY}.exempt path {format_path_for_display(exemption.path)} "
-                f"is pruned by the {SIDECAR_COVERAGE_KEY}.exclude selector "
+                f"{SIDECAR_COVERAGE_EXEMPT_KEY} path {format_path_for_display(exemption.path)} "
+                f"is pruned by the {SIDECAR_COVERAGE_EXCLUDE_KEY} selector "
                 f"{format_path_for_display(pruning)}; an excluded path is never selected and so "
                 "can never be exempt; remove one of the two declarations"
             )
@@ -379,31 +400,6 @@ class Config(BaseModel):
             msg = f"{SIDECAR_COVERAGE_KEY} is declared but names no selector"
             raise ValueError(msg)
         return value
-
-
-def _pruning_exclusion(path: str, exclusions: list[CoverageExclusion]) -> str | None:
-    """Return the exclusion selector that removes ``path`` from selection, or None.
-
-    The walk prunes an entry when that entry's own spelling matches an exclusion, and never
-    descends into a directory it pruned, so a path is unreachable exactly when its own spelling
-    or one of its ancestor directory spellings matches. Testing the ancestors is what makes this
-    complete: a check for the direct match alone would accept an exemption for a file inside an
-    excluded directory, which is the shape an author is most likely to write.
-
-    Args:
-        path: An exact project-relative POSIX spelling from an exemption.
-        exclusions: The declared exclusions, whose selectors are already through the grammar.
-
-    Returns:
-        The first declared selector that prunes ``path``, in declaration order, or None.
-    """
-    parts = path.split(SELECTOR_SEPARATOR)
-    spellings = [SELECTOR_SEPARATOR.join(parts[: index + 1]) for index in range(len(parts))]
-    for entry in exclusions:
-        segments = validate_link_selector(entry.select)
-        if any(selector_matches_path(segments, spelling) for spelling in spellings):
-            return entry.select
-    return None
 
 
 def _validate_selectors(key: str, entries: list[str]) -> None:

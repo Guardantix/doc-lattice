@@ -7,6 +7,7 @@ from pathlib import Path
 import pytest
 
 from doc_lattice import path_selection
+from doc_lattice.config import SIDECAR_COVERAGE_EXCLUDE_KEY as _EXCLUDE_KEY
 from doc_lattice.error_types import ConfigError, CoverageError, UnreadableDocError
 from doc_lattice.link_check import _SELECTION_POLICY as _LINKS
 from doc_lattice.link_check import select_link_sources
@@ -16,15 +17,7 @@ from doc_lattice.path_selection import (
     SelectionPolicy,
     select_paths,
 )
-
-_EXCLUDE_KEY = "sidecar_coverage.exclude"
-_COVERAGE = SelectionPolicy(
-    key="sidecar_coverage.select",
-    purpose="coverage policy",
-    error_type=CoverageError,
-    refuse_symlink_directories=True,
-    selector_note="selected by {selector}; repair the path or prune it with " + _EXCLUDE_KEY,
-)
+from doc_lattice.sidecar_coverage import _POLICY as _COVERAGE
 
 
 def _exclude(*selectors):

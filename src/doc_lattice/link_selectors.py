@@ -11,6 +11,11 @@ turns a selector into files.
 ``selector_matches_path`` here, so a compatibility declaration can never add a file to the gate;
 the two therefore have to agree about what a selector means, which is why the matcher is a
 sibling of the walk's own ``segment_matches`` rather than an ``fnmatch`` call at the call site.
+``sidecar_coverage.exclude`` is the one key whose entries name directories as well as files: the
+walk prunes a listing with it, and ``selector_prunes_path`` here answers the same question about
+a spelling alone, for ``config`` to decide at load whether an exclusion and an exemption
+contradict each other. It is the ancestor closure of the matcher for the same agreement reason,
+so the rule that a pruned directory takes its whole subtree with it is stated once.
 
 A selector is project-relative and POSIX on every platform: ``/`` is the only separator, and a
 backslash is refused rather than read as one, so a config is accepted or rejected identically
@@ -215,6 +220,32 @@ def selector_matches_path(segments: tuple[str, ...], path: str) -> bool:
             or segment_matches(parts[-1], segments[position])
         )
         for position in _recursive_closure(positions, segments)
+    )
+
+
+def selector_prunes_path(segments: tuple[str, ...], path: str) -> bool:
+    """Report whether one validated selector makes one spelling unreachable to the walk.
+
+    The ancestor closure of ``selector_matches_path``, and it lives here for the same reason the
+    matcher does: the walk prunes an entry when that entry's own spelling matches, and never
+    descends into a directory it pruned, so a spelling is unreachable exactly when it or one of
+    its ancestor directory spellings matches. Stating that once keeps the agreement obligation
+    with the walk in the module that owns it, rather than re-derived by whichever layer asks.
+
+    Testing the ancestors is what makes the answer complete: a direct match alone would call a
+    file inside an excluded directory reachable, which is the shape an author most often writes.
+
+    Args:
+        segments: The selector's segments, already through ``validate_link_selector``.
+        path: A project-relative POSIX spelling, with ``/`` as its only separator.
+
+    Returns:
+        True when the selector prunes that spelling or any directory above it.
+    """
+    parts = path.split(SELECTOR_SEPARATOR)
+    return any(
+        selector_matches_path(segments, SELECTOR_SEPARATOR.join(parts[: index + 1]))
+        for index in range(len(parts))
     )
 
 

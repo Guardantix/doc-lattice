@@ -268,18 +268,20 @@ def _retained(
     Args:
         entries: One directory's listing.
         prefix: The project-relative spelling that directory was reached by.
-        exclusions: The validated exclusion segments, never empty.
+        exclusions: The validated exclusion segments, empty for a consumer that prunes nothing.
 
     Returns:
-        The entries no exclusion matched, in the order they were given.
+        The entries no exclusion matched, in the order they were given, and the listing itself
+        when nothing is excluded.
     """
-    return [
-        entry
-        for entry in entries
-        if not any(
-            selector_matches_path(segments, _join(prefix, entry.name)) for segments in exclusions
-        )
-    ]
+    if not exclusions:
+        return entries
+    retained: list[os.DirEntry[str]] = []
+    for entry in entries:
+        spelling = _join(prefix, entry.name)
+        if not any(selector_matches_path(segments, spelling) for segments in exclusions):
+            retained.append(entry)
+    return retained
 
 
 @dataclass(frozen=True, slots=True)
@@ -396,12 +398,11 @@ def _walk(root: Path, segments: tuple[str, ...], selection: _Selection) -> set[s
         visited.add(key)
         segment = segments[frame.index]
         last = frame.index == len(segments) - 1
-        if frame.entries is None:
-            entries = _scan(frame.directory, selection.policy)
-            if selection.exclusions:
-                entries = _retained(entries, frame.prefix, selection.exclusions)
-        else:
-            entries = frame.entries
+        entries = frame.entries
+        if entries is None:
+            entries = _retained(
+                _scan(frame.directory, selection.policy), frame.prefix, selection.exclusions
+            )
         if segment == RECURSIVE_SEGMENT:
             pending.extend(_recursive_frames(frame, entries, last, found, selection))
             continue

@@ -10,23 +10,32 @@ import stat
 from collections.abc import Collection
 from pathlib import Path
 
-from .config import SidecarCoverage
+from .config import (
+    SIDECAR_COVERAGE_EXCLUDE_KEY,
+    SIDECAR_COVERAGE_EXEMPT_KEY,
+    SIDECAR_COVERAGE_SELECT_KEY,
+    SidecarCoverage,
+)
 from .error_types import CoverageError
 from .path_selection import Exclusions, SelectedPath, SelectionPolicy, select_paths
 from .path_utils import format_path_for_display, safe_resolve
 
-_EXCLUDE_KEY = "sidecar_coverage.exclude"
 _POLICY = SelectionPolicy(
-    key="sidecar_coverage.select",
+    key=SIDECAR_COVERAGE_SELECT_KEY,
     purpose="sidecar coverage policy",
     error_type=CoverageError,
     refuse_symlink_directories=True,
     selector_note=(
         "selected by {selector}; repair the path, narrow the selector, or prune it with "
-        f"{_EXCLUDE_KEY}"
+        f"{SIDECAR_COVERAGE_EXCLUDE_KEY}"
     ),
 )
-_REMEDY = "register this file or add an exact sidecar_coverage.exempt entry with a reason"
+_REMEDY = f"register this file or add an exact {SIDECAR_COVERAGE_EXEMPT_KEY} entry with a reason"
+# The remedy both invalid-path refusals end with. Beside ``_REMEDY`` for the same reason: AD-51
+# treats it as one contract, so the two branches share a definition rather than a wording.
+_INVALID_REMEDY = (
+    f"prune it with {SIDECAR_COVERAGE_EXCLUDE_KEY}; exemptions cannot waive invalid paths"
+)
 
 
 def _context(entry: SelectedPath) -> str:
@@ -63,7 +72,7 @@ def enforce_coverage(
             nothing is not a refusal: it can only fail to prevent one, so it errs loud.
     """
     exclude = (
-        Exclusions(_EXCLUDE_KEY, tuple(entry.select for entry in coverage.exclude))
+        Exclusions(SIDECAR_COVERAGE_EXCLUDE_KEY, tuple(entry.select for entry in coverage.exclude))
         if coverage.exclude
         else None
     )
@@ -79,22 +88,26 @@ def enforce_coverage(
         except (ValueError, OSError) as exc:
             problems.append(
                 f"{_context(entry)}; cannot resolve or inspect selected path: {exc}; "
-                f"repair the path, narrow sidecar_coverage.select, or prune it with "
-                f"{_EXCLUDE_KEY}; exemptions cannot waive invalid paths"
+                f"repair the path, narrow {_POLICY.key}, or {_INVALID_REMEDY}"
             )
             continue
         if not stat.S_ISREG(mode):
             problems.append(
                 f"{_context(entry)}; not a regular file; select regular files only, or "
-                f"prune it with {_EXCLUDE_KEY}; exemptions cannot waive invalid paths"
+                f"{_INVALID_REMEDY}"
             )
         elif target not in targets and entry.path not in exempt:
             problems.append(f"{_context(entry)}; not enrolled in the loaded lattice; {_REMEDY}")
-    spellings = {entry.path for entry in selected}
-    for path in sorted(exempt - spellings):
-        problems.append(
-            f"sidecar_coverage.exempt path {format_path_for_display(path)} matches no selected "
-            "path; remove this stale exemption or correct its exact project-relative spelling"
-        )
+    if exempt:
+        # Only built for a project that declared an exemption. The common configuration declares
+        # none, and this would otherwise spend a set over every selected path on every load to
+        # subtract nothing from it.
+        spellings = {entry.path for entry in selected}
+        for path in sorted(exempt - spellings):
+            problems.append(
+                f"{SIDECAR_COVERAGE_EXEMPT_KEY} path {format_path_for_display(path)} matches no "
+                "selected path; remove this stale exemption or correct its exact "
+                "project-relative spelling"
+            )
     if problems:
         raise CoverageError("sidecar coverage failed:\n  " + "\n  ".join(problems))
