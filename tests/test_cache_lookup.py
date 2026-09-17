@@ -1,54 +1,35 @@
 """Tests for per-file cache tier selection."""
 
-import hashlib
 import types
 from pathlib import Path
 
 import pytest
 
 import doc_lattice.cache.lookup as lookup_module
+from doc_lattice import orchestrate
 from doc_lattice.cache.lookup import CacheHit, CacheMiss, LookupPolicy, resolve
-from doc_lattice.cache.schema import (
-    Entry,
-    NodePayload,
-    SectionRecordModel,
-    StatRecord,
-    stat_record,
-)
-from doc_lattice.constants import FrontmatterDisposition
+from doc_lattice.cache.schema import Entry, StatRecord, make_entry, stat_record
 from doc_lattice.error_types import UnreadableDocError
-from doc_lattice.model import FileSections, NodeMeta, ParsedDoc, SectionRecord
+from doc_lattice.model import FileSections, SectionRecord
+from doc_lattice.orchestrate import _parse_file_facts
 
 ROOT = "/abs/current-root"
 VERIFY = LookupPolicy(current_root=ROOT, trust_stat=False)
 TRUSTING = LookupPolicy(current_root=ROOT, trust_stat=True)
+NODE_TEXT = "---\nid: a\n---\n# A {#a-top}\nbody\n"
 
 
-def _node() -> NodePayload:
-    return NodePayload(
-        meta=NodeMeta.model_validate({"id": "a"}),
-        body="# A {#a-top}\nbody\n",
-        total_lines=2,
-        sections=[SectionRecordModel(anchor="a-top", start=1, end=2)],
-    )
-
-
-def _entry_for(
-    text: str,
-    node: NodePayload | None,
-    stats: dict[str, StatRecord] | None = None,
-    disposition: FrontmatterDisposition | None = None,
-    reused_anchors: bool = False,
-) -> Entry:
+def _entry_for(text: str, stats: dict[str, StatRecord] | None = None) -> Entry:
     data = text.encode("utf-8")
-    return Entry(
-        file_sha256=hashlib.sha256(data).hexdigest(),
-        stats=stats if stats is not None else {ROOT: StatRecord(size=len(data), mtime_ns=0)},
-        node=node,
-        disposition=disposition or ("tracked" if node is not None else "untracked"),
-        reused_anchors=reused_anchors,
-        shadowed_envelope=False,
+    entry = make_entry(
+        data,
+        _parse_file_facts(text, Path("docs/a.md")),
+        types.SimpleNamespace(st_size=len(data), st_mtime_ns=0),  # ty: ignore[invalid-argument-type]
+        ROOT,
     )
+    if stats is not None:
+        entry.stats = stats
+    return entry
 
 
 def _write(tmp_path: Path, text: str) -> Path:
@@ -60,129 +41,112 @@ def _write(tmp_path: Path, text: str) -> Path:
 
 def test_absent_entry_is_a_miss_carrying_current_bytes(tmp_path: Path) -> None:
     path = _write(tmp_path, "new\n")
-
     result = resolve(None, path, VERIFY)
-
     assert isinstance(result, CacheMiss)
     assert result.data == b"new\n"
 
 
-def test_verify_hit_reconstructs_doc_and_carries_refreshed_stat(tmp_path: Path) -> None:
-    text = "# A {#a-top}\nbody\n"
-    path = _write(tmp_path, text)
-
-    result = resolve(_entry_for(text, _node()), path, VERIFY)
+def test_verify_hit_reconstructs_facts_and_carries_refreshed_stat(tmp_path: Path) -> None:
+    path = _write(tmp_path, NODE_TEXT)
+    result = resolve(_entry_for(NODE_TEXT), path, VERIFY)
 
     assert isinstance(result, CacheHit)
-    assert isinstance(result.doc, ParsedDoc)
-    assert result.doc.meta.id == "a"
-    assert result.doc.sections == FileSections(
+    assert result.facts.parsed.meta is not None
+    assert result.facts.parsed.meta.id == "a"
+    assert result.facts.body_first_line == 4
+    assert result.facts.sections == FileSections(
         total_lines=2,
         sections=(SectionRecord(anchor="a-top", start=1, end=2),),
     )
     assert result.refreshed_stat == stat_record(path.stat())
 
 
-def test_verify_non_node_hit_returns_none_doc(tmp_path: Path) -> None:
-    text = "# plain\n"
+@pytest.mark.parametrize("policy", [VERIFY, TRUSTING], ids=["verify", "stat"])
+@pytest.mark.parametrize(
+    "case",
+    [
+        ("", "untracked", 1),
+        ("# Plain\n", "untracked", 1),
+        ("---\n---\n# Body\n", "untracked", 3),
+        ("---\nscalar\n---\n# Body\n", "untracked", 4),
+        ("---\n- item\n---\n# Body\n", "untracked", 4),
+        ("---\nname: foreign\n---\n# Body\n", "id-less", 4),
+        ("---\nname: foreign\n---\n", "id-less", 4),
+        ("# Intro\n<!-- doc-lattice\nid: late\n-->\n", "misplaced-envelope", 1),
+        (
+            "---\nname: foreign\n---\n<!-- doc-lattice\nid: late\n-->\n",
+            "misplaced-envelope",
+            4,
+        ),
+        ("---\nid: a\n---\n<!-- doc-lattice\nid: other\n-->\n", "tracked", 4),
+        ("---\nid: a\ntitle: &t A\nlayer: &t design\n---\n# A\n", "tracked", 6),
+    ],
+)
+def test_both_tiers_return_complete_cold_facts(tmp_path, monkeypatch, policy, case):
+    text, disposition, first_line = case
     path = _write(tmp_path, text)
+    cold = _parse_file_facts(text, path)
+    entry = _entry_for(text, {ROOT: stat_record(path.stat())})
+    persisted = Entry.model_validate_json(entry.model_dump_json())
 
-    result = resolve(_entry_for(text, None), path, VERIFY)
+    def forbidden(*_args, **_kwargs):
+        pytest.fail("cache hits must not parse or derive sections")
+
+    monkeypatch.setattr(orchestrate, "parse_document", forbidden)
+    monkeypatch.setattr(orchestrate, "derive_file_sections", forbidden)
+    result = resolve(persisted, path, policy)
 
     assert isinstance(result, CacheHit)
-    assert result.doc is None
-
-
-@pytest.mark.parametrize("disposition", ["untracked", "id-less"])
-def test_verify_hit_replays_the_stored_disposition_a_null_node_conflated(
-    tmp_path: Path, disposition: FrontmatterDisposition
-) -> None:
-    # Both of these cache as `node=None`. Only the stored disposition tells prose apart from a
-    # fenced block that lost its `id`, so it is what a warm run has to report from.
-    text = "# plain\n"
-    path = _write(tmp_path, text)
-
-    result = resolve(_entry_for(text, None, disposition=disposition), path, VERIFY)
-
-    assert isinstance(result, CacheHit)
-    assert result.doc is None
-    assert result.disposition == disposition
+    assert result.facts == cold
+    assert result.facts.parsed.disposition == disposition
+    assert result.facts.body_first_line == first_line
+    assert result.refreshed_stat == (None if policy.trust_stat else stat_record(path.stat()))
 
 
 def test_changed_content_is_a_miss_carrying_current_bytes(tmp_path: Path) -> None:
     path = _write(tmp_path, "changed\n")
-
-    result = resolve(_entry_for("original\n", None), path, VERIFY)
-
+    result = resolve(_entry_for("original\n"), path, VERIFY)
     assert isinstance(result, CacheMiss)
     assert result.data == b"changed\n"
 
 
-def test_trusting_stat_hit_skips_read_and_hash(tmp_path: Path) -> None:
-    text = "# A\n"
+def test_trusting_stat_hit_skips_read_and_hash(tmp_path: Path, monkeypatch) -> None:
+    text = "---\nname: foreign\n---\n# A\n"
     path = _write(tmp_path, text)
-    st = path.stat()
-    entry = Entry(
-        file_sha256="deadbeef" * 8,
-        stats={ROOT: stat_record(st)},
-        node=None,
-        disposition="id-less",
-        reused_anchors=False,
-        shadowed_envelope=False,
-    )
+    entry = _entry_for(text, {ROOT: stat_record(path.stat())})
+    entry.file_sha256 = "deadbeef" * 8
+    cold = _parse_file_facts(text, path)
 
-    result = resolve(entry, path, TRUSTING)
+    def forbidden(*_args, **_kwargs):
+        pytest.fail("a stat hit must not read or hash document bytes")
 
-    # A stat-tier hit never reads the file, so the disposition it reports can only come from
-    # the entry. That is what lets a warm run replay the skip its cold run reported.
-    assert result == CacheHit(
-        doc=None,
-        disposition="id-less",
-        reused_anchors=False,
-        shadowed_envelope=False,
-        refreshed_stat=None,
-    )
+    monkeypatch.setattr(lookup_module, "read_doc_bytes_and_stat", forbidden)
+    monkeypatch.setattr(lookup_module.hashlib, "sha256", forbidden)
+    assert resolve(entry, path, TRUSTING) == CacheHit(facts=cold)
 
 
 def test_verify_policy_disables_stat_tier(tmp_path: Path) -> None:
     text = "# A\n"
     path = _write(tmp_path, text)
-    entry = Entry(
-        file_sha256="deadbeef" * 8,
-        stats={ROOT: stat_record(path.stat())},
-        node=None,
-        disposition="untracked",
-        reused_anchors=False,
-        shadowed_envelope=False,
-    )
-
-    result = resolve(entry, path, VERIFY)
-
-    assert isinstance(result, CacheMiss)
+    entry = _entry_for(text, {ROOT: stat_record(path.stat())})
+    entry.file_sha256 = "deadbeef" * 8
+    assert isinstance(resolve(entry, path, VERIFY), CacheMiss)
 
 
 @pytest.mark.parametrize(("size_delta", "mtime_delta"), [(1, 0), (0, 1)])
 def test_trusting_stat_mismatch_falls_to_verify_hit(
-    tmp_path: Path,
-    size_delta: int,
-    mtime_delta: int,
+    tmp_path: Path, size_delta: int, mtime_delta: int
 ) -> None:
     text = "# A\n"
     path = _write(tmp_path, text)
     st = path.stat()
     entry = _entry_for(
         text,
-        None,
         stats={
-            ROOT: StatRecord(
-                size=st.st_size + size_delta,
-                mtime_ns=st.st_mtime_ns + mtime_delta,
-            )
+            ROOT: StatRecord(size=st.st_size + size_delta, mtime_ns=st.st_mtime_ns + mtime_delta)
         },
     )
-
     result = resolve(entry, path, TRUSTING)
-
     assert isinstance(result, CacheHit)
     assert result.refreshed_stat == stat_record(st)
 
@@ -190,56 +154,33 @@ def test_trusting_stat_mismatch_falls_to_verify_hit(
 def test_no_current_root_stat_falls_to_verify_hit(tmp_path: Path) -> None:
     text = "# A\n"
     path = _write(tmp_path, text)
-    entry = _entry_for(
-        text,
-        None,
-        stats={"/abs/other": StatRecord(size=1, mtime_ns=1)},
-    )
-
+    entry = _entry_for(text, stats={"/abs/other": StatRecord(size=1, mtime_ns=1)})
     result = resolve(entry, path, TRUSTING)
-
     assert isinstance(result, CacheHit)
     assert result.refreshed_stat == stat_record(path.stat())
 
 
 def test_trusting_current_root_stat_on_missing_path_raises_unreadable(tmp_path: Path) -> None:
-    path = tmp_path / "docs" / "a.md"
-    entry = _entry_for("gone\n", None)
-
     with pytest.raises(UnreadableDocError):
-        resolve(entry, path, TRUSTING)
+        resolve(_entry_for("gone\n"), tmp_path / "docs" / "a.md", TRUSTING)
 
 
-def test_verify_hit_uses_stat_captured_with_read(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    text = "# A {#a-top}\nbody\n"
-    path = _write(tmp_path, text)
+def test_verify_hit_uses_stat_captured_with_read(tmp_path: Path, monkeypatch) -> None:
+    path = _write(tmp_path, NODE_TEXT)
     real_stat = path.stat()
     sentinel = types.SimpleNamespace(
         st_size=real_stat.st_size + 1000,
         st_mtime_ns=real_stat.st_mtime_ns + 999_999_999,
     )
     monkeypatch.setattr(
-        lookup_module,
-        "read_doc_bytes_and_stat",
-        lambda _path: (text.encode("utf-8"), sentinel),
+        lookup_module, "read_doc_bytes_and_stat", lambda _path: (NODE_TEXT.encode(), sentinel)
     )
-
-    result = resolve(_entry_for(text, _node()), path, VERIFY)
-
+    result = resolve(_entry_for(NODE_TEXT), path, VERIFY)
     assert isinstance(result, CacheHit)
-    assert result.refreshed_stat == StatRecord(
-        size=sentinel.st_size,
-        mtime_ns=sentinel.st_mtime_ns,
-    )
+    assert result.refreshed_stat == StatRecord(size=sentinel.st_size, mtime_ns=sentinel.st_mtime_ns)
 
 
-def test_miss_carries_stat_captured_with_read(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
+def test_miss_carries_stat_captured_with_read(tmp_path: Path, monkeypatch) -> None:
     path = _write(tmp_path, "new\n")
     real_stat = path.stat()
     sentinel = types.SimpleNamespace(
@@ -247,12 +188,8 @@ def test_miss_carries_stat_captured_with_read(
         st_mtime_ns=real_stat.st_mtime_ns + 888_888_888,
     )
     monkeypatch.setattr(
-        lookup_module,
-        "read_doc_bytes_and_stat",
-        lambda _path: (b"new\n", sentinel),
+        lookup_module, "read_doc_bytes_and_stat", lambda _path: (b"new\n", sentinel)
     )
-
     result = resolve(None, path, VERIFY)
-
     assert isinstance(result, CacheMiss)
     assert result.stat is sentinel

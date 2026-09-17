@@ -9,7 +9,8 @@ from hypothesis import HealthCheck, given, settings
 from hypothesis import strategies as st
 
 from doc_lattice import __version__
-from doc_lattice.cache import CacheFile, Entry, StatRecord, cache_path
+from doc_lattice.cache import CacheFile, cache_path
+from doc_lattice.cache.store import load as load_cache
 from doc_lattice.check import check_lattice, statuses_json, summarize_statuses
 from doc_lattice.config import load_config
 from doc_lattice.constants import CACHE_VERSION
@@ -57,66 +58,100 @@ def test_fully_warm_same_root_run_writes_nothing(tmp_path, monkeypatch):
     assert path.stat().st_mtime_ns == mtime_before
 
 
-def test_version_1_non_node_cache_cannot_hide_unclosed_frontmatter(tmp_path, monkeypatch):
+@pytest.mark.parametrize("trust_stat", [False, True], ids=["verify", "trust-stat"])
+@pytest.mark.parametrize(
+    ("document", "legacy_node"),
+    [
+        ("---\nid: a\n---\n``` invalid`info\n# Visible\n```\n", {"id": "a"}),
+        ("# Plain\n", None),
+    ],
+    ids=["tracked-node", "null-node"],
+)
+def test_version_7_node_shape_is_discarded_and_repopulated_by_real_load(
+    tmp_path, monkeypatch, trust_stat, document, legacy_node
+):
+    monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path / "xdg"))
+    docs = tmp_path / "docs"
+    docs.mkdir()
+    doc = docs / "a.md"
+    doc.write_text(document, encoding="utf-8")
+    (tmp_path / ".doc-lattice.yml").write_text(
+        f"lattice_format: 2\ncache_key: legacy\ncache_trust_stat: {str(trust_stat).lower()}\n",
+        encoding="utf-8",
+    )
+    root = str(tmp_path.resolve())
+    st = doc.stat()
+    old_cache = {
+        "version": 7,
+        "tool_version": __version__,
+        "roots": [root],
+        "entries": {
+            "docs/a.md": {
+                "file_sha256": hashlib.sha256(doc.read_bytes()).hexdigest(),
+                "stats": {root: {"size": st.st_size, "mtime_ns": st.st_mtime_ns}},
+                "node": (
+                    None
+                    if legacy_node is None
+                    else {
+                        "meta": legacy_node,
+                        "body": "``` invalid`info\n# Visible\n```\n",
+                        "total_lines": 1,
+                        "sections": [],
+                    }
+                ),
+                "disposition": "tracked" if legacy_node is not None else "untracked",
+                "reused_anchors": False,
+                "shadowed_envelope": False,
+            }
+        },
+    }
+    path = cache_path("legacy", os.environ)
+    path.parent.mkdir(parents=True)
+    path.write_text(json.dumps(old_cache), encoding="utf-8")
+    assert load_cache(path).cache is None
+
+    if legacy_node is not None:
+        lattice = load_lattice(load_config(None, tmp_path))
+        assert TargetId("a", "visible") in lattice.index
+    else:
+        assert load_lattice(load_config(None, tmp_path)).nodes_by_id == {}
+    rewritten = CacheFile.model_validate_json(path.read_text(encoding="utf-8"))
+    assert rewritten.version == CACHE_VERSION
+    assert (rewritten.entries["docs/a.md"].payload.meta is not None) is (legacy_node is not None)
+
+
+def test_legacy_non_node_cache_cannot_hide_unclosed_frontmatter(tmp_path, monkeypatch):
     monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path / "xdg"))
     docs = tmp_path / "docs"
     docs.mkdir()
     doc = docs / "broken.md"
     doc.write_text("---\nid: vanished\n# Missing close\n", encoding="utf-8")
     (tmp_path / ".doc-lattice.yml").write_text(
-        "lattice_format: 2\ncache_key: legacy\n", encoding="utf-8"
+        "lattice_format: 2\ncache_key: legacy-broken\n", encoding="utf-8"
     )
     root = str(tmp_path.resolve())
-    st = doc.stat()
-    old_cache = CacheFile(
-        version=1,
-        tool_version=__version__,
-        roots=[root],
-        entries={
-            "docs/broken.md": Entry(
-                file_sha256=hashlib.sha256(doc.read_bytes()).hexdigest(),
-                stats={root: StatRecord(size=st.st_size, mtime_ns=st.st_mtime_ns)},
-                node=None,
-                disposition="untracked",
-                reused_anchors=False,
-                shadowed_envelope=False,
-            )
+    stat = doc.stat()
+    legacy_cache = {
+        "version": 7,
+        "tool_version": __version__,
+        "roots": [root],
+        "entries": {
+            "docs/broken.md": {
+                "file_sha256": hashlib.sha256(doc.read_bytes()).hexdigest(),
+                "stats": {root: {"size": stat.st_size, "mtime_ns": stat.st_mtime_ns}},
+                "node": None,
+                "disposition": "untracked",
+                "reused_anchors": False,
+                "shadowed_envelope": False,
+            }
         },
-    )
-    path = cache_path("legacy", os.environ)
+    }
+    path = cache_path("legacy-broken", os.environ)
     path.parent.mkdir(parents=True)
-    path.write_text(old_cache.model_dump_json(), encoding="utf-8")
+    path.write_text(json.dumps(legacy_cache), encoding="utf-8")
 
     with pytest.raises(UnreadableDocError, match="unclosed YAML frontmatter"):
         load_lattice(load_config(None, tmp_path))
-    assert old_cache.version < CACHE_VERSION
-
-
-def test_version_2_cached_sections_are_rederived(tmp_path, monkeypatch):
-    monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path / "xdg"))
-    doc = tmp_path / "docs" / "a.md"
-    doc.parent.mkdir(parents=True)
-    doc.write_text(
-        "---\nid: a\n---\n``` invalid`info\n# Visible\n```\n",
-        encoding="utf-8",
-    )
-    (tmp_path / ".doc-lattice.yml").write_text(
-        "lattice_format: 2\ncache_key: old-sections\n", encoding="utf-8"
-    )
-    project = load_config(None, tmp_path)
-
-    load_lattice(project)
-    path = cache_path("old-sections", os.environ)
-    stale = CacheFile.model_validate_json(path.read_text(encoding="utf-8"))
-    node = stale.entries["docs/a.md"].node
-    assert node is not None
-    node.sections = []
-    stale.version = 2
-    path.write_text(stale.model_dump_json(), encoding="utf-8")
-
-    lattice = load_lattice(project)
-
-    assert TargetId("a", "visible") in lattice.index
 
 
 def test_cache_facade_exports_surviving_names():
@@ -125,8 +160,8 @@ def test_cache_facade_exports_surviving_names():
         CacheHit,
         CacheMiss,
         Entry,
+        FilePayload,
         LookupPolicy,
-        NodePayload,
         RunState,
         SectionRecordModel,
         StatRecord,
@@ -270,8 +305,7 @@ def test_verify_tier_serves_schema_valid_node_corruption_a_documented_limit(tmp_
     path = cache_path("corrupt", {"XDG_CACHE_HOME": str(tmp_path / "xdg")})
     loaded = CacheFile.model_validate_json(path.read_text(encoding="utf-8"))
     entry = loaded.entries["docs/a.md"]
-    assert entry.node is not None
-    entry.node.body = "# A\nTAMPERED body\n"
+    entry.payload.body = "# A\nTAMPERED body\n"
     path.write_text(loaded.model_dump_json(), encoding="utf-8")
     # The default (verify) tier serves the tampered node: hash matches, node is trusted as-is.
     served = load_lattice(load_config(None, tmp_path))

@@ -9,7 +9,7 @@ the phase owners, persisting only after ``build_lattice`` succeeds.
 """
 
 from .lookup import CacheHit, CacheMiss, LookupPolicy
-from .schema import CacheFile, Entry, NodePayload, SectionRecordModel, StatRecord, make_entry
+from .schema import CacheFile, Entry, FilePayload, SectionRecordModel, StatRecord, make_entry
 from .state import RunState
 from .store import StoreSnapshot, cache_home, cache_path
 
@@ -18,8 +18,8 @@ __all__ = [
     "CacheHit",
     "CacheMiss",
     "Entry",
+    "FilePayload",
     "LookupPolicy",
-    "NodePayload",
     "RunState",
     "SectionRecordModel",
     "StatRecord",

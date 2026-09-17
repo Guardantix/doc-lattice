@@ -6,7 +6,7 @@ from pathlib import Path
 import pytest
 
 from doc_lattice import __version__
-from doc_lattice.cache import CacheFile, Entry, NodePayload, SectionRecordModel, StatRecord
+from doc_lattice.cache import CacheFile, Entry, FilePayload, SectionRecordModel, StatRecord
 from doc_lattice.cache.store import StoreSnapshot, cache_home, cache_path, load, save_if_changed
 from doc_lattice.constants import CACHE_FILE_NAME, CACHE_VERSION
 from doc_lattice.model import NodeMeta
@@ -22,9 +22,10 @@ def _sample_cache_file() -> CacheFile:
             "docs/a.md": Entry(
                 file_sha256="a" * 64,
                 stats={"/abs/root": StatRecord(size=10, mtime_ns=123)},
-                node=NodePayload(
+                payload=FilePayload(
                     meta=NodeMeta.model_validate({"id": "a"}),
                     body="# A\n",
+                    body_first_line=1,
                     total_lines=1,
                     sections=[SectionRecordModel(anchor="a-top", start=1, end=1)],
                 ),
@@ -101,8 +102,8 @@ def test_load_invalid_utf8_is_empty(tmp_path: Path):
     assert load(path) == StoreSnapshot(cache=None, baseline=None)
 
 
-def test_load_wrong_version_is_empty(tmp_path: Path):
-    bad = _sample_cache_file().model_copy(update={"version": 999})
+def test_load_previous_version_with_current_schema_is_empty(tmp_path: Path):
+    bad = _sample_cache_file().model_copy(update={"version": CACHE_VERSION - 1})
     path = tmp_path / CACHE_FILE_NAME
     _write_cache(path, bad)
     assert load(path) == StoreSnapshot(cache=None, baseline=None)
@@ -118,7 +119,7 @@ def test_load_wrong_tool_version_is_empty(tmp_path: Path):
 def test_load_invalid_meta_is_empty(tmp_path: Path):
     path = tmp_path / CACHE_FILE_NAME
     payload = _sample_cache_file().model_dump(mode="json")
-    payload["entries"]["docs/a.md"]["node"]["meta"]["id"] = "bad#id"
+    payload["entries"]["docs/a.md"]["payload"]["meta"]["id"] = "bad#id"
     path.write_text(json.dumps(payload), encoding="utf-8")
     assert load(path) == StoreSnapshot(cache=None, baseline=None)
 
@@ -132,7 +133,7 @@ def test_load_discards_a_cached_meta_carrying_a_control_character(tmp_path: Path
     # this pins the property that does not depend on the version having moved.
     path = tmp_path / CACHE_FILE_NAME
     payload = _sample_cache_file().model_dump(mode="json")
-    payload["entries"]["docs/a.md"]["node"]["meta"][field] = "a\x1b[31m"
+    payload["entries"]["docs/a.md"]["payload"]["meta"][field] = "a\x1b[31m"
     path.write_text(json.dumps(payload), encoding="utf-8")
 
     assert load(path) == StoreSnapshot(cache=None, baseline=None)

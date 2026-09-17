@@ -301,6 +301,23 @@ class ParsedMeta:
 
 
 @dataclass(frozen=True, slots=True)
+class FileFacts:
+    """Everything one Markdown file's bytes determine, independent of enrollment.
+
+    ``parsed`` preserves the complete inline classification, including optional metadata and
+    diagnostic flags. ``body_first_line`` is the 1-based file line at the start of the body,
+    even when a recognized fence produced no node. Sections are always derived, including for
+    an empty body: spans stay body-relative while collision members use file coordinates.
+    Paths and enrollment metadata belong to the caller, never these reusable facts.
+    """
+
+    parsed: ParsedMeta
+    body: str
+    body_first_line: int
+    sections: FileSections
+
+
+@dataclass(frozen=True, slots=True)
 class ParsedDoc:
     """A discovered file with validated frontmatter and its raw body.
 
