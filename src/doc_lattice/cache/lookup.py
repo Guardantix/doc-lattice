@@ -77,7 +77,7 @@ def resolve(entry: Entry | None, path: Path, policy: LookupPolicy) -> CacheHit |
 
 
 def _stat_tier(entry: Entry, path: Path, current_root: str) -> CacheHit | None:
-    """Return a hit when the current root's stored stat matches the path."""
+    """Return a hit when the current root's stored stat matches the file the path reaches."""
     record = entry.stats.get(current_root)
     if record is None:
         return None
@@ -85,7 +85,7 @@ def _stat_tier(entry: Entry, path: Path, current_root: str) -> CacheHit | None:
         st = path.stat()
     except OSError as exc:
         raise _unreadable(path, exc) from exc
-    if record.size != st.st_size or record.mtime_ns != st.st_mtime_ns:
+    if stat_record(st) != record:
         return None
     return CacheHit(
         facts=reconstruct_facts(entry),

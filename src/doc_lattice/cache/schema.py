@@ -13,10 +13,17 @@ from ..model import CollisionMember, FileFacts, FileSections, NodeMeta, ParsedMe
 
 
 class StatRecord(BaseModel):
-    """One checkout's stat hint for a file: byte size and nanosecond mtime."""
+    """One checkout's stat hint for a file: its identity, byte size, and nanosecond mtime.
+
+    ``device`` and ``inode`` bind the hint to the file that was read, so a cache key whose path
+    now reaches a different file, such as a retargeted symlink, cannot match on size and mtime
+    alone.
+    """
 
     model_config = ConfigDict(extra="forbid")
 
+    device: int
+    inode: int
     size: int
     mtime_ns: int
 
@@ -117,9 +124,9 @@ def stat_record(st: os.stat_result) -> StatRecord:
         st: The stat captured alongside the corresponding file bytes.
 
     Returns:
-        The byte size and nanosecond mtime used by the stat tier.
+        The file identity, byte size, and nanosecond mtime used by the stat tier.
     """
-    return StatRecord(size=st.st_size, mtime_ns=st.st_mtime_ns)
+    return StatRecord(device=st.st_dev, inode=st.st_ino, size=st.st_size, mtime_ns=st.st_mtime_ns)
 
 
 def reconstruct_facts(entry: Entry) -> FileFacts:

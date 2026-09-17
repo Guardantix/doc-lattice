@@ -882,11 +882,12 @@ rather than the rendered sentence, and each run names the path it discovered. A 
 corrupt cache (unreadable, non-JSON, wrong version, or schema-invalid) is discarded wholesale and
 rebuilt; the cache is a trusted single-writer file under your own cache home, so it is not hardened
 against hand-edited tampering that stays schema-valid. Setting `cache_trust_stat: true` adds a
-faster tier for read-only commands that trusts a file whose size and modification time are
-unchanged, accepting that the file is not opened at all: a rewrite that preserves both its size
-and its nanosecond mtime is served stale, and a file made unreadable (for example a permissions
-change, which does not alter size or mtime) is served from cache instead of erroring, each until
-the file is touched. `reconcile` ignores `cache_trust_stat`
+faster tier for read-only commands that trusts a file whose identity (device and inode), size,
+and modification time are unchanged, accepting that the file is not opened at all. A path that now
+reaches a different file, such as a retargeted symlink, is re-read. An in-place rewrite that
+preserves the file's size and its nanosecond mtime is served stale, and a file made unreadable
+(for example a permissions change, which does not alter size or mtime) is served from cache
+instead of erroring, each until the file is touched. `reconcile` ignores `cache_trust_stat`
 and always verifies content, so it can never write frontmatter from stale data.
 `cache_trust_stat: true` requires `cache_key`; otherwise config loading is a tool error and exits 2.
 Two projects sharing a `cache_key` stay correct (a content-hash

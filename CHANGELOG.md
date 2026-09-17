@@ -11,8 +11,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - Internal: the Markdown load cache retains complete file facts for id-less and untracked
   documents, including their body after any recognized fence, body line offset, and sections.
   Cold parses and both cache-hit tiers now return the same facts for later enrollment, while
-  inline-only output and content hashes remain unchanged. Cache version 7 entries are discarded
-  and rebuilt as version 8. [AD-12](ARCHITECTURE.md#ad-12-the-load-cache-is-a-disposable-opt-in-accelerator)
+  inline-only output and content hashes remain unchanged. The `cache_trust_stat` tier now also
+  requires an unchanged device and inode, so a retargeted symlink whose new target matches the
+  old one's size and modification time is re-read rather than served stale. Cache version 7
+  entries are discarded and rebuilt as version 8. [AD-12](ARCHITECTURE.md#ad-12-the-load-cache-is-a-disposable-opt-in-accelerator)
   records the per-file facts contract; registration is rebuilt separately on each load.
 
 ### Added

@@ -390,9 +390,9 @@ while the analysis can be tested without network access.
 must not weaken default correctness or become part of the project state.
 **Decision:** A validated, safe `cache_key` opts into a cache slot under the user cache
 home, outside checkouts so worktrees can share it. By default, cache hits re-read and hash
-document bytes. `cache_trust_stat` explicitly permits read-only commands to trust unchanged
-size and modification time, accepting stale content or masked unreadability when both remain
-unchanged. Reconcile always verifies bytes. Cache contents are disposable, and cache write
+document bytes. `cache_trust_stat` explicitly permits read-only commands to trust an unchanged
+file identity, size, and modification time, accepting stale content or masked unreadability when
+all remain unchanged. Reconcile always verifies bytes. Cache contents are disposable, and cache write
 failure may report a diagnostic but cannot change command output or exit status.
 
 **Per-file facts amendment (GTX-769):** A Markdown entry stores the complete result its own
@@ -407,7 +407,11 @@ metadata into a `ParsedDoc`.
 Section spans remain body-relative for slicing and hashing; collision member lines are
 file-relative for diagnostics. A foreign-frontmatter edit can therefore change the raw-file
 fingerprint and refresh those diagnostic lines without changing any content hash. The existing
-stat tier's explicit unchanged-stat staleness allowance still applies. Enrollment, registration,
+stat tier's explicit unchanged-stat staleness allowance still applies, but only to the same file:
+each stat hint also records the device and inode it was read from, because a cache key names a
+path and a path can come to reach a different file of equal size and mtime. A retargeted symlink,
+discovered or registered, would otherwise serve the previous target's facts, including a stale
+inline classification that hides an ownership conflict. Enrollment, registration,
 manifest data, and rendered diagnostics never enter a Markdown entry, as AD-51 requires. The
 schema change raises `CACHE_VERSION` from 7 to 8; previous entries are discarded and recomputed,
 never filled with defaults that would hide missing facts.

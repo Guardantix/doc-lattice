@@ -1174,6 +1174,70 @@ def test_external_verified_load_bypasses_stat_staleness_without_persisting(
     assert cache_path("testslot", os.environ).read_bytes() == saved
 
 
+def _twin_files(first: Path, first_text: str, second: Path, second_text: str) -> None:
+    """Write two distinct files whose size and nanosecond mtime both match."""
+    assert len(first_text.encode()) == len(second_text.encode())
+    first.write_text(first_text)
+    second.write_text(second_text)
+    ns = first.stat().st_mtime_ns
+    os.utime(first, ns=(ns, ns))
+    os.utime(second, ns=(ns, ns))
+
+
+def test_retargeted_registered_symlink_misses_the_stat_tier(tmp_path, monkeypatch):
+    monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path / "cache"))
+    targets = tmp_path / "targets"
+    targets.mkdir()
+    _twin_files(targets / "a.md", "# Alpha\n", targets / "b.md", "# Bravo\n")
+    link = tmp_path / "link.md"
+    link.symlink_to(Path("targets") / "a.md")
+    _manifest(tmp_path, [{"path": "link.md", "meta": {"id": "external"}}])
+    project = _sidecar_project(tmp_path, cache=True, trust_stat=True)
+    assert load_lattice(project).nodes_by_id["external"].body == "# Alpha\n"
+    link.unlink()
+    link.symlink_to(Path("targets") / "b.md")
+    assert load_lattice(project).nodes_by_id["external"].body == "# Bravo\n"
+
+
+def test_retargeted_registered_symlink_cannot_hide_inline_metadata(tmp_path, monkeypatch):
+    monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path / "cache"))
+    targets = tmp_path / "targets"
+    targets.mkdir()
+    inline = "---\nid: inline\n---\n"
+    _twin_files(targets / "a.md", " " * len(inline), targets / "b.md", inline)
+    link = tmp_path / "link.md"
+    link.symlink_to(Path("targets") / "a.md")
+    _manifest(tmp_path, [{"path": "link.md", "meta": {"id": "external"}}])
+    project = _sidecar_project(tmp_path, cache=True, trust_stat=True)
+    load_lattice(project)
+    link.unlink()
+    link.symlink_to(Path("targets") / "b.md")
+    with pytest.raises(RegistrationConflictError, match="already tracked by its inline metadata"):
+        load_lattice(project)
+
+
+def test_retargeted_discovered_symlink_misses_the_stat_tier(tmp_path, monkeypatch):
+    monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path / "cache"))
+    docs = tmp_path / "docs"
+    docs.mkdir()
+    targets = tmp_path / "targets"
+    targets.mkdir()
+    _twin_files(
+        targets / "a.md",
+        "---\nid: x\n---\n# Alpha\n",
+        targets / "b.md",
+        "---\nid: x\n---\n# Bravo\n",
+    )
+    link = docs / "link.md"
+    link.symlink_to(Path("..") / "targets" / "a.md")
+    _with_cache(tmp_path, trust_stat=True)
+    project = load_config(None, tmp_path)
+    assert load_lattice(project).nodes_by_id["x"].body == "# Alpha\n"
+    link.unlink()
+    link.symlink_to(Path("..") / "targets" / "b.md")
+    assert load_lattice(project).nodes_by_id["x"].body == "# Bravo\n"
+
+
 def test_manifest_registered_as_node_is_refused_before_reading(tmp_path):
 
     _manifest(tmp_path, [{"path": "nodes.md", "meta": {"id": "manifest"}}], "nodes.md")
