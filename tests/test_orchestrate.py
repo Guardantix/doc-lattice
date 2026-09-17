@@ -1,5 +1,6 @@
 """Tests for load_lattice wiring."""
 
+import json
 import os
 import warnings
 from dataclasses import replace
@@ -7,12 +8,15 @@ from pathlib import Path
 
 import pytest
 
-from doc_lattice import orchestrate
-from doc_lattice.cache import cache_path
+from doc_lattice import loader, orchestrate
+from doc_lattice.cache import CacheHit, CacheMiss, LookupPolicy, cache_path, lookup, store
+from doc_lattice.cache.schema import Entry, reconstruct_facts
+from doc_lattice.check import check_lattice, statuses_json, summarize_statuses
 from doc_lattice.config import load_config
 from doc_lattice.error_types import DuplicateIdError, FrontmatterError, UnreadableDocError
-from doc_lattice.model import TargetId
+from doc_lattice.model import FileFacts, NodeMeta, ParsedDoc, TargetId
 from doc_lattice.orchestrate import load_lattice
+from doc_lattice.resolve import cached_target_hash
 
 
 def test_load_lattice_from_dir(lattice_dir: Path):
@@ -36,6 +40,89 @@ def test_files_without_frontmatter_skipped(tmp_path: Path):
         warnings.simplefilter("error")  # a file with no fence is untracked prose, not a skip
         lat = load_lattice(project)
     assert lat.nodes_by_id == {}
+
+
+@pytest.mark.parametrize("trust_stat", [False, True])
+@pytest.mark.parametrize("body", ["", "# Notes\n\n# Notes\n"], ids=["empty", "headings"])
+@pytest.mark.parametrize(
+    "case",
+    [
+        ("", "untracked", 1),
+        ("---\nname: foreign\n---\n", "id-less", 4),
+        ("---\n---\n", "untracked", 3),
+        ("---\nscalar\n---\n", "untracked", 4),
+        ("---\n- item\n---\n", "untracked", 4),
+        ("\ufeff---\nname: foreign\n---\n", "id-less", 4),
+        ("---\r\nname: foreign\r\n---\r\n", "id-less", 4),
+        ("---\rname: foreign\r---\r", "id-less", 4),
+    ],
+)
+def test_non_node_load_retains_body_and_provenance(
+    tmp_path: Path, monkeypatch, trust_stat, body, case
+):
+    prefix, disposition, first_line = case
+    monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path / "cache"))
+    docs = tmp_path / "docs"
+    docs.mkdir()
+    (docs / "foreign.md").write_text(prefix + body, encoding="utf-8")
+    cold_facts = []
+    parse_facts = orchestrate._parse_file_facts
+
+    def capture_facts(text, path):
+        facts = parse_facts(text, path)
+        cold_facts.append(facts)
+        return facts
+
+    monkeypatch.setattr(orchestrate, "_parse_file_facts", capture_facts)
+
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        uncached = load_lattice(load_config(None, tmp_path))
+        _with_cache(tmp_path, trust_stat=trust_stat)
+        project = load_config(None, tmp_path)
+        lattice = load_lattice(project)
+
+    assert cold_facts[0] == cold_facts[1]
+    assert lattice == uncached
+    assert lattice.nodes_by_id == {}
+    saved = json.loads(cache_path("testslot", os.environ).read_text(encoding="utf-8"))
+    entry = saved["entries"]["docs/foreign.md"]
+    assert entry["disposition"] == disposition
+    assert "payload" in entry, "non-node entries must retain their file facts"
+    payload = entry["payload"]
+    assert payload["meta"] is None
+    assert payload["body"] == body
+    assert payload["body_first_line"] == first_line
+    if body:
+        assert [(r["start"], r["end"]) for r in payload["sections"]] == [(1, 2), (3, 3)]
+        assert payload["sections"][0]["collision"] == [
+            {"label": "Notes", "line": first_line},
+            {"label": "Notes", "line": first_line + 2},
+        ]
+    else:
+        assert payload["total_lines"] == 1
+        assert payload["sections"] == []
+
+    def forbidden(*_args, **_kwargs):
+        pytest.fail("a warm load must retain non-node facts without parsing or deriving sections")
+
+    hits = []
+    resolve = lookup.resolve
+
+    def capture_hit(*args):
+        result = resolve(*args)
+        assert isinstance(result, CacheHit)
+        hits.append(result.facts)
+        return result
+
+    monkeypatch.setattr(orchestrate, "parse_document", forbidden)
+    monkeypatch.setattr(orchestrate, "derive_file_sections", forbidden)
+    monkeypatch.setattr(loader, "derive_file_sections", forbidden)
+    monkeypatch.setattr(lookup, "resolve", capture_hit)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        assert load_lattice(project) == uncached
+    assert hits == [cold_facts[0]]
 
 
 def _corpus(tmp_path: Path) -> dict[str, Path]:
@@ -214,14 +301,104 @@ def _with_cache(tmp_path: Path, *, trust_stat: bool = False) -> Path:
     return tmp_path
 
 
-def test_cached_and_uncached_loads_are_structurally_equal(lattice_dir: Path, monkeypatch, tmp_path):
+@pytest.mark.parametrize("trust_stat", [False, True])
+def test_cached_and_uncached_loads_are_structurally_equal(
+    lattice_dir: Path, monkeypatch, tmp_path, trust_stat
+):
     monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path / "xdg"))
     uncached = load_lattice(load_config(None, lattice_dir))
-    _with_cache(lattice_dir)
+    _with_cache(lattice_dir, trust_stat=trust_stat)
     cold = load_lattice(load_config(None, lattice_dir))  # writes the cache
     warm = load_lattice(load_config(None, lattice_dir))  # reads it back
     assert cold == uncached
     assert warm == uncached
+    expected_hashes = {
+        target: cached_target_hash(uncached, target, {}) for target in uncached.index
+    }
+    expected_statuses = check_lattice(uncached)
+    expected_output = statuses_json(expected_statuses, summarize_statuses(expected_statuses))
+    for lattice in (cold, warm):
+        assert {target: cached_target_hash(lattice, target, {}) for target in lattice.index} == (
+            expected_hashes
+        )
+        statuses = check_lattice(lattice)
+        assert statuses_json(statuses, summarize_statuses(statuses)) == expected_output
+
+
+def _hashes_for_facts(facts: FileFacts, path: Path):
+    # This synthetic node exercises production whole-file and section hashing without adding
+    # registration to the load path, which still leaves these foreign files out of the graph.
+    lattice = loader.build_lattice(
+        [ParsedDoc(path, NodeMeta(id="foreign"), facts.body, facts.sections)]
+    )
+    return {target: cached_target_hash(lattice, target, {}) for target in lattice.index}
+
+
+def _stored_entry(slot: Path, key: str) -> Entry:
+    snapshot = store.load(slot)
+    assert snapshot.cache is not None
+    return snapshot.cache.entries[key]
+
+
+@pytest.mark.parametrize("trust_stat", [False, True])
+@pytest.mark.parametrize("foreign_yaml", ["name: foreign\n", "scalar\n"])
+def test_foreign_frontmatter_edit_refreshes_collision_lines_without_changing_hashes(
+    tmp_path, monkeypatch, trust_stat, foreign_yaml
+):
+    monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path / "cache"))
+    docs = tmp_path / "docs"
+    docs.mkdir()
+    path = docs / "foreign.md"
+    body = "Product A\n---------\n\n## Notes\none\n\n## Notes\ntwo\n"
+    path.write_text(f"---\n{foreign_yaml}---\n{body}", encoding="utf-8")
+    _with_cache(tmp_path, trust_stat=trust_stat)
+    project = load_config(None, tmp_path)
+    slot = cache_path("testslot", os.environ)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        load_lattice(project)
+    before = _stored_entry(slot, "docs/foreign.md")
+    original = reconstruct_facts(before)
+    original_stat = path.stat()
+    policy = LookupPolicy(str(tmp_path.resolve()), trust_stat)
+
+    path.write_text(f"---\n{foreign_yaml}# added foreign line\n---\n{body}", encoding="utf-8")
+    assert path.stat().st_size != original_stat.st_size
+    assert isinstance(lookup.resolve(before, path, policy), CacheMiss)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        load_lattice(project)
+    after = _stored_entry(slot, "docs/foreign.md")
+    refreshed = reconstruct_facts(after)
+
+    assert after.file_sha256 != before.file_sha256
+    assert refreshed.parsed == original.parsed
+    assert refreshed.body == original.body == body
+    assert original.body_first_line == 4
+    assert refreshed.body_first_line == 5
+    assert [replace(r, collision=None) for r in refreshed.sections.sections] == [
+        replace(r, collision=None) for r in original.sections.sections
+    ]
+    original_members = original.sections.sections[0].collision
+    refreshed_members = refreshed.sections.sections[0].collision
+    assert original_members is not None
+    assert refreshed_members is not None
+    assert [m.line for m in original_members] == [7, 10]
+    assert [m.line for m in refreshed_members] == [8, 11]
+    assert _hashes_for_facts(refreshed, path) == _hashes_for_facts(original, path)
+
+    def forbidden(*_args, **_kwargs):
+        pytest.fail("the refreshed facts must survive the next warm load")
+
+    monkeypatch.setattr(orchestrate, "parse_document", forbidden)
+    monkeypatch.setattr(orchestrate, "derive_file_sections", forbidden)
+    monkeypatch.setattr(loader, "derive_file_sections", forbidden)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        load_lattice(project)
+    hit = lookup.resolve(after, path, policy)
+    assert isinstance(hit, CacheHit)
+    assert hit.facts == refreshed
 
 
 def test_section_compatibility_is_structurally_equal_cold_and_warm(
@@ -556,19 +733,23 @@ def test_a_comment_spelling_document_becomes_a_node(tmp_path: Path):
     assert TargetId("up", "section") in lattice.index
 
 
-def test_the_misplacement_warning_replays_on_every_cache_tier(tmp_path: Path, monkeypatch):
+@pytest.mark.parametrize("trust_stat", [False, True])
+def test_the_misplacement_warning_replays_on_every_cache_tier(
+    tmp_path: Path, monkeypatch, trust_stat
+):
     monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path / "cache"))
     docs = tmp_path / "docs"
     docs.mkdir()
     (docs / "late.md").write_text("# Title\n\n<!-- doc-lattice\nid: late\n-->\n", encoding="utf-8")
+    messages = [_warnings_from_load(tmp_path)]
     (tmp_path / ".doc-lattice.yml").write_text(
-        "lattice_format: 2\ndocs_roots:\n  - docs\ncache_key: parity\ncache_trust_stat: true\n",
+        "lattice_format: 2\ndocs_roots:\n  - docs\ncache_key: parity\n"
+        f"cache_trust_stat: {str(trust_stat).lower()}\n",
         encoding="utf-8",
     )
     project = load_config(None, tmp_path)
 
-    messages = []
-    for _ in range(3):
+    for _ in range(2):
         with warnings.catch_warnings(record=True) as captured:
             warnings.simplefilter("always")
             load_lattice(project)
@@ -578,7 +759,10 @@ def test_the_misplacement_warning_replays_on_every_cache_tier(tmp_path: Path, mo
     assert any("misplaced doc-lattice envelope" in message for message in messages[0])
 
 
-def test_the_shadowed_envelope_warning_replays_on_every_cache_tier(tmp_path: Path, monkeypatch):
+@pytest.mark.parametrize("trust_stat", [False, True])
+def test_the_shadowed_envelope_warning_replays_on_every_cache_tier(
+    tmp_path: Path, monkeypatch, trust_stat
+):
     # The tracked half of the same contract: the file is a node, so the diagnostic rides beside
     # the disposition rather than replacing it, and the cache has to carry it either way.
     monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path / "cache"))
@@ -587,14 +771,15 @@ def test_the_shadowed_envelope_warning_replays_on_every_cache_tier(tmp_path: Pat
     (docs / "half.md").write_text(
         "---\nid: half\n---\n# Title\n\n<!-- doc-lattice\nid: other\n-->\n", encoding="utf-8"
     )
+    messages = [_warnings_from_load(tmp_path)]
     (tmp_path / ".doc-lattice.yml").write_text(
-        "lattice_format: 2\ndocs_roots:\n  - docs\ncache_key: shadow\ncache_trust_stat: true\n",
+        "lattice_format: 2\ndocs_roots:\n  - docs\ncache_key: shadow\n"
+        f"cache_trust_stat: {str(trust_stat).lower()}\n",
         encoding="utf-8",
     )
     project = load_config(None, tmp_path)
 
-    messages = []
-    for _ in range(3):
+    for _ in range(2):
         with warnings.catch_warnings(record=True) as captured:
             warnings.simplefilter("always")
             lattice = load_lattice(project)

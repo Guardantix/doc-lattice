@@ -1,7 +1,7 @@
 """Tests for pure run-local cache state transitions."""
 
 from doc_lattice import __version__
-from doc_lattice.cache.schema import CacheFile, Entry, StatRecord
+from doc_lattice.cache.schema import CacheFile, Entry, FilePayload, StatRecord
 from doc_lattice.cache.state import RunState
 from doc_lattice.constants import CACHE_VERSION, MAX_STAT_ROOTS
 
@@ -12,7 +12,13 @@ def _entry(*roots: str) -> Entry:
     return Entry(
         file_sha256="a" * 64,
         stats={root: StatRecord(size=1, mtime_ns=1) for root in roots},
-        node=None,
+        payload=FilePayload(
+            meta=None,
+            body="",
+            body_first_line=1,
+            total_lines=0,
+            sections=[],
+        ),
         disposition="untracked",
         reused_anchors=False,
         shadowed_envelope=False,

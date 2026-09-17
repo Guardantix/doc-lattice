@@ -3,7 +3,6 @@
 import os
 import warnings
 from pathlib import Path
-from typing import Protocol
 
 from .cache import CacheHit, LookupPolicy, RunState, cache_path, lookup, make_entry, store
 from .config import ProjectConfig
@@ -11,7 +10,7 @@ from .constants import COMMENT_ENVELOPE_OPEN, FrontmatterDisposition
 from .discovery import decode_doc, discover_doc_paths, read_doc
 from .frontmatter_parser import parse_document
 from .loader import build_lattice, derive_file_sections
-from .model import Lattice, ParsedDoc
+from .model import FileFacts, Lattice, ParsedDoc, ParsedMeta
 from .path_utils import format_path_for_display
 
 
@@ -176,25 +175,7 @@ def _report_shadowed_envelope(shadowed: bool, path: Path) -> None:
     )
 
 
-class _Reportable(Protocol):
-    """The diagnostic triple every load tier carries, however it reached the tier.
-
-    ``model.ParsedMeta`` (a fresh parse) and ``cache.lookup.CacheHit`` (a replayed one) both
-    satisfy this structurally, which is what lets the cold and warm paths share one reporting
-    site rather than agreeing by hand.
-    """
-
-    @property
-    def disposition(self) -> FrontmatterDisposition: ...
-
-    @property
-    def reused_anchors(self) -> bool: ...
-
-    @property
-    def shadowed_envelope(self) -> bool: ...
-
-
-def _report_load_diagnostics(outcome: _Reportable, path: Path) -> None:
+def _report_load_diagnostics(outcome: ParsedMeta, path: Path) -> None:
     """Report everything one loaded file has to say, from the single site AD-29 requires.
 
     Every load path (cache-free, cache-miss, and cache-hit) funnels through here, so a warm run
@@ -206,7 +187,7 @@ def _report_load_diagnostics(outcome: _Reportable, path: Path) -> None:
     frame, since each warn passes ``stacklevel=1`` and is attributed to its own line.
 
     Args:
-        outcome: The parse result or cache hit for the file.
+        outcome: The parse result, freshly parsed or reconstructed from the cache.
         path: The discovered path as this checkout sees it.
     """
     _report_skip(outcome.disposition, path)
@@ -220,8 +201,8 @@ def _body_first_line(text: str, body: str) -> int:
 
     The parse returns the body as a verbatim suffix of the file text, so the prefix the envelope
     consumed is what the two lengths differ by and its newline count is the offset. A BOM
-    carries no newline, and an untracked or envelope-free file hands back the whole text, which
-    lands on 1.
+    carries no newline. An envelope-free file hands back the whole text, which lands on 1;
+    a recognized fence is consumed even if its contents classify as untracked.
 
     Args:
         text: The decoded file text handed to the parse.
@@ -233,19 +214,36 @@ def _body_first_line(text: str, body: str) -> int:
     return text[: len(text) - len(body)].count("\n") + 1
 
 
+def _parse_file_facts(text: str, path: Path) -> FileFacts:
+    """Derive complete file-local facts from normalized text, independent of enrollment."""
+    outcome, body = parse_document(text, path)
+    first_line = _body_first_line(text, body)
+    return FileFacts(
+        parsed=outcome,
+        body=body,
+        body_first_line=first_line,
+        sections=derive_file_sections(body, first_line=first_line),
+    )
+
+
+def _inline_doc(facts: FileFacts, path: Path) -> ParsedDoc | None:
+    """Report one file's diagnostics and assemble it only when it has inline metadata."""
+    _report_load_diagnostics(facts.parsed, path)
+    if facts.parsed.meta is None:
+        return None
+    return ParsedDoc(path=path, meta=facts.parsed.meta, body=facts.body, sections=facts.sections)
+
+
 def _load_uncached(project: ProjectConfig) -> Lattice:
-    """Today's cache-free load path, unchanged apart from deriving sections eagerly."""
+    """Derive the same complete file facts as a cache miss, then assemble inline nodes."""
     parsed: list[ParsedDoc] = []
     for path in discover_doc_paths(
         project.resolved_roots, project.config.ignore_globs, project.project_root
     ):
-        text = read_doc(path)
-        outcome, body = parse_document(text, path)
-        _report_load_diagnostics(outcome, path)
-        if outcome.meta is None:
-            continue
-        sections = derive_file_sections(body, first_line=_body_first_line(text, body))
-        parsed.append(ParsedDoc(path=path, meta=outcome.meta, body=body, sections=sections))
+        facts = _parse_file_facts(read_doc(path), path)
+        doc = _inline_doc(facts, path)
+        if doc is not None:
+            parsed.append(doc)
     return build_lattice(parsed)
 
 
@@ -275,25 +273,13 @@ def _load_cached(
         result = lookup.resolve(state.entry(rel_key), doc_path, policy)
         if isinstance(result, CacheHit):
             state.claim(rel_key, result.refreshed_stat)
-            _report_load_diagnostics(result, doc_path)
-            if result.doc is not None:
-                parsed.append(result.doc)
-            continue
-        text = decode_doc(doc_path, result.data)
-        outcome, body = parse_document(text, doc_path)
-        _report_load_diagnostics(outcome, doc_path)
-        meta = outcome.meta
-        sections = (
-            derive_file_sections(body, first_line=_body_first_line(text, body))
-            if meta is not None
-            else None
-        )
-        state.replace(
-            rel_key,
-            make_entry(result.data, outcome, body, sections, result.stat, current_root),
-        )
-        if meta is not None:
-            parsed.append(ParsedDoc(path=doc_path, meta=meta, body=body, sections=sections))
+            facts = result.facts
+        else:
+            facts = _parse_file_facts(decode_doc(doc_path, result.data), doc_path)
+            state.replace(rel_key, make_entry(result.data, facts, result.stat, current_root))
+        doc = _inline_doc(facts, doc_path)
+        if doc is not None:
+            parsed.append(doc)
     lattice = build_lattice(parsed)
     if persist_cache:
         store.save_if_changed(path, state.complete(), snapshot.baseline)

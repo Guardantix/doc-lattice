@@ -5,12 +5,11 @@ This module does not access the filesystem, environment, or stderr.
 
 import hashlib
 import os
-from pathlib import Path
 
-from pydantic import BaseModel, ConfigDict
+from pydantic import BaseModel, ConfigDict, Field
 
 from ..constants import FrontmatterDisposition
-from ..model import CollisionMember, FileSections, NodeMeta, ParsedDoc, ParsedMeta, SectionRecord
+from ..model import CollisionMember, FileFacts, FileSections, NodeMeta, ParsedMeta, SectionRecord
 
 
 class StatRecord(BaseModel):
@@ -53,24 +52,30 @@ class SectionRecordModel(BaseModel):
     context: list[str] = []
 
 
-class NodePayload(BaseModel):
-    """The cached derivation of a lattice node: validated meta, body, and section spans."""
+class FilePayload(BaseModel):
+    """Required file-local content and provenance, whether or not inline metadata exists.
+
+    Nullable metadata is still required: no missing field may silently turn an incomplete
+    entry into a file with no inline metadata. Empty bodies likewise retain their provenance
+    and section derivation. Nothing here depends on registration or a manifest.
+    """
 
     model_config = ConfigDict(extra="forbid")
 
-    meta: NodeMeta
+    meta: NodeMeta | None
     body: str
+    body_first_line: int = Field(ge=1)
     total_lines: int
     sections: list[SectionRecordModel]
 
 
 class Entry(BaseModel):
-    """One cached file: its content hash, per-root stat hints, node payload, and diagnostics.
+    """One cached file: its raw-byte hash, per-root stat hints, file facts, and diagnostics.
 
     ``disposition`` is required rather than defaulted. A default would let an entry written
     before the field existed decode as an ordinary skip, which is exactly the silent drop this
     field exists to end; ``CACHE_VERSION`` is bumped alongside it so those entries are discarded
-    instead of reinterpreted. It records why a file has no ``node`` so a warm run can replay the
+    instead of reinterpreted. It records the inline classification so a warm run can replay the
     diagnostic a cold run emitted, and it stores the kind rather than rendered warning text
     because a cache slot is shared across checkouts and the message names the current path.
 
@@ -88,7 +93,7 @@ class Entry(BaseModel):
 
     file_sha256: str
     stats: dict[str, StatRecord]
-    node: NodePayload | None
+    payload: FilePayload
     disposition: FrontmatterDisposition
     reused_anchors: bool
     shadowed_envelope: bool
@@ -117,21 +122,18 @@ def stat_record(st: os.stat_result) -> StatRecord:
     return StatRecord(size=st.st_size, mtime_ns=st.st_mtime_ns)
 
 
-def reconstruct_doc(entry: Entry, path: Path) -> ParsedDoc | None:
-    """Rebuild a parsed document from a cached entry.
+def reconstruct_facts(entry: Entry) -> FileFacts:
+    """Rebuild complete file facts without parsing or deriving sections again.
 
     Args:
         entry: The cached file entry to decode.
-        path: The discovered path to attach to the reconstructed document.
 
     Returns:
-        The reconstructed ParsedDoc, or None for a cached non-node file.
+        The same path-independent facts a fresh parse produces, including for non-nodes.
     """
-    node = entry.node
-    if node is None:
-        return None
+    payload = entry.payload
     sections = FileSections(
-        total_lines=node.total_lines,
+        total_lines=payload.total_lines,
         sections=tuple(
             SectionRecord(
                 anchor=r.anchor,
@@ -144,17 +146,25 @@ def reconstruct_doc(entry: Entry, path: Path) -> ParsedDoc | None:
                 ),
                 context=tuple(r.context),
             )
-            for r in node.sections
+            for r in payload.sections
         ),
     )
-    return ParsedDoc(path=path, meta=node.meta, body=node.body, sections=sections)
+    return FileFacts(
+        parsed=ParsedMeta(
+            meta=payload.meta,
+            disposition=entry.disposition,
+            reused_anchors=entry.reused_anchors,
+            shadowed_envelope=entry.shadowed_envelope,
+        ),
+        body=payload.body,
+        body_first_line=payload.body_first_line,
+        sections=sections,
+    )
 
 
-def make_entry(  # noqa: PLR0913
+def make_entry(
     data: bytes,
-    parsed: ParsedMeta,
-    body: str,
-    sections: FileSections | None,
+    facts: FileFacts,
     st: os.stat_result,
     current_root: str,
 ) -> Entry:
@@ -162,43 +172,38 @@ def make_entry(  # noqa: PLR0913
 
     Args:
         data: The raw file bytes hashed for ``file_sha256``.
-        parsed: The fresh parse outcome, whose disposition and diagnostics are recorded whether
-            or not it produced a node.
-        body: The verbatim body (unused when ``parsed`` carries no node).
-        sections: The pre-derived sections (present when ``parsed`` carries a node).
+        facts: The complete fresh file facts, whether or not inline metadata exists.
         st: The stat captured alongside ``data``, stored as the fresh stat hint.
         current_root: The current project's resolved root used as the sole stat key.
 
     Returns:
         A replacement cache entry whose stats are reset to the current root.
     """
-    meta = parsed.meta
-    node: NodePayload | None = None
-    if meta is not None and sections is not None:
-        node = NodePayload(
-            meta=meta,
-            body=body,
-            total_lines=sections.total_lines,
-            sections=[
-                SectionRecordModel(
-                    anchor=r.anchor,
-                    start=r.start,
-                    end=r.end,
-                    collision=(
-                        None
-                        if r.collision is None
-                        else [CollisionMemberModel(label=m.label, line=m.line) for m in r.collision]
-                    ),
-                    context=list(r.context),
-                )
-                for r in sections.sections
-            ],
-        )
+    payload = FilePayload(
+        meta=facts.parsed.meta,
+        body=facts.body,
+        body_first_line=facts.body_first_line,
+        total_lines=facts.sections.total_lines,
+        sections=[
+            SectionRecordModel(
+                anchor=r.anchor,
+                start=r.start,
+                end=r.end,
+                collision=(
+                    None
+                    if r.collision is None
+                    else [CollisionMemberModel(label=m.label, line=m.line) for m in r.collision]
+                ),
+                context=list(r.context),
+            )
+            for r in facts.sections.sections
+        ],
+    )
     return Entry(
         file_sha256=hashlib.sha256(data).hexdigest(),
         stats={current_root: stat_record(st)},
-        node=node,
-        disposition=parsed.disposition,
-        reused_anchors=parsed.reused_anchors,
-        shadowed_envelope=parsed.shadowed_envelope,
+        payload=payload,
+        disposition=facts.parsed.disposition,
+        reused_anchors=facts.parsed.reused_anchors,
+        shadowed_envelope=facts.parsed.shadowed_envelope,
     )

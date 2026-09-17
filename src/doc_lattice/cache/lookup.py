@@ -9,10 +9,9 @@ import os
 from dataclasses import dataclass
 from pathlib import Path
 
-from ..constants import FrontmatterDisposition
 from ..discovery import _unreadable, read_doc_bytes_and_stat
-from ..model import ParsedDoc
-from .schema import Entry, StatRecord, reconstruct_doc, stat_record
+from ..model import FileFacts
+from .schema import Entry, StatRecord, reconstruct_facts, stat_record
 
 
 @dataclass(frozen=True, slots=True)
@@ -31,18 +30,13 @@ class LookupPolicy:
 class CacheHit:
     """A tier hit and any stat fact learned while verifying content.
 
-    ``doc`` is the reconstructed ParsedDoc, or None for a cached non-node. ``disposition``,
-    ``reused_anchors``, and ``shadowed_envelope`` replay what the parse that filled this entry
-    concluded, so a hit can be reported exactly as the miss that produced it was. Both tiers
-    carry all three, since a hit is no quieter for having been cheap to reach. A verify-tier hit
-    carries ``refreshed_stat`` from the same file handle as the verified bytes; a stat-tier hit
-    leaves it as None.
+    ``facts`` preserves the complete parse outcome, body, and section provenance for every
+    classification. Both tiers carry the same facts a cold parse produces. A verify-tier hit
+    carries ``refreshed_stat`` from the same file handle as the verified bytes; a stat-tier
+    hit leaves it as None.
     """
 
-    doc: ParsedDoc | None
-    disposition: FrontmatterDisposition
-    reused_anchors: bool
-    shadowed_envelope: bool
+    facts: FileFacts
     refreshed_stat: StatRecord | None = None
 
 
@@ -76,10 +70,7 @@ def resolve(entry: Entry | None, path: Path, policy: LookupPolicy) -> CacheHit |
     data, st = read_doc_bytes_and_stat(path)
     if entry is not None and entry.file_sha256 == hashlib.sha256(data).hexdigest():
         return CacheHit(
-            doc=reconstruct_doc(entry, path),
-            disposition=entry.disposition,
-            reused_anchors=entry.reused_anchors,
-            shadowed_envelope=entry.shadowed_envelope,
+            facts=reconstruct_facts(entry),
             refreshed_stat=stat_record(st),
         )
     return CacheMiss(data=data, stat=st)
@@ -97,8 +88,5 @@ def _stat_tier(entry: Entry, path: Path, current_root: str) -> CacheHit | None:
     if record.size != st.st_size or record.mtime_ns != st.st_mtime_ns:
         return None
     return CacheHit(
-        doc=reconstruct_doc(entry, path),
-        disposition=entry.disposition,
-        reused_anchors=entry.reused_anchors,
-        shadowed_envelope=entry.shadowed_envelope,
+        facts=reconstruct_facts(entry),
     )

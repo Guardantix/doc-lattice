@@ -385,7 +385,7 @@ while the analysis can be tested without network access.
 ### AD-12: The load cache is a disposable, opt-in accelerator
 
 **Date:** 2026-07-10
-**Status:** Accepted
+**Status:** Accepted; amended by GTX-769 for AD-51
 **Context:** Large doc sets benefit from reuse across runs and worktrees, but caching
 must not weaken default correctness or become part of the project state.
 **Decision:** A validated, safe `cache_key` opts into a cache slot under the user cache
@@ -394,6 +394,24 @@ document bytes. `cache_trust_stat` explicitly permits read-only commands to trus
 size and modification time, accepting stale content or masked unreadability when both remain
 unchanged. Reconcile always verifies bytes. Cache contents are disposable, and cache write
 failure may report a diagnostic but cannot change command output or exit status.
+
+**Per-file facts amendment (GTX-769):** A Markdown entry stores the complete result its own
+bytes determine for every successful inline classification: optional validated inline metadata,
+the classification and diagnostic flags, the body after any recognized envelope, its 1-based
+file-line offset, and derived sections. An id-less or untracked file retains the same required
+payload as an inline node, including for an empty body. Untracked does not imply envelope-free:
+an empty, scalar, or list YAML fence is still consumed. Cold parses and both hit tiers hand the
+same path-independent `FileFacts` to orchestration; only the assembly boundary turns inline
+metadata into a `ParsedDoc`.
+
+Section spans remain body-relative for slicing and hashing; collision member lines are
+file-relative for diagnostics. A foreign-frontmatter edit can therefore change the raw-file
+fingerprint and refresh those diagnostic lines without changing any content hash. The existing
+stat tier's explicit unchanged-stat staleness allowance still applies. Enrollment, registration,
+manifest data, and rendered diagnostics never enter a Markdown entry, as AD-51 requires. The
+schema change raises `CACHE_VERSION` from 7 to 8; previous entries are discarded and recomputed,
+never filled with defaults that would hide missing facts.
+
 **Consequences:** The default tier matches uncached results for caches produced by doc-lattice
 and for missing, unreadable, schema-invalid, or version-stale cache files. The same-user cache
 is trusted; schema-valid manual tampering is outside the integrity guarantee. The stat tier's

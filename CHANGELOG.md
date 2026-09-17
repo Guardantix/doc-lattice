@@ -6,6 +6,15 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Changed
+
+- Internal: the Markdown load cache retains complete file facts for id-less and untracked
+  documents, including their body after any recognized fence, body line offset, and sections.
+  Cold parses and both cache-hit tiers now return the same facts for later enrollment, while
+  inline-only output and content hashes remain unchanged. Cache version 7 entries are discarded
+  and rebuilt as version 8. [AD-12](ARCHITECTURE.md#ad-12-the-load-cache-is-a-disposable-opt-in-accelerator)
+  records the per-file facts contract; registration joins remain separate work.
+
 ### Added
 
 - Internal: the engine can validate the sidecar manifests ARCHITECTURE.md's AD-51 specifies into
