@@ -15,6 +15,7 @@ from .model import (
     format_collision,
     format_origins,
     origins_json,
+    parse_ref,
 )
 from .path_utils import format_path_for_display
 from .resolve import cached_target_hash
@@ -39,10 +40,12 @@ class EdgeStatus:
 
 
 def _edge_origins(lattice: Lattice, source_id: str, edge: Edge) -> dict[str, DocumentOrigin]:
-    """Select the source and the Markdown owner of a resolved edge target."""
+    """Select the source and known target file, including a file with a missing section."""
     participants = [source_id]
     if edge.target_id is not None:
         participants.append(lattice.file_id_by_path[lattice.index[edge.target_id].path])
+    else:
+        participants.append(parse_ref(edge.target_ref).file_id)
     return external_origins(lattice, participants)
 
 

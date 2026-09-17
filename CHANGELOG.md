@@ -24,10 +24,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   [README.md](README.md#error-codes) and cannot be raised by any command yet.
 
 - Internal: registered Markdown files now become lattice nodes through the sidecar configuration
-  seam, including outside discovery roots and on cache hits. Each load rechecks ownership and
-  uses the registration's declared path when discovery also reaches the file. Foreign
+  seam, including outside discovery roots and on cache hits. Each load rechecks ownership,
+  reads the resolved target, and retains the registration's declared identity even when its
+  spelling contains collapsible path segments. Foreign
   frontmatter stays outside content hashes, accepted registrations suppress the id-less warning,
-  and external-node diagnostics carry Markdown and manifest-record origins. The default command
+  and external-node diagnostics carry Markdown and manifest-record origins, including broken
+  references to a missing section in a known external file. The default command
   configuration loader still refuses `sidecar_manifests`; user-facing enrollment remains
   separate work. [AD-51](ARCHITECTURE.md#ad-51-a-document-another-tool-owns-is-enrolled-by-a-sidecar-manifest-and-its-metadata-never-enters-the-file)
   records the enrollment and origin contracts.

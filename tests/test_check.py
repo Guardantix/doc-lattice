@@ -506,6 +506,35 @@ def test_external_origins_follow_both_endpoints_and_broken_source():
     assert list(payload["edges"][1]["origins"]) == ["down"]
 
 
+def test_broken_section_keeps_known_external_file_origin():
+    file_id = "external"
+    origin = DocumentOrigin(
+        Path("docs/up.md"), ExternalDeclaration("meta/up.yml", 4, "./docs/up.md")
+    )
+    lattice = build_lattice(
+        [
+            ParsedDoc(Path("docs/up.md"), NodeMeta(id=file_id), "# Notes\n", origin=origin),
+            ParsedDoc(
+                Path("docs/down.md"),
+                NodeMeta(
+                    id="down",
+                    derives_from=[
+                        RawEdge(ref=f"{file_id}#missing"),
+                        RawEdge(ref="unknown#missing"),
+                    ],
+                ),
+                "# Down\n",
+            ),
+        ]
+    )
+
+    statuses = check_lattice(lattice)
+    assert [status.state for status in statuses] == ["BROKEN", "BROKEN"]
+    assert all(status.target_id is None for status in statuses)
+    assert statuses[0].origins == {file_id: origin}
+    assert statuses[1].origins == {}
+
+
 def test_external_ambiguous_reports_keep_markdown_collision_location():
     lattice = _external_lattice(ambiguous=True)
     statuses = ambiguous_edges(lattice)

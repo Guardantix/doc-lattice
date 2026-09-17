@@ -2058,6 +2058,39 @@ def _external_cli_setup(tmp_path, monkeypatch, cache_policy):
     return _sidecar_test_app()
 
 
+@pytest.mark.parametrize("format_", ["human", "github", "json"])
+def test_missing_external_section_reports_manifest_origin(tmp_path, monkeypatch, format_):
+    application = _external_cli_setup(tmp_path, monkeypatch, False)
+    assert runner.invoke(application, ["check"]).exit_code == 0
+    (tmp_path / "docs/down.md").write_text(
+        "---\nid: down\nderives_from:\n  - ref: skill#missing\n---\n# Down\n"
+    )
+
+    result = runner.invoke(application, ["check", "--format", format_])
+    assert result.exit_code == 1, (result.stdout, result.stderr, result.exception)
+    if format_ == "json":
+        broken = next(
+            edge for edge in json.loads(result.stdout)["edges"] if edge["state"] == "BROKEN"
+        )
+        assert broken["target_id"] is None
+        assert broken["origins"] == {
+            "skill": {
+                "markdown_path": str(tmp_path / "skills/skill.md"),
+                "manifest_path": "nodes.yml",
+                "record_index": 0,
+                "declared_path": "./skills/skill.md",
+            }
+        }
+    else:
+        broken = next(line for line in result.stdout.splitlines() if "skill#missing" in line)
+        assert "BROKEN" in broken
+        assert "nodes.yml" in broken
+        assert "nodes[0]" in broken
+        assert "skills/skill.md" in broken
+        if format_ == "github":
+            assert "::error file=docs/down.md," in broken
+
+
 @pytest.mark.parametrize("cache_policy", [None, False, True], ids=["uncached", "verify", "stat"])
 def test_external_nodes_participate_in_real_check_lint_impact_and_graph(
     tmp_path, monkeypatch, cache_policy

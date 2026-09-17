@@ -827,6 +827,45 @@ def _manifest(tmp_path, records, name="nodes.yml"):
     (tmp_path / name).write_text(json.dumps({"nodes": records}), encoding="utf-8")
 
 
+@pytest.mark.parametrize("cache_policy", [None, False, True], ids=["uncached", "verify", "stat"])
+@pytest.mark.parametrize("component_is_file", [False, True], ids=["missing", "not-directory"])
+def test_external_collapsible_path_reads_target_and_retains_identity(
+    tmp_path, monkeypatch, cache_policy, component_is_file
+):
+    monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path / "cache"))
+    if component_is_file:
+        (tmp_path / "component").write_text("not a directory\n")
+    target = tmp_path / "doc.md"
+    target.write_text("# Body\n")
+    declared = "component/../doc.md"
+    identity = tmp_path / declared
+    _manifest(tmp_path, [{"path": declared, "meta": {"id": "external"}}])
+    project = _sidecar_project(
+        tmp_path, cache=cache_policy is not None, trust_stat=cache_policy is True
+    )
+
+    for require_verified in (False, False, True):
+        lattice = load_lattice(project, require_verified=require_verified)
+        node = lattice.nodes_by_id["external"]
+        assert node.path == identity
+        assert lattice.index[TargetId("external", "body")].path == identity
+        assert node.body == "# Body\n"
+        assert node.origin is not None
+        assert node.origin.markdown_path == identity
+        assert node.origin.declaration is not None
+        assert node.origin.declaration.declared_path == declared
+    if cache_policy is not None:
+        snapshot = store.load(cache_path("testslot", os.environ))
+        assert snapshot.cache is not None
+        assert set(snapshot.cache.entries) == {declared}
+
+    target.write_text("---\nderives_from: []\n---\n")
+    with pytest.raises(FrontmatterError) as caught:
+        load_lattice(project)
+    assert caught.value.source == identity
+    assert "nodes[0]" in "; ".join(caught.value.__notes__)
+
+
 @pytest.mark.parametrize("cache", [False, True])
 @pytest.mark.parametrize(
     "prefix",
@@ -1102,14 +1141,17 @@ def test_external_duplicate_edge_warning_names_manifest(tmp_path):
 
 
 @pytest.mark.parametrize("cache", [False, True])
-def test_external_decode_error_preserves_source_and_record_note(tmp_path, monkeypatch, cache):
+@pytest.mark.parametrize("declared_path", ["external.md", "absent/../external.md"])
+def test_external_decode_error_preserves_source_and_record_note(
+    tmp_path, monkeypatch, cache, declared_path
+):
     monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path / "cache"))
     path = tmp_path / "external.md"
     path.write_bytes(b"\xff")
-    _manifest(tmp_path, [{"path": "external.md", "meta": {"id": "external"}}])
+    _manifest(tmp_path, [{"path": declared_path, "meta": {"id": "external"}}])
     with pytest.raises(UnreadableDocError) as caught:
         load_lattice(_sidecar_project(tmp_path, cache=cache))
-    assert caught.value.source == path
+    assert caught.value.source == tmp_path / declared_path
     assert "nodes[0]" in "; ".join(caught.value.__notes__)
 
 

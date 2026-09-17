@@ -8,7 +8,7 @@ from pathlib import Path
 from .cache import CacheHit, LookupPolicy, RunState, cache_path, lookup, make_entry, store
 from .config import ProjectConfig, SidecarProjectConfig
 from .constants import COMMENT_ENVELOPE_OPEN, FrontmatterDisposition
-from .discovery import decode_doc, discover_doc_candidates, read_doc
+from .discovery import decode_doc, discover_doc_candidates, read_doc_bytes
 from .error_types import DocumentError, RegistrationConflictError
 from .frontmatter_parser import parse_document
 from .loader import build_lattice, derive_file_sections
@@ -57,7 +57,9 @@ def load_lattice(
     registrations = build_registration_index(declarations, project.project_root)
     if project.config.cache_key is None:
         return _assemble(
-            project, registrations, lambda path: _parse_file_facts(read_doc(path), path)
+            project,
+            registrations,
+            lambda path, target: _parse_file_facts(decode_doc(path, read_doc_bytes(target)), path),
         )
     return _load_cached(
         project,
@@ -256,7 +258,7 @@ def _ownership_explanation(outcome: ParsedMeta, path: Path) -> str:
 def _assemble(
     project: ProjectConfig,
     registrations: RegistrationIndex,
-    acquire_facts: Callable[[Path], FileFacts],
+    acquire_facts: Callable[[Path, Path], FileFacts],
 ) -> Lattice:
     """Join fresh ownership claims and file-local facts before registering any node ids."""
     identities = {
@@ -278,7 +280,9 @@ def _assemble(
                 f"target of {registration.location}; a manifest must never be a node"
             )
         try:
-            facts = acquire_facts(path)
+            # A declared spelling can contain absent/../ components. Read its validated
+            # target, while keeping the spelling for identity, cache keys, and parse errors.
+            facts = acquire_facts(path, target if registration is not None else path)
         except DocumentError as exc:
             if registration is not None:
                 exc.add_note(f"external enrollment declared by {registration.location}")
@@ -335,9 +339,9 @@ def _load_cached(
     effective_trust = config.cache_trust_stat and not require_verified
     policy = LookupPolicy(current_root=current_root, trust_stat=effective_trust)
 
-    def acquire_facts(doc_path: Path) -> FileFacts:
+    def acquire_facts(doc_path: Path, read_path: Path) -> FileFacts:
         rel_key = doc_path.relative_to(resolved_root).as_posix()
-        result = lookup.resolve(state.entry(rel_key), doc_path, policy)
+        result = lookup.resolve(state.entry(rel_key), read_path, policy)
         if isinstance(result, CacheHit):
             state.claim(rel_key, result.refreshed_stat)
             return result.facts

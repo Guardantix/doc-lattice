@@ -3080,6 +3080,8 @@ orchestration as ordinary configuration. Each load rebuilds the registration ind
 resolved discovery candidates with registered targets before ownership can be hidden by alias
 deduplication. Cached and uncached loads share assembly and warning decisions; they differ only
 in how they obtain Markdown file facts and whether a successful load persists cache state.
+Registered files are read and stat-ed through their validated resolved targets, while declared
+spellings remain the node identities, cache keys, and parser diagnostic paths.
 The default command configuration loader continues to refuse `sidecar_manifests` until the
 user-facing enrollment work enables it.
 
@@ -3096,6 +3098,7 @@ by the participating external node ids. Each value holds `markdown_path`, `manif
 `record_index`, and `declared_path`; declared strings are preserved verbatim. Records with no
 external participants omit the mapping, preserving inline-only output. The same origin format
 serves drift, ambiguity, authority, impact, graph, and ticket findings.
+Broken section references retain the known file's origin even when the section does not exist.
 
 **Consequences:** AD-44's decline of a sidecar manifest no longer governs. Its envelope,
 auto-slug, hash, and `lattice_format` decisions are untouched. GTX-755, GTX-756, and GTX-757 each
