@@ -1,82 +1,36 @@
-"""Shared no-follow filesystem selection, retaining every spelling and its selectors.
+"""Shared no-follow filesystem selection with consumer-neutral refusal records.
 
-Grammar validation remains in ``link_selectors``. Consumers choose the error taxonomy, whether
-reaching a symlinked directory is a refusal, and the selectors that prune the walk; no policy
-follows such directories. Selection does not resolve or deduplicate file aliases, enroll nodes,
-or read file contents.
+Grammar validation remains in ``link_selectors``. The walk retains every spelling and its
+selectors, and never resolves file aliases, enrolls nodes, or reads contents. Consumers render
+the refusal records in their own error taxonomy.
 """
 
 import os
 from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Literal
 
-from .error_types import ProjectError
 from .link_selectors import (
     RECURSIVE_SEGMENT,
     SELECTOR_SEPARATOR,
     segment_matches,
-    selector_defect_message,
     selector_matches_path,
     validate_link_selector,
 )
-from .path_utils import format_path_for_display
 
 
 @dataclass(frozen=True, slots=True)
 class SelectionPolicy:
-    """The consumer's diagnostic context and traversal refusal policy.
+    """Choose whether traversable directory symlinks become refusal records."""
 
-    Nothing here defaults to a consumer: this module names no key, purpose, or error type of
-    its own, so a caller that forgets one cannot inherit another consumer's taxonomy and report
-    a refusal under a key the reader will not find in their configuration.
-
-    Attributes:
-        key: The config key whose entries are being expanded, named in every diagnostic.
-        purpose: How a refusal spells the gate that refused, as in "the links command refuses".
-        error_type: The ``ProjectError`` subclass every refusal is raised as.
-        refuse_symlink_directories: Whether reaching a symlinked directory is a refusal rather
-            than a directory the walk declines to enter.
-        selector_note: The note every refusal met inside the walk gains, with ``{selector}``
-            standing in for the declaration that reached it. The remedies it carries belong to
-            the consumer and not to this module, which names no key of its own and would
-            otherwise offer one gate's escape hatch to a gate that does not have it.
-    """
-
-    key: str
-    purpose: str
-    error_type: type[ProjectError]
     refuse_symlink_directories: bool = False
-    selector_note: str | None = None
-
-    def __post_init__(self) -> None:
-        """Refuse a traversal refusal with nowhere to send the reader.
-
-        A consumer strict enough to refuse a symlinked directory owes the author a way out of
-        it, and the note is how a remedy reaches the terminal, since ``exception_details``
-        renders every note after the message. Checked here because both policies in the engine
-        are module constants, so a policy that forgot one fails at import and not on a user.
-        """
-        if self.refuse_symlink_directories and self.selector_note is None:
-            msg = "refuse_symlink_directories requires selector_note to carry its remedy"
-            raise ValueError(msg)
 
 
 @dataclass(frozen=True, slots=True)
 class Exclusions:
-    """The selectors that prune a selection, and the key an author declared them under.
+    """Selectors that prune a selection before the walk inspects an entry."""
 
-    The two travel as one argument because they are only correct together: a diagnostic about
-    an exclusion has to name the key that carried it, and a caller able to hand over selectors
-    without their key would have them reported under the key its policy names for selection,
-    sending the reader to the wrong list.
-
-    Attributes:
-        key: The config key these entries came from, named in every exclusion diagnostic.
-        selectors: Selectors in the shared grammar, validated by ``select_paths``.
-    """
-
-    key: str
     selectors: tuple[str, ...]
 
 
@@ -88,37 +42,92 @@ class SelectedPath:
     selectors: tuple[str, ...]
 
 
+RefusalKind = Literal[
+    "root-unresolved",
+    "no-selectors",
+    "invalid-selector",
+    "no-match",
+    "scan-failed",
+    "inspect-failed",
+    "symlink-directory",
+]
+
+
+@dataclass(frozen=True, slots=True)
+class SelectionRefusal:
+    """One selection refusal, without a consumer error type or diagnostic wording.
+
+    ``spelling`` is project-relative for entries and selectors, and the root or inspected
+    absolute path for filesystem failures. ``source`` distinguishes selection from exclusion
+    grammar; ``selector`` names the declaration that reached a traversal refusal.
+    """
+
+    kind: RefusalKind
+    spelling: str
+    selector: str | None = None
+    source: Literal["select", "exclude"] = "select"
+    detail: str | None = None
+    pruned: bool = False
+
+
+def refusal_from_error(error: ValueError) -> SelectionRefusal:
+    """Extract a structured refusal from the built-in error carrying it.
+
+    Args:
+        error: A value error raised during selection.
+
+    Returns:
+        The structured refusal the selection boundary attached.
+
+    Raises:
+        ValueError: The original error when it did not come from the selection boundary.
+    """
+    if len(error.args) != 1 or not isinstance(error.args[0], SelectionRefusal):
+        raise error
+    return error.args[0]
+
+
+@dataclass(frozen=True, slots=True)
+class SelectionResult:
+    """Selected paths and collectable traversal or symlink-only no-match refusals."""
+
+    paths: tuple[SelectedPath, ...]
+    refusals: tuple[SelectionRefusal, ...]
+
+
 @dataclass(frozen=True, slots=True)
 class _Selection:
-    """One call's policy and validated exclusion segments, threaded through the walk.
+    """One selector's traversal policy, exclusions, and refusal sink.
 
-    One object rather than two parameters because ``_recursive_frames`` already takes the five
-    arguments the lint ceiling allows, and because the pair is what every step of the walk
-    needs together.
+    One object rather than four parameters because ``_recursive_frames`` already takes the five
+    arguments the lint ceiling allows, and every step needs these values together.
     """
 
     policy: SelectionPolicy
     exclusions: tuple[tuple[str, ...], ...]
+    selector: str
+    refusals: list[SelectionRefusal]
 
 
-def _validated(selector: str, key: str, policy: SelectionPolicy) -> tuple[str, ...]:
-    """Validate one selector, naming the key that carried it.
+def _validated(selector: str, source: Literal["select", "exclude"]) -> tuple[str, ...]:
+    """Validate one selector and retain which list carried it.
 
     Args:
         selector: One selector in the shared grammar.
-        key: The config key the selector was declared under, which is what its defect names.
-        policy: The consumer's diagnostic context.
+        source: The list the selector was declared under.
 
     Returns:
         The selector's validated segments.
 
     Raises:
-        ProjectError: Using the policy's error type, if the grammar refuses the selector.
+        ValueError: Carrying a ``SelectionRefusal`` when the grammar refuses the selector.
     """
     try:
         return validate_link_selector(selector)
     except ValueError as exc:
-        raise policy.error_type(selector_defect_message(key, selector, exc)) from exc
+        raise ValueError(
+            SelectionRefusal("invalid-selector", selector, source=source, detail=str(exc))
+        ) from exc
 
 
 def select_paths(
@@ -127,92 +136,87 @@ def select_paths(
     *,
     policy: SelectionPolicy,
     exclude: Exclusions | None = None,
-) -> tuple[SelectedPath, ...]:
+) -> SelectionResult:
     """Expand selectors without following directory symlinks or collapsing file aliases.
 
     Args:
         project_root: Root from which every selector is expanded.
         selectors: Selectors in the shared grammar, validated here even for direct callers.
-        policy: Diagnostic context and whether traversable directory symlinks are refused.
-        exclude: Selectors that prune the walk, and the key that declared them. An excluded
-            directory is never entered, so nothing beneath it is selected, inspected, or
-            scanned; an excluded file is never selected.
+        policy: Whether traversable directory symlinks are refused.
+        exclude: Selectors that prune the walk. An excluded directory is never entered, so
+            nothing beneath it is selected, inspected, or scanned; an excluded file is never
+            selected.
 
     Returns:
-        Every matched spelling in project-relative order, with all its selecting declarations.
+        Matched spellings and traversal refusals in project-relative order.
 
     Raises:
-        ProjectError: Using the policy's error type, if a selector is invalid, matches nothing,
-            or the filesystem cannot be inspected under the chosen traversal policy.
+        ValueError: Carrying a ``SelectionRefusal`` when a selector is invalid, matches nothing,
+            or the filesystem cannot be inspected.
     """
     try:
         root = project_root.resolve()
     except OSError as exc:
-        raise policy.error_type(
-            f"{policy.key} project root {format_path_for_display(project_root)} "
-            f"could not be resolved: {exc}"
+        raise ValueError(
+            SelectionRefusal("root-unresolved", str(project_root), detail=str(exc))
         ) from exc
     if not selectors:
-        raise policy.error_type(
-            f"{policy.key} names no selector for the project root "
-            f"{format_path_for_display(root)}; the {policy.purpose} refuses to run "
-            "without a selector"
-        )
+        raise ValueError(SelectionRefusal("no-selectors", str(root)))
     exclusions = (
-        tuple(_validated(entry, exclude.key, policy) for entry in exclude.selectors)
+        tuple(_validated(entry, "exclude") for entry in exclude.selectors)
         if exclude is not None
         else ()
     )
-    pruned_by = exclude.key if exclude is not None and exclusions else None
-    selection = _Selection(policy, exclusions)
+    pruned = bool(exclusions)
     matched: dict[str, set[str]] = {}
+    refusals: list[SelectionRefusal] = []
     for selector in selectors:
-        segments = _validated(selector, policy.key, policy)
-        try:
-            found = _walk(root, segments, selection)
-        except ProjectError as exc:
-            if policy.selector_note is not None:
-                displayed = format_path_for_display(selector)
-                exc.add_note(policy.selector_note.format(selector=displayed))
-            raise
+        segments = _validated(selector, "select")
+        selection = _Selection(policy, exclusions, selector, refusals)
+        found = _walk(root, segments, selection)
         if not found:
-            surviving = f" that {pruned_by} did not prune" if pruned_by is not None else ""
-            raise policy.error_type(
-                f"{policy.key} entry {format_path_for_display(selector)} matches no file "
-                f"under the project root {format_path_for_display(root)}{surviving}; "
-                f"the {policy.purpose} refuses to run over a selector that selects nothing"
-            )
+            unmatched = SelectionRefusal("no-match", selector, detail=str(root), pruned=pruned)
+            if not refusals:
+                raise ValueError(unmatched)
+            refusals.append(unmatched)
         for path in found:
             matched.setdefault(path, set()).add(selector)
-    return tuple(
-        SelectedPath(path, tuple(sorted(entries))) for path, entries in sorted(matched.items())
+    return SelectionResult(
+        tuple(
+            SelectedPath(path, tuple(sorted(entries))) for path, entries in sorted(matched.items())
+        ),
+        tuple(
+            sorted(
+                set(refusals),
+                key=lambda refusal: (refusal.spelling, refusal.kind, refusal.selector or ""),
+            )
+        ),
     )
 
 
-def _scan(directory: Path, policy: SelectionPolicy) -> list[os.DirEntry[str]]:
+def _scan(directory: Path, selector: str) -> list[os.DirEntry[str]]:
     """List one directory.
 
     Raises:
-        ProjectError: If the filesystem refuses the scan. The consumer chooses its
-            selection-time error type.
+        ValueError: Carrying a ``SelectionRefusal`` if the filesystem refuses the scan.
     """
     try:
         with os.scandir(directory) as entries:
             return list(entries)
     except OSError as exc:
-        displayed = format_path_for_display(directory)
-        msg = f"{policy.key} selection could not scan {displayed}: {exc}"
-        raise policy.error_type(msg) from exc
+        raise ValueError(
+            SelectionRefusal("scan-failed", str(directory), selector=selector, detail=str(exc))
+        ) from exc
 
 
 def _is_directory(
-    entry: os.DirEntry[str], policy: SelectionPolicy, spelling: str, *, traverse: bool = False
-) -> bool:
+    entry: os.DirEntry[str], selection: _Selection, spelling: str, *, traverse: bool = False
+) -> bool | None:
     """Report whether an entry is a directory in its own right, never through a symlink.
 
     Args:
         entry: The directory entry to classify.
-        policy: The consumer's diagnostic context and traversal refusal policy.
+        selection: The traversal policy and refusal sink.
         spelling: The entry's project-relative spelling, which is what a refusal names. An
             author needs the spelling they can write into a configuration, not the absolute
             path the walk happens to be holding.
@@ -220,30 +224,30 @@ def _is_directory(
             symlinked directory can be refused.
 
     Returns:
-        True when the entry is a directory and not a symlink to one.
+        True for a real directory, false for a file, or None for a refused directory symlink.
 
     Raises:
-        ProjectError: If the filesystem refuses the inspection, or the entry is a symlinked
-            directory the walk is about to enter under a policy that refuses those. The
-            consumer chooses its selection-time error type.
+        ValueError: Carrying a ``SelectionRefusal`` if the filesystem refuses inspection.
     """
     try:
         directory = entry.is_dir(follow_symlinks=False)
         if (
             traverse
-            and policy.refuse_symlink_directories
+            and selection.policy.refuse_symlink_directories
             and entry.is_symlink()
             and entry.is_dir(follow_symlinks=True)
         ):
-            raise policy.error_type(
-                f"{policy.key} selection refuses to traverse symlinked directory "
-                f"{format_path_for_display(spelling)}"
+            selection.refusals.append(
+                SelectionRefusal("symlink-directory", spelling, selector=selection.selector)
             )
+            return None
         return directory
     except OSError as exc:
-        displayed = format_path_for_display(entry.path)
-        msg = f"{policy.key} selection could not inspect {displayed}: {exc}"
-        raise policy.error_type(msg) from exc
+        raise ValueError(
+            SelectionRefusal(
+                "inspect-failed", entry.path, selector=selection.selector, detail=str(exc)
+            )
+        ) from exc
 
 
 def _join(prefix: str, name: str) -> str:
@@ -257,7 +261,7 @@ def _retained(
 
     Applied to a listing as it is read, ahead of every other judgment the walk makes about an
     entry, so an excluded spelling is never inspected, never entered, and never selected. One
-    site rather than one per branch: the refusal an exclusion exists to prune is raised while
+    site rather than one per branch: the refusal an exclusion exists to prune is recorded while
     deciding whether an entry is a traversable directory, so a branch that pruned second would
     reintroduce it, and every branch added later would have to remember the same rule.
 
@@ -328,14 +332,15 @@ def _recursive_frames(
         The frames to push, children first and the ``index + 1`` handoff last.
 
     Raises:
-        ProjectError: If the filesystem refuses to inspect an entry, a selection-time refusal.
+        ValueError: Carrying a ``SelectionRefusal`` if the filesystem refuses inspection.
     """
     frames: list[_Frame] = []
     for entry in entries:
         spelling = _join(frame.prefix, entry.name)
-        if _is_directory(entry, selection.policy, spelling, traverse=True):
+        kind = _is_directory(entry, selection, spelling, traverse=True)
+        if kind is True:
             frames.append(_Frame(Path(entry.path), spelling, frame.index))
-        elif last:
+        elif kind is False and last:
             found.add(spelling)
     if not last:
         frames.append(_Frame(frame.directory, frame.prefix, frame.index + 1, entries))
@@ -384,8 +389,7 @@ def _walk(root: Path, segments: tuple[str, ...], selection: _Selection) -> set[s
         Every project-relative spelling the selector matched, unordered.
 
     Raises:
-        ProjectError: If the filesystem refuses to scan a directory or inspect an entry, both
-            selection-time refusals.
+        ValueError: Carrying a ``SelectionRefusal`` for a scan or inspection refusal.
     """
     found: set[str] = set()
     visited: set[tuple[str, int]] = set()
@@ -401,7 +405,7 @@ def _walk(root: Path, segments: tuple[str, ...], selection: _Selection) -> set[s
         entries = frame.entries
         if entries is None:
             entries = _retained(
-                _scan(frame.directory, selection.policy), frame.prefix, selection.exclusions
+                _scan(frame.directory, selection.selector), frame.prefix, selection.exclusions
             )
         if segment == RECURSIVE_SEGMENT:
             pending.extend(_recursive_frames(frame, entries, last, found, selection))
@@ -411,8 +415,8 @@ def _walk(root: Path, segments: tuple[str, ...], selection: _Selection) -> set[s
                 continue
             spelling = _join(frame.prefix, entry.name)
             if last:
-                if not _is_directory(entry, selection.policy, spelling):
+                if _is_directory(entry, selection, spelling) is False:
                     found.add(spelling)
-            elif _is_directory(entry, selection.policy, spelling, traverse=True):
+            elif _is_directory(entry, selection, spelling, traverse=True) is True:
                 pending.append(_Frame(Path(entry.path), spelling, frame.index + 1))
     return found

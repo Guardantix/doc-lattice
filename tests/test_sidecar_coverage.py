@@ -2,6 +2,7 @@
 
 import errno
 import os
+from contextlib import nullcontext
 from pathlib import Path
 
 import pytest
@@ -232,11 +233,105 @@ def test_an_exclusion_prunes_the_symlinked_directory_that_refused_the_gate(tmp_p
     with pytest.raises(CoverageError, match="refuses to traverse symlinked directory") as info:
         enforce_coverage(tmp_path, _policy(["skills/**/SKILL.md"]), {covered})
 
-    notes = " ".join(info.value.__notes__)
-    assert "prune it with sidecar_coverage.exclude" in notes
+    assert "prune it with sidecar_coverage.exclude" in str(info.value)
 
     enforce_coverage(
         tmp_path,
         _policy(["skills/**/SKILL.md"], exclude=["skills/**/node_modules"]),
         {covered},
     )
+
+
+@pytest.mark.parametrize("reverse", [False, True])
+def test_traversal_refusals_accumulate_in_project_relative_order(tmp_path, monkeypatch, reverse):
+    root = tmp_path / "project"
+    root.mkdir()
+    real = root / "real"
+    real.mkdir()
+    covered = real / "SKILL.md"
+    covered.write_text("# Covered\n")
+    for name in ("z_link", "a_link"):
+        (root / name).symlink_to(real, target_is_directory=True)
+    original = os.scandir
+    scan_order = {"reverse": reverse}
+
+    def scan(directory):
+        entries = original(directory)
+        if Path(directory) != root:
+            return entries
+        with entries:
+            listing = list(entries)
+        return nullcontext(iter(reversed(listing) if scan_order["reverse"] else listing))
+
+    monkeypatch.setattr(os, "scandir", scan)
+    with pytest.raises(CoverageError) as info:
+        enforce_coverage(root, _policy(["**/SKILL.md"]), {covered})
+
+    message = str(info.value)
+    scan_order["reverse"] = not reverse
+    with pytest.raises(CoverageError) as opposite:
+        enforce_coverage(root, _policy(["**/SKILL.md"]), {covered})
+    assert str(opposite.value) == message
+    assert message.index("'a_link'") < message.index("'z_link'")
+    assert message.count("refuses to traverse symlinked directory") == 2
+    assert "prune it with sidecar_coverage.exclude" in message
+
+
+def test_traversal_refusal_and_uncovered_file_share_one_error(tmp_path):
+    real = tmp_path / "real"
+    real.mkdir()
+    (real / "SKILL.md").write_text("# Uncovered\n")
+    (tmp_path / "linked").symlink_to(real, target_is_directory=True)
+
+    with pytest.raises(CoverageError) as info:
+        enforce_coverage(tmp_path, _policy(["**/SKILL.md"]), set())
+
+    message = str(info.value)
+    assert "'linked'" in message
+    assert "refuses to traverse symlinked directory" in message
+    assert "'real/SKILL.md': selected by '**/SKILL.md'; not enrolled" in message
+
+
+def test_traversal_refusal_joins_invalid_and_uncovered_paths(tmp_path):
+    real = tmp_path / "real"
+    real.mkdir()
+    (real / "SKILL.md").write_text("# Uncovered\n")
+    (tmp_path / "linked").symlink_to(real, target_is_directory=True)
+    (tmp_path / "invalid.md").symlink_to(tmp_path / "missing.md")
+
+    with pytest.raises(CoverageError) as info:
+        enforce_coverage(tmp_path, _policy(["**"]), set())
+
+    message = str(info.value)
+    assert "'linked': selected by '**'; sidecar_coverage.select selection refuses" in message
+    assert "'invalid.md': selected by '**'; cannot resolve or inspect selected path" in message
+    assert "'real/SKILL.md': selected by '**'; not enrolled" in message
+
+
+def test_symlink_only_selector_reports_empty_match_in_the_same_run(tmp_path):
+    real = tmp_path / "real"
+    real.mkdir()
+    (real / "SKILL.md").write_text("# Covered\n")
+    (tmp_path / "linked").symlink_to(real, target_is_directory=True)
+
+    with pytest.raises(CoverageError) as info:
+        enforce_coverage(tmp_path, _policy(["linked/**/*.md"]), set())
+
+    message = str(info.value)
+    assert "'linked': selected by 'linked/**/*.md'" in message
+    assert "'linked/**/*.md' matches no file" in message
+
+
+def test_later_empty_selector_does_not_hide_prior_traversal_refusal(tmp_path):
+    real = tmp_path / "real"
+    real.mkdir()
+    (real / "SKILL.md").write_text("# Covered\n")
+    (tmp_path / "linked").symlink_to(real, target_is_directory=True)
+
+    with pytest.raises(CoverageError) as info:
+        enforce_coverage(tmp_path, _policy(["linked/**/*.md", "missing.md"]), set())
+
+    message = str(info.value)
+    assert "'linked': selected by 'linked/**/*.md'" in message
+    assert "'linked/**/*.md' matches no file" in message
+    assert "'missing.md' matches no file" in message
