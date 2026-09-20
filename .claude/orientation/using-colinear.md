@@ -7,11 +7,16 @@ description: Auto-loaded orientation for Linear workflows with colinear. Injecte
 
 Linear work for this repo flows through one named pipeline.
 Two named commands cover it.
+The workflow examples below use Claude Code slash notation; in Codex invoke the same skills with `$colinear`, for example `$colinear ready ABC-N`, and `$linear-finalize`.
+The verb arguments and human gates are identical in both hosts.
 `/colinear` is a direct-invocation router whose verbs are the pipeline's stage transitions — each invocation names one verb, loads exactly one mode file, and never fires on its own.
 `/linear-finalize` is the one skill that auto-invokes, on an open `ABC-N` PR, and it runs the same handback as `/colinear handback`.
 For ad-hoc reads/writes outside a workflow, run the `colinear` CLI with `--help`.
 
-This orientation matches colinear 0.85.x — verify against the `version:` line in `doctor` output; on a major/minor mismatch STOP and tell the user to re-run `colinear orientation enable`.
+This orientation matches colinear 0.87.x — verify against the `version:` line in `doctor` output; on a major/minor mismatch STOP and tell the user to refresh this project’s orientation.
+In Codex use the exact refresh command prepended by the hook, which names `--agent codex --project-root` and this worktree’s absolute root.
+In Claude Code run `colinear orientation enable --agent claude --project-root <project-root>` for the consuming project.
+Do not refresh a different host or infer the target from a nested working directory.
 If `colinear` is not found at all, run `./install.sh` from the colinear repo checkout — that is the version-skew recovery path and does not depend on the new binary.
 
 ## The pipeline
