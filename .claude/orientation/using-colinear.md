@@ -5,60 +5,77 @@ description: Auto-loaded orientation for Linear workflows with colinear. Injecte
 
 # Using colinear
 
-Linear work for this repo flows through one named pipeline.
-Two named commands cover it.
-The workflow examples below use Claude Code slash notation; in Codex invoke the same skills with `$colinear`, for example `$colinear ready ABC-N`, and `$linear-finalize`.
-The verb arguments and human gates are identical in both hosts.
-`/colinear` is a direct-invocation router whose verbs are the pipeline's stage transitions — each invocation names one verb, loads exactly one mode file, and never fires on its own.
-`/linear-finalize` is the one skill that auto-invokes, on an open `ABC-N` PR, and it runs the same handback as `/colinear handback`.
-For ad-hoc reads/writes outside a workflow, run the `colinear` CLI with `--help`.
+This project has declared the **Delegate** stage of the colinear method.
+What follows is that stage and the ones it builds on — not the whole command tree.
+When the project declares a further stage, this document teaches more.
 
-This orientation matches colinear 0.87.x — verify against the `version:` line in `doctor` output; on a major/minor mismatch STOP and tell the user to refresh this project’s orientation.
-In Codex use the exact refresh command prepended by the hook, which names `--agent codex --project-root` and this worktree’s absolute root.
-In Claude Code run `colinear orientation enable --agent claude --project-root <project-root>` for the consuming project.
-Do not refresh a different host or infer the target from a nested working directory.
+This orientation matches colinear 0.88.x — verify against the `version:` line in `doctor` output; on a major/minor mismatch STOP and tell the user to re-run `colinear orientation enable`.
 If `colinear` is not found at all, run `./install.sh` from the colinear repo checkout — that is the version-skew recovery path and does not depend on the new binary.
 
-## The pipeline
+Issues here are identified as `GTX-N`; read every `GTX-N` below as a placeholder for a real one.
 
-```
-Triage ─→ Backlog ─→ Ready ─→ In Progress ─→ In Review ─→ Done
-   │         │          │          │              │          │
-/colinear /colinear  /colinear human work    /colinear  /colinear
-triage    ready      start                   handback   ship
-          then       then                               (human-
-          /colinear  /colinear                          gated)
-          ready      start
-          ABC-N      ABC-N
-```
+## Your workspace nouns
 
-Every arrow on that line is driven by a colinear command, including the one into the review state.
-`/colinear handback` performs that handback itself rather than depending on the team's Linear GitHub automation, whose rows are configured per team and may move the issue on PR open, on review request, or not at all.
-It attaches the attention marker either way, which no automation does, and verifies the result.
-Where an automation has already moved the issue to the review state, the handback says so and does the label half alone.
-The last arrow is the one colinear does not write directly.
-`/colinear ship` merges the PR and writes no Linear state of its own; where the team's Linear GitHub integration closes issues on merge, which is its stock default, the issue reaches Done from that merge.
-So the gate is on invoking `/colinear ship`, and an automated close is the expected outcome rather than a fault.
-Where that automation is off, a successful merge leaves the issue in the review state and a human moves it.
+Every name below is this project's own declaration, read from its configuration.
+Read it here rather than assuming the names another project uses.
 
-The authoritative "agent finished, a human is needed" signal is the configured `labels.needs_human_review` marker, attached by the same handback write.
-Read that, not the workflow state, when you want to know whether work is waiting on a person: the state says where the issue sits in the pipeline, and the marker says who owes the next move.
-That reading stops at the configured `states.done` role, which is itself a human's confirmation that the work is finished.
-A merge the integration closes can land before the handback runs, which then halts and leaves the old queue marker attached, and a merge made without `/colinear ship` can leave the attention marker behind, so a marker on an issue currently in that state is residue rather than a sign that anyone owes a move.
-Whoever reopens such an issue re-checks its markers before work resumes.
+Workflow states:
 
-## Per-stage commands
+- `ready` — `Ready`
+- `backlog` — `Backlog`
+- `triage` — `Triage`
+- `deferred` — `Deferred`
+- `canceled` — `Canceled`
+- `duplicate` — `Duplicate`
+- `in_progress` — `In Progress`
+- `in_review` — `In Review`
+- `done` — `Done`
 
-- **Triage → Backlog (or other dispositions)**: `/colinear triage` — batch-review the queue and apply on user confirmation.
-- **Deferred review**: `/colinear defer` — batch-review Deferred issues and apply confirmed decisions.
-- **Backlog → Ready**: `/colinear ready` to discover newly unblocked items, then `/colinear ready ABC-N` to gate one through.
-- **Ready → In Progress**: `/colinear start` to see the queue, then `/colinear start ABC-N` to start work in an isolated worktree.
-- **A UI issue that wants a design reference first**: `/colinear design ABC-N` drafts the Claude Design brief (human-gated, and invoked directly — nothing routes an issue to it).
-- **An issue whose direction is not settled**: `/colinear refine ABC-N` reviews it adversarially and returns the review in chat; add `--post` to file it as one advisory comment (human-gated).
-- **In Progress**: implementation work — done by a human, typically inside the worktree `/colinear start ABC-N` set up. Run the pipeline commands as you go; there is no autonomous driver. When you run the test suite during delegated work, record it: `colinear review record-test --issue ABC-N --command '<cmd>' --passed N --failed N`. Re-run after fixes — the report keeps the latest run per command.
-- **Open PR → reviewer handoff**: `/colinear handback` — hand an issue with an open `ABC-N` PR back to the reviewer; run from the issue's own branch it needs no operand. It ensures the issue is in the configured review state, moving it there unless an automation already did, attaches the attention marker either way, and verifies both; it covers the delegated and the non-delegated return alike, selecting the path from whichever marker the issue carries under the configured `queue_ready` and `delegated` roles.
-- **In Review → Done**: `/colinear ship ABC-N` — human-gated; never auto-invoke.
+Labels:
 
-## Bulk filing
+- `queue_ready` — `ai:ready`
+- `parent` — `type:parent`
+- `human_only` — `ai:human-only`
+- `delegated` — `ai:delegated`
+- `needs_human_review` — `ai:needs-human-review`
+- `spike` — not declared
+- `design` — not declared
 
-To file a whole reviewed package of issues (bodies, projects, estimates, labels, blocked-by relations) from a YAML manifest, use `colinear issue bulk-create FILE`; run `colinear issue bulk-create --template` for the manifest format.
+## Observe
+
+Reads and the queue. Nothing here writes to Linear; trust is earned by visibility first.
+
+- **Check this project's credential, team, and declared roles** — `colinear doctor`
+- **Read one issue, or list them** — `colinear issue get GTX-N`
+- **See what blocks an issue and what it blocks** — `colinear relation list GTX-N`
+- **Read an issue's discussion** — `colinear comment list GTX-N`
+- **See the queue an agent would pick from** — `/colinear start`
+  *Narrowed here.* This project declares no `label_prefixes.milestone`, so `queue ready` still runs and simply covers less ground.
+
+## Batch
+
+The first writes, and they arrive already disciplined: plan, review what the plan says, then apply it. Never mutate a queue issue by issue.
+
+- **Batch-review the triage queue, then apply what you confirmed** — `/colinear triage`
+  *Unguarded here.* This project declares no `labels.design`, `labels.spike`, so `triage plan` cannot tell that marker apart from a work-type label, and can refuse any issue carrying one. Declare it in `colinear.toml` if your workspace uses such a label.
+- **Batch-review deferred work and apply the confirmed decisions** — `/colinear defer`
+- **Discover work a just-closed blocker has newly unblocked** — `/colinear ready`
+  *Narrowed here.* This project declares no `label_prefixes.milestone`, so `queue next` still runs and simply covers less ground.
+- **File one issue** — `colinear issue create "<title>" <body-file>`
+- **Review one issue adversarially before committing to its direction** — `/colinear refine GTX-N`
+- **Get an advisory estimate for one issue** — `colinear advise estimate GTX-N --mode triage --files <N> --loc <N> --subsystems <N>`
+  *Unguarded here.* This project declares no `label_prefixes.subsystem`, so `advise estimate` has no configured family to read that input from, and can refuse work the family would have backed. Declare it in `colinear.toml` if your workspace has one.
+
+## Delegate
+
+The ready contract and the handback contract turn on, and agents execute queue work end to end. An issue enters the queue only by passing the contract, and comes back only through the handback.
+
+- **Gate one issue through the ready contract into the queue** — `/colinear ready GTX-N`
+  *Unguarded here.* This project declares no `labels.design`, `labels.spike`, so `ready plan` cannot tell that marker apart from a work-type label, and can refuse any issue carrying one. Declare it in `colinear.toml` if your workspace uses such a label. This project declares no `label_prefixes.subsystem`, so `advise estimate` has no configured family to read that input from, and can refuse work the family would have backed. Declare it in `colinear.toml` if your workspace has one.
+- **Check one issue against the ready contract without writing** — `colinear issue check --issue GTX-N`
+  *Unguarded here.* This project declares no `labels.design`, `labels.spike`, so `issue check` cannot tell that marker apart from a work-type label, and can refuse any issue carrying one. Declare it in `colinear.toml` if your workspace uses such a label.
+- **Hand one queued issue to an agent in an isolated worktree** — `/colinear start GTX-N`
+- **Draft the design brief for one issue whose UI work needs it** — `/colinear design GTX-N`
+- **Record a test run against the issue being worked** — `colinear review record-test --issue GTX-N --command '<cmd>' --passed <N> --failed <N>`
+- **Hand delegated work back to its reviewer once a PR is open** — `/colinear handback`
+- **Merge reviewed work and close the issue** — `/colinear ship GTX-N`

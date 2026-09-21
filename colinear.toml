@@ -1,0 +1,66 @@
+# colinear workspace configuration, schema v1; see colinear's docs/config.md
+version = 1
+adoption_stage = "delegate"
+
+[workspace]
+organization_id = "28476297-849b-4ac4-90d4-aced89028376"
+
+[team]
+key = "GTX"
+
+# GTX is shared by several repositories. The repo label is doc-lattice's
+# product boundary. The v7.x project is a backfill bridge for older work that
+# predates consistent repo labels; the current inventory contains one such
+# issue. The empty v8 project is intentionally omitted.
+[scope]
+group = "repo"
+label = "repo:doc-lattice"
+projects = ["doc-lattice v7.x"]
+
+[states]
+backlog = { name = "Backlog" }
+triage = { name = "Triage" }
+ready = { name = "Ready" }
+in_progress = { name = "In Progress" }
+in_review = { name = "In Review" }
+done = { name = "Done" }
+canceled = { name = "Canceled" }
+deferred = { name = "Deferred" }
+duplicate = { name = "Duplicate" }
+
+[labels]
+queue_ready = "ai:ready"
+delegated = "ai:delegated"
+needs_human_review = "ai:needs-human-review"
+human_only = "ai:human-only"
+parent = "type:parent"
+
+[label_prefixes]
+ai = "ai:"
+type = "type:"
+
+# GTX issues use one shared body contract, selected by type:change.
+[templates]
+disable = ["bug", "feature", "investigation"]
+
+[templates.change]
+required_sections = ["Goal", "Scope", "Acceptance criteria", "Tests / verification"]
+
+[projects]
+mode = "intent"
+
+[[intent_sources]]
+path = "README.md"
+description = "supported behavior and user-facing product identity"
+
+[[intent_sources]]
+path = "ROADMAP.md"
+description = "future direction and project sequencing"
+
+[[intent_sources]]
+path = "ARCHITECTURE.md"
+description = "durable decisions and subsystem boundaries"
+
+[[intent_sources]]
+path = "CLAUDE.md"
+description = "current repository conventions and authoritative document ownership"
