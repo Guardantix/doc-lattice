@@ -19,8 +19,10 @@ import doc_lattice.reconcile_transaction as transaction
 from doc_lattice.cli import app
 from doc_lattice.cli.commands.reconcile import _recovery_json_payload
 from doc_lattice.constants import RECONCILE_JOURNAL_NAME, RECONCILE_JOURNAL_VERSION
-from doc_lattice.error_types import ReconcilePersistenceError
+from doc_lattice.error_types import ReconcilePersistenceError, ValidationError
+from doc_lattice.model import DocumentOrigin, ExternalDeclaration
 from doc_lattice.path_utils import format_path_for_display
+from doc_lattice.reconcile import ReconcileUpdate, group_reconcile_updates
 from doc_lattice.reconcile_transaction import (
     JournalEntry,
     JournalProvenance,
@@ -78,6 +80,28 @@ def _sidecar_reconcile_project(root: Path, *, external_seen="old", upstream_only
                 ]
             }
         )
+    )
+
+
+def test_destination_resolution_owns_the_interim_external_refusal(tmp_path: Path):
+    origin = DocumentOrigin(
+        Path("skills/down.md"),
+        ExternalDeclaration("meta/nodes.yml", 2, "./skills/down.md"),
+    )
+    destinations = group_reconcile_updates(
+        {("external", "up"): ReconcileUpdate("new-seen", origin)}
+    )
+
+    with pytest.raises(ValidationError) as exc_info:
+        reconcile_command._resolve_reconcile_write_paths(destinations, tmp_path)
+
+    assert str(exc_info.value) == (
+        "cannot reconcile 'external' -> 'up' at 'skills/down.md' "
+        "(record nodes[2] (path './skills/down.md') in manifest 'meta/nodes.yml'): "
+        "updating an external node's seen is not supported in this release, and this refusal "
+        "names one edge at a time; review the upstream, then update each drifting edge's seen "
+        "in its manifest record by hand using that edge's actual value from "
+        "'doc-lattice check --format json' with cache_trust_stat disabled"
     )
 
 
@@ -483,7 +507,11 @@ def test_reconcile_then_check_clean(lattice_dir: Path, monkeypatch):
     assert after.exit_code == 1
 
 
-def test_reconcile_writes_through_in_project_symlink(tmp_path: Path, monkeypatch):
+@pytest.mark.parametrize("dry_run", [False, True], ids=["write", "dry-run"])
+@pytest.mark.parametrize("format_", ["human", "json"])
+def test_reconcile_writes_through_symlink_but_reports_its_identity(
+    tmp_path: Path, monkeypatch, dry_run: bool, format_: str
+):
     project_root = tmp_path / "repo"
     docs = project_root / "docs"
     shared = project_root / "shared"
@@ -493,23 +521,41 @@ def test_reconcile_writes_through_in_project_symlink(tmp_path: Path, monkeypatch
         'lattice_format: 2\ndocs_roots: ["docs"]\n', encoding="utf-8"
     )
     (docs / "up.md").write_text("---\nid: up\n---\n# Up {#sec}\nupstream\n", encoding="utf-8")
-    target = shared / "down.md"
+    target = shared / "actual.md"
     target.write_text(
         "---\nid: down\nderives_from:\n  - ref: up#sec\n---\n# Down\nbody\n",
         encoding="utf-8",
     )
-    link = docs / "down.md"
-    link.symlink_to(Path("../shared/down.md"))
+    link = docs / "alias.md"
+    link.symlink_to(Path("../shared/actual.md"))
     before = target.read_text(encoding="utf-8")
     monkeypatch.chdir(project_root)
 
-    result = runner.invoke(app, ["reconcile", "down"])
+    args = ["reconcile", "down", "--format", format_]
+    if dry_run:
+        args.append("--dry-run")
+    result = runner.invoke(app, args)
 
     assert result.exit_code == 0
     assert link.is_symlink()
+    if format_ == "json":
+        assert json.loads(result.stdout)["reconciled"] == [
+            {
+                "path": str(link),
+                "ref": "up#sec",
+                "new_seen": sha256(b"# Up\nupstream").hexdigest()[:32],
+            }
+        ]
+    else:
+        verb = "would reconcile" if dry_run else "reconciled"
+        assert result.stdout == f"{verb} 'alias.md': up#sec\n"
+    assert "actual.md" not in result.stdout
     rewritten = target.read_text(encoding="utf-8")
-    assert rewritten != before
-    assert "seen:" in rewritten
+    if dry_run:
+        assert rewritten == before
+    else:
+        assert rewritten != before
+        assert "seen:" in rewritten
     assert link.read_text(encoding="utf-8") == rewritten
 
 
@@ -1337,11 +1383,11 @@ def test_reconcile_concurrent_edit_is_preserved_without_success_report(
     editor_bytes = b"editor-owned concurrent bytes\n"
     edited_path: Path | None = None
 
-    def edit_then_commit(project_root, rewrites, write_paths, *, selector, lock):
+    def edit_then_commit(project_root, rewrites, *, selector, lock):
         nonlocal edited_path
-        edited_path = next(iter(write_paths.values()))
+        edited_path = rewrites[0].path
         edited_path.write_bytes(editor_bytes)
-        return real_commit(project_root, rewrites, write_paths, selector=selector, lock=lock)
+        return real_commit(project_root, rewrites, selector=selector, lock=lock)
 
     monkeypatch.setattr(reconcile_command, "commit_rewrites", edit_then_commit)
     args = ["reconcile", "pc-design"]
@@ -1447,6 +1493,30 @@ def test_reconcile_real_run_reports_reconciled_lines(lattice_dir: Path, monkeypa
     assert result.exit_code == 0
     assert "reconciled 'pc-design.md': art-direction#accent" in result.stdout
     assert "reconciled 'pc-design.md': art-direction#motion" in result.stdout
+
+
+@pytest.mark.parametrize("dry_run", [False, True], ids=["write", "dry-run"])
+def test_reconcile_human_output_sorts_refs_independent_of_declaration_order(
+    lattice_dir: Path, monkeypatch, dry_run: bool
+):
+    pc_path = lattice_dir / "docs" / "pc-design.md"
+    text = pc_path.read_text(encoding="utf-8")
+    accent = "  - ref: art-direction#accent\n    seen: staleseenhashstaleseenhashstale00\n"
+    motion = "  - ref: art-direction#motion\n"
+    pc_path.write_text(text.replace(accent + motion, motion + accent), encoding="utf-8")
+    monkeypatch.chdir(lattice_dir)
+    args = ["reconcile", "pc-design"]
+    if dry_run:
+        args.append("--dry-run")
+
+    result = runner.invoke(app, args)
+
+    verb = "would reconcile" if dry_run else "reconciled"
+    assert result.exit_code == 0
+    assert result.stdout == (
+        f"{verb} 'pc-design.md': art-direction#accent\n"
+        f"{verb} 'pc-design.md': art-direction#motion\n"
+    )
 
 
 def test_reconcile_keeps_every_record_on_one_line_at_any_width(lattice_dir: Path, monkeypatch):
@@ -1715,9 +1785,9 @@ def test_reconcile_hands_the_selector_it_built_to_the_transaction(
     real_commit = transaction.commit_rewrites
     captured: list[JournalSelector] = []
 
-    def _capture(project_root, rewrites, write_paths, *, selector, lock):
+    def _capture(project_root, rewrites, *, selector, lock):
         captured.append(selector)
-        return real_commit(project_root, rewrites, write_paths, selector=selector, lock=lock)
+        return real_commit(project_root, rewrites, selector=selector, lock=lock)
 
     monkeypatch.setattr(reconcile_command, "commit_rewrites", _capture)
 

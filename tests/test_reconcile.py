@@ -36,15 +36,34 @@ from doc_lattice.yaml_boundary import YAML_LOAD_ERRORS
 from doc_lattice.yaml_error_render import format_yaml_error_for_display
 
 
-def _apply_plan(plan: dict[Path, dict[str, str]]) -> None:
-    for path, updates in plan.items():
+def _rewrite_plan(
+    updates_by_path: dict[Path, dict[str, str]],
+) -> reconcile_module.ReconcileDestinationPlan:
+    """Build a destination plan for rewrite-only tests."""
+    logical_plan = {
+        (f"node-{index}", ref): reconcile_module.ReconcileUpdate(
+            new_seen,
+            DocumentOrigin(path),
+        )
+        for index, (path, updates) in enumerate(updates_by_path.items())
+        for ref, new_seen in updates.items()
+    }
+    return reconcile_module.group_reconcile_updates(logical_plan)
+
+
+def _apply_plan(plan: reconcile_module.ReconcilePlan) -> None:
+    for path, logical_updates in reconcile_module.group_reconcile_updates(plan).items():
+        updates = {
+            target_ref: update.new_seen
+            for (_node_id, target_ref), update in logical_updates.items()
+        }
         new_text, _ = apply_reconcile(path.read_text(encoding="utf-8"), updates, path)
         path.write_text(new_text, encoding="utf-8")
 
 
-def _planned_refs(plan: dict[Path, dict[str, str]]) -> set[str]:
-    """Collect every target ref across all files in a reconcile plan."""
-    return {ref for updates in plan.values() for ref in updates}
+def _planned_refs(plan: reconcile_module.ReconcilePlan) -> set[str]:
+    """Collect every target ref across all logical updates in a reconcile plan."""
+    return {target_ref for _node_id, target_ref in plan}
 
 
 def _reloaded_tickets(text: str) -> list[object]:
@@ -86,7 +105,11 @@ def test_plan_rewrites_applies_updates_from_reader():
         "---\r\nid: d\r\nderives_from:\r\n  - ref: a#x\r\n    seen: newhash\r\n---\r\ncafé ☕\r\n"
     ).encode()
 
-    rewrites = plan_rewrites({path: {"a#x": "newhash"}}, lambda _path: source)
+    plan = reconcile_module.group_reconcile_updates(
+        {("d", "a#x"): reconcile_module.ReconcileUpdate("newhash", DocumentOrigin(path))}
+    )
+
+    rewrites = plan_rewrites(plan, lambda _path: source)
 
     assert len(rewrites) == 1
     rewrite = rewrites[0]
@@ -103,7 +126,7 @@ def test_plan_rewrites_restores_lone_cr_line_endings():
     source = b"---\rid: d\rderives_from:\r  - ref: a#x\r    seen: old\r---\rbody\r"
     expected_after = b"---\rid: d\rderives_from:\r  - ref: a#x\r    seen: newhash\r---\rbody\r"
 
-    rewrites = plan_rewrites({path: {"a#x": "newhash"}}, lambda _path: source)
+    rewrites = plan_rewrites(_rewrite_plan({path: {"a#x": "newhash"}}), lambda _path: source)
 
     assert len(rewrites) == 1
     assert rewrites[0].before == source
@@ -116,7 +139,7 @@ def test_plan_rewrites_normalizes_a_file_that_mixes_line_endings():
     source = b"---\nid: d\r\nderives_from:\n  - ref: a#x\r\n    seen: old\n---\nbody\n"
     expected_after = b"---\nid: d\nderives_from:\n  - ref: a#x\n    seen: newhash\n---\nbody\n"
 
-    rewrites = plan_rewrites({path: {"a#x": "newhash"}}, lambda _path: source)
+    rewrites = plan_rewrites(_rewrite_plan({path: {"a#x": "newhash"}}), lambda _path: source)
 
     assert len(rewrites) == 1
     assert rewrites[0].before == source
@@ -132,7 +155,7 @@ def test_plan_rewrites_keeps_crlf_out_of_the_inserted_line():
         b"---\r\nid: d\r\nderives_from:\r\n  - ref: a#x\r\n    seen: newhash\r\n---\r\nbody\r\n"
     )
 
-    rewrites = plan_rewrites({path: {"a#x": "newhash"}}, lambda _path: source)
+    rewrites = plan_rewrites(_rewrite_plan({path: {"a#x": "newhash"}}), lambda _path: source)
 
     assert len(rewrites) == 1
     assert rewrites[0].after == expected_after
@@ -145,7 +168,7 @@ def test_plan_rewrites_wraps_reader_error_with_path():
         raise OSError("disk vanished")
 
     with pytest.raises(UnreadableDocError) as exc_info:
-        plan_rewrites({path: {"a#x": "newhash"}}, raise_os_error)
+        plan_rewrites(_rewrite_plan({path: {"a#x": "newhash"}}), raise_os_error)
     assert str(exc_info.value) == "cannot read 'downstream.md' to reconcile: disk vanished"
 
 
@@ -154,7 +177,7 @@ def test_plan_rewrites_names_unclosed_frontmatter_source():
     source = b"---\nid: d\nderives_from:\n  - ref: a#x\n"
 
     with pytest.raises(UnreadableDocError) as exc_info:
-        plan_rewrites({path: {"a#x": "newhash"}}, lambda _path: source)
+        plan_rewrites(_rewrite_plan({path: {"a#x": "newhash"}}), lambda _path: source)
 
     assert str(exc_info.value) == (
         "unclosed YAML frontmatter in 'downstream.md': add a closing '---' fence"
@@ -165,7 +188,7 @@ def test_plan_rewrites_wraps_invalid_utf8_with_path():
     path = Path("downstream.md")
 
     with pytest.raises(UnreadableDocError) as exc_info:
-        plan_rewrites({path: {"a#x": "newhash"}}, lambda _path: b"\xff")
+        plan_rewrites(_rewrite_plan({path: {"a#x": "newhash"}}), lambda _path: b"\xff")
 
     assert str(exc_info.value).startswith("cannot read 'downstream.md' to reconcile: ")
 
@@ -174,7 +197,7 @@ def test_plan_rewrites_skips_file_when_updates_already_applied():
     path = Path("downstream.md")
     source = b"---\nid: d\nderives_from:\n  - ref: a#x\n    seen: same\n---\nbody\n"
 
-    assert plan_rewrites({path: {"a#x": "same"}}, lambda _path: source) == []
+    assert plan_rewrites(_rewrite_plan({path: {"a#x": "same"}}), lambda _path: source) == []
 
 
 def test_plan_rewrites_preserves_plan_order():
@@ -186,7 +209,7 @@ def test_plan_rewrites_preserves_plan_order():
     }
 
     rewrites = plan_rewrites(
-        {first: {"up#first": "hashone"}, second: {"up#second": "hashtwo"}},
+        _rewrite_plan({first: {"up#first": "hashone"}, second: {"up#second": "hashtwo"}}),
         text_by_path.__getitem__,
     )
 
@@ -2367,8 +2390,10 @@ def test_reconcile_all_memoizes_shared_target_hash(monkeypatch):
 
     plan = reconcile(lattice, "", ref=None, reconcile_all=True)
 
-    assert set(plan) == {Path(f"down-{number}.md") for number in range(3)}
-    assert all("up#sec" in updates for updates in plan.values())
+    assert set(plan) == {(f"down-{number}", "up#sec") for number in range(3)}
+    assert {update.origin.markdown_path for update in plan.values()} == {
+        Path(f"down-{number}.md") for number in range(3)
+    }
     assert calls == 1
 
     second_plan = reconcile(lattice, "", ref=None, reconcile_all=True)
@@ -2495,7 +2520,7 @@ def test_reconcile_ref_targeting_ok_edge_plans_nothing(lattice_dir: Path):
 
 
 def test_reconcile_all_plans_every_drifting_file(tmp_path: Path):
-    # Two distinct drifting downstream nodes must each get their own path key under --all.
+    # Two distinct drifting downstream nodes must each get their own logical key under --all.
     docs = tmp_path / "docs"
     docs.mkdir()
     (docs / "up.md").write_text("---\nid: up\n---\n# Up {#sec}\nbody\n", encoding="utf-8")
@@ -2507,8 +2532,8 @@ def test_reconcile_all_plans_every_drifting_file(tmp_path: Path):
     )
     lat = load_lattice(load_config(None, tmp_path))
     plan = reconcile(lat, "", ref=None, reconcile_all=True)
-    assert {p.name for p in plan} == {"d1.md", "d2.md"}
-    assert all("up#sec" in updates for updates in plan.values())
+    assert set(plan) == {("d1", "up#sec"), ("d2", "up#sec")}
+    assert {update.origin.markdown_path.name for update in plan.values()} == {"d1.md", "d2.md"}
 
 
 def test_reconcile_all_with_ref_filters_without_raising(lattice_dir: Path):
@@ -2531,7 +2556,7 @@ def test_plan_rewrites_read_failure_carries_the_document_as_structured_data():
         raise OSError("disk vanished")
 
     with pytest.raises(UnreadableDocError) as exc:
-        plan_rewrites({path: {"a#x": "newhash"}}, raise_os_error)
+        plan_rewrites(_rewrite_plan({path: {"a#x": "newhash"}}), raise_os_error)
 
     assert exc.value.source == path
 
@@ -2692,28 +2717,97 @@ def _external_reconcile_lattice(edges):
     )
 
 
+def test_reconcile_keeps_shared_manifest_shared_ref_updates_distinct():
+    origin_a = DocumentOrigin(
+        Path("skills/a.md"),
+        ExternalDeclaration("meta/nodes.yml", 0, "./skills/a.md"),
+    )
+    origin_b = DocumentOrigin(
+        Path("skills/b.md"),
+        ExternalDeclaration("meta/nodes.yml", 1, "./skills/b.md"),
+    )
+    lattice = build_lattice(
+        [
+            ParsedDoc(Path("up.md"), NodeMeta(id="up"), "upstream\n"),
+            ParsedDoc(
+                Path("skills/a.md"),
+                NodeMeta(id="external-a", derives_from=[RawEdge(ref="up")]),
+                "first external body\n",
+                origin=origin_a,
+            ),
+            ParsedDoc(
+                Path("skills/b.md"),
+                NodeMeta(id="external-b", derives_from=[RawEdge(ref="up")]),
+                "second external body\n",
+                origin=origin_b,
+            ),
+        ]
+    )
+
+    plan = reconcile(lattice, "", ref=None, reconcile_all=True)
+
+    assert set(plan) == {("external-a", "up"), ("external-b", "up")}
+    assert plan[("external-a", "up")].origin == origin_a
+    assert plan[("external-b", "up")].origin == origin_b
+    destinations = reconcile_module.group_reconcile_updates(plan)
+    assert list(destinations) == [Path("meta/nodes.yml")]
+    assert set(destinations[Path("meta/nodes.yml")]) == {
+        ("external-a", "up"),
+        ("external-b", "up"),
+    }
+
+
+@pytest.mark.parametrize("external_first", [False, True], ids=["ambiguity-first", "external-first"])
+def test_reconcile_preserves_refusal_selection_order_across_destination_resolution(
+    external_first: bool,
+):
+    external_id = "a-external" if external_first else "z-external"
+    inline_id = "z-inline" if external_first else "a-inline"
+    lattice = build_lattice(
+        [
+            ParsedDoc(Path("stable.md"), NodeMeta(id="stable"), "stable upstream\n"),
+            ParsedDoc(Path("ambiguous.md"), NodeMeta(id="ambiguous"), "# Notes\n\n# Notes\n"),
+            ParsedDoc(
+                Path("skills/external.md"),
+                NodeMeta(id=external_id, derives_from=[RawEdge(ref="stable")]),
+                "external body\n",
+                origin=DocumentOrigin(
+                    Path("skills/external.md"),
+                    ExternalDeclaration("nodes.yml", 0, "skills/external.md"),
+                ),
+            ),
+            ParsedDoc(
+                Path("inline.md"),
+                NodeMeta(id=inline_id, derives_from=[RawEdge(ref="ambiguous#notes")]),
+                "inline body\n",
+            ),
+        ]
+    )
+
+    if not external_first:
+        with pytest.raises(ValidationError, match="ambiguous"):
+            reconcile(lattice, "", ref=None, reconcile_all=True)
+        return
+
+    plan = reconcile(lattice, "", ref=None, reconcile_all=True)
+    assert set(plan) == {(external_id, "stable")}
+
+
 @pytest.mark.parametrize("seen", [None, "old"])
 @pytest.mark.parametrize("ref", [None, "up"])
 @pytest.mark.parametrize("reconcile_all", [False, True])
-def test_planner_refuses_a_selected_external_update(seen, ref, reconcile_all):
+def test_planner_carries_a_selected_external_update(seen, ref, reconcile_all):
     lattice = _external_reconcile_lattice([RawEdge(ref="up", seen=seen)])
 
-    with pytest.raises(ValidationError) as excinfo:
-        reconcile(lattice, "external", ref=ref, reconcile_all=reconcile_all)
+    plan = reconcile(lattice, "external", ref=ref, reconcile_all=reconcile_all)
 
-    assert excinfo.value.code == "VALIDATION_ERROR"
-    message = str(excinfo.value)
-    for context in (
-        "external",
-        "up",
-        "skills/down.md",
-        "meta/nodes.yml",
-        "nodes[2]",
-        "seen",
-        "review",
-        "by hand",
-    ):
-        assert context in message
+    assert set(plan) == {("external", "up")}
+    update = plan[("external", "up")]
+    assert update.new_seen == sha256(b"upstream").hexdigest()[:32]
+    assert update.origin == DocumentOrigin(
+        Path("skills/down.md"),
+        ExternalDeclaration("meta/nodes.yml", 2, "./skills/down.md"),
+    )
 
 
 @pytest.mark.parametrize("reconcile_all", [False, True])
