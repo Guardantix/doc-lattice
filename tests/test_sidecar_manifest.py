@@ -124,6 +124,50 @@ def test_quoted_text_spelling_reuse_characters_is_ordinary_text(tmp_path: Path):
 # --- Manifest-level failures -------------------------------------------------------------------
 
 
+@pytest.mark.parametrize(
+    ("repeat", "repeat_index"),
+    [
+        ("nodes.yml", 1),
+        ("./nodes.yml", 1),
+        ("docs/../nodes.yml", 1),
+        ("alias.yml", 1),
+        ("nodes.yml", 2),
+    ],
+)
+def test_repeated_manifest_declaration_names_both_entries_before_rereading(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    repeat: str,
+    repeat_index: int,
+):
+    root = _project(tmp_path)
+    _write(root, "nodes.yml", f"nodes:\n{_VALID_RECORD}")
+    _write(root, "other.yml", "nodes:\n  - {path: skills/b.md, meta: {id: skill-b}}\n")
+    (root / "docs").mkdir()
+    (root / "alias.yml").symlink_to(root / "nodes.yml")
+    declarations = ["nodes.yml", *(["other.yml"] if repeat_index == 2 else []), repeat]
+    original_read_bytes = Path.read_bytes
+    reads = 0
+
+    def counting_read_bytes(path: Path) -> bytes:
+        nonlocal reads
+        if path == (root / "nodes.yml").resolve():
+            reads += 1
+        return original_read_bytes(path)
+
+    monkeypatch.setattr(Path, "read_bytes", counting_read_bytes)
+
+    with pytest.raises(ManifestError) as excinfo:
+        build_registration_index(declarations, root)
+
+    message = str(excinfo.value)
+    assert "sidecar_manifests[0] 'nodes.yml'" in message
+    assert f"sidecar_manifests[{repeat_index}] '{repeat}'" in message
+    assert "remove the duplicate entry from sidecar_manifests" in message
+    assert excinfo.value.code == "MANIFEST_ERROR"
+    assert reads == 1
+
+
 def test_a_missing_manifest_names_the_manifest(tmp_path: Path):
     root = _project(tmp_path)
 

@@ -112,12 +112,12 @@ class FrontmatterError(DocumentError):
 
 
 class ManifestError(ProjectError):
-    """A sidecar manifest, or one record in it, cannot be read or fails the AD-51 schema.
+    """A sidecar declaration repeats, or a manifest or record cannot be used.
 
     Deliberately not a ``DocumentError``. That base names the Markdown document a failure is
     about so a renderer can annotate it, and a manifest is never a document (AD-51). The message
-    names the manifest, and for a record failure the record position and its declared Markdown
-    spelling as well.
+    names the manifest, and for a duplicate declaration names both entries. For a record failure
+    it names the record position and its declared Markdown spelling as well.
     """
 
     def __init__(self, message: str) -> None:

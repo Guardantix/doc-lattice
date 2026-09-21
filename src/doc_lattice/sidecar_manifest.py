@@ -121,15 +121,16 @@ def build_registration_index(manifests: Sequence[str], project_root: Path) -> Re
         The typed registrations and the manifests they came from.
 
     Raises:
-        ManifestError: If a manifest cannot be resolved, read, or parsed, breaks the schema, or
-            spells an anchor, alias, or merge key, or if one of its records is malformed or names
-            an unusable target.
+        ManifestError: If a manifest cannot be resolved, is declared twice, cannot be read or
+            parsed, breaks the schema, spells an anchor, alias, or merge key, or if one of its
+            records is malformed or names an unusable target.
         RegistrationConflictError: If two records, in one manifest or in two, resolve to the
             same target.
     """
     sources: list[ManifestSource] = []
+    seen: dict[Path, int] = {}
     by_target: dict[Path, Registration] = {}
-    for declared in manifests:
+    for index, declared in enumerate(manifests):
         # The file-type check runs before anything opens the manifest, so a FIFO or other
         # special file is refused rather than read, which could block the run.
         resolved = _resolve_regular_file(
@@ -138,6 +139,16 @@ def build_registration_index(manifests: Sequence[str], project_root: Path) -> Re
             subject=f"manifest {format_path_for_display(declared)}",
             remedy="restore it, or remove it from sidecar_manifests to unregister its records",
         )
+        earlier_index = seen.get(resolved)
+        if earlier_index is not None:
+            msg = (
+                f"sidecar_manifests[{index}] {format_path_for_display(declared)} repeats "
+                f"sidecar_manifests[{earlier_index}] "
+                f"{format_path_for_display(sources[earlier_index].declared)}; "
+                "remove the duplicate entry from sidecar_manifests"
+            )
+            raise ManifestError(msg)
+        seen[resolved] = index
         source = ManifestSource(declared=declared, resolved=resolved)
         sources.append(source)
         for registration in _read_manifest(source, project_root):

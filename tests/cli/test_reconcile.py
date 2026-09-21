@@ -200,7 +200,7 @@ def test_permitted_external_involvement_reconciles(  # noqa: PLR0913
 
 
 @pytest.mark.parametrize("recover_only", [False, True], ids=["automatic", "explicit"])
-@pytest.mark.parametrize("manifest_error", ["missing", "invalid"])
+@pytest.mark.parametrize("manifest_error", ["missing", "invalid", "duplicate"])
 def test_sidecar_manifest_error_does_not_block_recovery(
     tmp_path, monkeypatch, recover_only, manifest_error
 ):
@@ -210,8 +210,15 @@ def test_sidecar_manifest_error_does_not_block_recovery(
     manifest = tmp_path / "nodes.yml"
     if manifest_error == "missing":
         manifest.unlink()
-    else:
+    elif manifest_error == "invalid":
         manifest.write_text("nodes: []\n")
+    else:
+        config = tmp_path / ".doc-lattice.yml"
+        config.write_text(
+            config.read_text().replace(
+                "sidecar_manifests: [nodes.yml]", "sidecar_manifests: [nodes.yml, ./nodes.yml]"
+            )
+        )
     destination = tmp_path / "docs/down.md"
     original = destination.read_bytes()
     interrupted = b"transaction after image\n"

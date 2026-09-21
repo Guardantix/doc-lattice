@@ -2054,6 +2054,30 @@ def test_public_cli_refuses_invalid_sidecar_config(tmp_path, monkeypatch, declar
     assert reason in result.stderr
 
 
+@pytest.mark.parametrize("repeat", ["nodes.yml", "./nodes.yml", "alias.yml"])
+def test_check_reports_repeated_manifest_as_manifest_error(tmp_path, monkeypatch, repeat):
+    application = _external_cli_setup(tmp_path, monkeypatch, None)
+    if repeat == "alias.yml":
+        (tmp_path / repeat).symlink_to(tmp_path / "nodes.yml")
+    config = tmp_path / ".doc-lattice.yml"
+    config.write_text(
+        config.read_text().replace(
+            "sidecar_manifests: [nodes.yml]", f"sidecar_manifests: [nodes.yml, {repeat}]"
+        ),
+        encoding="utf-8",
+    )
+
+    result = runner.invoke(application, ["check", "--format", "json"])
+
+    assert result.exit_code == 2
+    assert result.stdout == ""
+    assert "MANIFEST_ERROR" in result.stderr
+    assert "sidecar_manifests[0] 'nodes.yml'" in result.stderr
+    assert f"sidecar_manifests[1] '{repeat}'" in result.stderr
+    assert "remove the duplicate entry from sidecar_manifests" in result.stderr
+    assert "REGISTRATION_CONFLICT" not in result.stderr
+
+
 def _coverage_refusal_project(root: Path, coverage: str) -> dict[Path, bytes]:
     """Create a project where coverage fails before a stale edge could be reconciled."""
     docs = root / "docs"

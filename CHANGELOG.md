@@ -12,6 +12,11 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   naming both entries even when their reasons differ. Keep one exemption per path. See
   [Sidecar coverage](README.md#sidecar-coverage) and [AD-51](ARCHITECTURE.md#ad-51-a-document-another-tool-owns-is-enrolled-by-a-sidecar-manifest-and-its-metadata-never-enters-the-file).
 
+- Repeating a `sidecar_manifests` entry, including an alternate spelling or symlink to the same
+  file, now fails with `MANIFEST_ERROR` naming both configuration entries and advising removal of
+  the duplicate. Distinct manifests that register the same Markdown target still report
+  `REGISTRATION_CONFLICT`.
+
 - Internal: the Markdown load cache retains complete file facts for id-less and untracked
   documents, including their body after any recognized fence, body line offset, and sections.
   Cold parses and both cache-hit tiers now return the same facts for later enrollment, while
