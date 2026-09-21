@@ -8,11 +8,12 @@ import typer
 from cli.helpers import _contents, _stub_runtime
 from link_gate_helpers import _write
 
+from doc_lattice import sidecar_manifest
 from doc_lattice.cli.errors import EXIT_TOOL_ERROR, exit_on_project_error
 from doc_lattice.config import load_config
 from doc_lattice.error_types import ManifestError, ProjectError, RegistrationConflictError
 from doc_lattice.path_utils import format_path_for_display
-from doc_lattice.sidecar_manifest import build_registration_index
+from doc_lattice.sidecar_manifest import ManifestSource, build_registration_index
 
 _MANIFEST = "meta/sidecars.yml"
 _VALID_RECORD = "  - path: skills/a.md\n    meta: {id: skill-a}\n"
@@ -206,17 +207,45 @@ def test_a_read_failure_after_the_file_check_is_a_manifest_error(
 ):
     root = _project(tmp_path)
     _write(root, _MANIFEST, f"nodes:\n{_VALID_RECORD}")
-    original = Path.read_text
+    original = Path.read_bytes
 
-    def refuse(self: Path, *args: object, **kwargs: object) -> str:
+    def refuse(self: Path, *args: object, **kwargs: object) -> bytes:
         if self.name == "sidecars.yml":
             raise PermissionError(13, "Permission denied")
-        return original(self, *args, **kwargs)  # ty: ignore[invalid-argument-type]
+        return original(self, *args, **kwargs)
 
-    monkeypatch.setattr(Path, "read_text", refuse)
+    monkeypatch.setattr(Path, "read_bytes", refuse)
 
     with pytest.raises(ManifestError, match=r"cannot read manifest.*Permission denied"):
         build_registration_index([_MANIFEST], root)
+
+
+def test_parse_manifest_bytes_uses_captured_bytes_without_rereading(tmp_path: Path):
+    root = _project(tmp_path)
+    source = ManifestSource(_MANIFEST, root / _MANIFEST)
+    captured = b"nodes:\r\n  - path: skills/a.md\r\n    meta: {id: skill-a}\r\n"
+
+    registrations = sidecar_manifest.parse_manifest_bytes(captured, source, root)
+
+    assert registrations[0].meta.id == "skill-a"
+    assert registrations[0].target == (root / "skills/a.md").resolve()
+
+
+@pytest.mark.parametrize(
+    "records",
+    [
+        "  - path: absent.md\n    meta: {id: 42}\n",
+        "  - path: absent.md\n    meta: {id: okay}\n  - path: skills/a.md\n    meta: {id: 42}\n",
+    ],
+)
+def test_manifest_byte_parser_retains_target_before_metadata_validation_order(
+    tmp_path: Path, records: str
+):
+    root = _project(tmp_path)
+    source = ManifestSource(_MANIFEST, root / _MANIFEST)
+
+    with pytest.raises(ManifestError, match=r"absent.md.*does not exist"):
+        sidecar_manifest.parse_manifest_bytes(("nodes:\n" + records).encode(), source, root)
 
 
 @pytest.mark.parametrize(

@@ -943,7 +943,7 @@ assertion in `tests/test_reconcile.py`; this decision governs only which bytes r
 ### AD-31: The reconcile rewriter supports a declared frontmatter subset
 
 **Date:** 2026-08-15
-**Status:** Accepted; amended by AD-33, AD-35, and AD-44
+**Status:** Accepted; amended by AD-33, AD-35, AD-44, and GTX-784
 **Context:** `reconcile` is the only command that writes to a user's documents, and AD-26 makes it
 edit exact source bytes rather than dump a loaded document back out. That buys byte-level
 preservation and costs a bounded input language: every spelling the rewriter can locate an edit in
@@ -1119,6 +1119,33 @@ as unsupported, or this record silently stops being the declared subset. If dete
 of out-of-subset input is ever wanted, that is separate work rather than part of this decision.
 RECONCILE.md keeps the user-facing operational consequences and links here for the normative
 matrix.
+
+**Sidecar manifest amendment (GTX-784).** The pure sidecar rewriter uses the same source-marked
+edit primitives but has a smaller supported input surface than inline frontmatter. AD-51's schema
+is the semantic gate: a manifest has one `nodes` key, a non-empty sequence of records, exactly
+`path` and `meta` in each record, and `NodeMeta` metadata. Anchors, aliases, and merge keys are
+refused anywhere before planning. The supported writable spellings are block or flow root,
+record, metadata, and edge mappings; block or flow `nodes` and `derives_from` sequences; plain or
+quoted `seen` scalars, absent or null `seen`; comments; and a `%YAML 1.2` directive with its
+document-start marker. The rewriter may refuse a more exotic spelling the loader accepts if its
+source position cannot be matched and verified. That refusal does not narrow loading.
+
+A selected record is found by `meta.id`, never by sequence position. The caller supplies both
+its load-time identity (declared `path`, resolved Markdown target, resolved manifest) and fresh
+observations of those same paths. Missing evidence, a missing or duplicated selected id, changed
+declared spelling, or a changed resolved target or manifest refuses the rewrite. For repeated
+`derives_from` refs in one record, graph assembly keeps the last occurrence, so the rewriter
+updates only that effective occurrence. A last occurrence already holding the desired `seen` is
+a no-op even if an earlier, shadowed occurrence differs. This differs deliberately from the
+inline planner, which visits every matching occurrence.
+
+The manifest edit is byte local. Unselected records, record order, comments, directives, and
+untouched source spans retain their exact bytes; the complete after-image is checked against
+source-span splicing as well as a full semantic reparse. Uniform LF, CRLF, and lone CR are each
+preserved. For mixed line endings, a valid no-op returns the original bytes, while any actual
+rewrite refuses. AD-31 Layer 4's document-wide LF normalization remains an inline-document
+allowance only. This pure capability changes no command behavior; external reconcile still
+refuses a needed update until its separate wiring issue connects the rewriter to the transaction.
 
 ### AD-32: The managed GitHub CI product retires to a documented recipe
 

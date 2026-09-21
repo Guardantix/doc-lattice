@@ -8,7 +8,7 @@ from pathlib import Path
 
 import pytest
 
-from doc_lattice import loader, orchestrate
+from doc_lattice import loader, model, orchestrate
 from doc_lattice.cache import CacheHit, CacheMiss, LookupPolicy, cache_path, lookup, store
 from doc_lattice.cache.schema import Entry, reconstruct_facts
 from doc_lattice.check import check_lattice, statuses_json, summarize_statuses
@@ -952,6 +952,15 @@ def test_external_warm_hits_rejoin_manifest_metadata_and_origins(tmp_path, monke
     project = _sidecar_project(tmp_path, cache=True, trust_stat=trust_stat)
     initial = load_lattice(project)
     initial_hash = cached_target_hash(initial, TargetId("external"), {})
+    expected_identity = model.ExternalIdentity(
+        declared_path="skill.md",
+        resolved_target=(tmp_path / "skill.md").resolve(),
+        resolved_manifest=(tmp_path / "nodes.yml").resolve(),
+    )
+    initial_origin = initial.nodes_by_id["external"].origin
+    assert initial_origin is not None
+    assert initial_origin.identity == expected_identity
+    assert b"resolved_manifest" not in cache_path("testslot", os.environ).read_bytes()
 
     def forbidden(*_args, **_kwargs):
         pytest.fail("warm facts must be reused without parsing or section derivation")
@@ -959,7 +968,11 @@ def test_external_warm_hits_rejoin_manifest_metadata_and_origins(tmp_path, monke
     monkeypatch.setattr(orchestrate, "parse_document", forbidden)
     monkeypatch.setattr(orchestrate, "derive_file_sections", forbidden)
     monkeypatch.setattr(loader, "derive_file_sections", forbidden)
-    assert load_lattice(project) == initial
+    warm = load_lattice(project)
+    assert warm == initial
+    warm_origin = warm.nodes_by_id["external"].origin
+    assert warm_origin is not None
+    assert warm_origin.identity == expected_identity
     record["meta"]["title"] = "After"
     _manifest(tmp_path, [record])
     refreshed = load_lattice(project)

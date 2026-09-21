@@ -102,6 +102,14 @@ class RegistrationIndex:
         return tuple(self.by_target.values())
 
 
+@dataclass(frozen=True, slots=True)
+class ManifestRecordSnapshot:
+    """One record parsed from bytes without resolving its Markdown target."""
+
+    declared_path: str
+    meta: NodeMeta
+
+
 def build_registration_index(manifests: Sequence[str], project_root: Path) -> RegistrationIndex:
     """Read and validate every declared manifest into one registration index.
 
@@ -146,11 +154,61 @@ def build_registration_index(manifests: Sequence[str], project_root: Path) -> Re
 
 
 def _read_manifest(source: ManifestSource, project_root: Path) -> list[Registration]:
-    """Load one manifest and validate each record in it."""
+    """Capture one manifest's bytes at the I/O boundary before validating them."""
     shown = format_path_for_display(source.declared)
     try:
-        text = source.resolved.read_text(encoding="utf-8")
-    except (OSError, UnicodeDecodeError) as exc:
+        source_bytes = source.resolved.read_bytes()
+    except OSError as exc:
+        msg = f"cannot read manifest {shown}: {exc}"
+        raise ManifestError(msg) from exc
+    return parse_manifest_bytes(source_bytes, source, project_root)
+
+
+def parse_manifest_bytes(
+    source_bytes: bytes, source: ManifestSource, project_root: Path
+) -> list[Registration]:
+    """Validate captured manifest bytes, resolving each record before validating its metadata.
+
+    Args:
+        source_bytes: Exact bytes captured from the manifest.
+        source: The manifest's declared and resolved paths.
+        project_root: The root used to resolve each record's Markdown target.
+
+    Returns:
+        Validated registrations in manifest order.
+
+    Raises:
+        ManifestError: If decoding, YAML, schema, or a declared target is invalid.
+    """
+    shown = format_path_for_display(source.declared)
+    nodes = _manifest_records(source_bytes, shown)
+    return [
+        _validate_record(record, source, position, project_root)
+        for position, record in enumerate(nodes)
+    ]
+
+
+def parse_manifest_snapshot(source_bytes: bytes, source: str) -> tuple[ManifestRecordSnapshot, ...]:
+    """Parse a captured manifest without I/O for rewrite-time semantic comparison.
+
+    Target resolution deliberately remains with the caller's fresh observations. Unlike the
+    loading path, this parser cannot decide whether a target exists, so it is not used to load a
+    lattice. Both paths share the schema helpers below.
+    """
+    records: list[ManifestRecordSnapshot] = []
+    for position, record in enumerate(
+        _manifest_records(source_bytes, format_path_for_display(source))
+    ):
+        declared_path, where = _record_path(record, source, position)
+        records.append(ManifestRecordSnapshot(declared_path, _record_meta(record, where)))
+    return tuple(records)
+
+
+def _manifest_records(source_bytes: bytes, shown: str) -> list[Any]:
+    """Decode and validate a manifest's top-level YAML shape from captured bytes."""
+    try:
+        text = source_bytes.decode("utf-8")
+    except UnicodeDecodeError as exc:
         msg = f"cannot read manifest {shown}: {exc}"
         raise ManifestError(msg) from exc
     data = _load(text, shown)
@@ -174,10 +232,7 @@ def _read_manifest(source: ManifestSource, project_root: Path) -> list[Registrat
             "to unregister every record, remove the manifest from sidecar_manifests instead"
         )
         raise ManifestError(msg)
-    return [
-        _validate_record(record, source, position, project_root)
-        for position, record in enumerate(nodes)
-    ]
+    return nodes
 
 
 def _load(text: str, shown: str) -> Any:
@@ -216,13 +271,29 @@ def _validate_record(
     record: object, source: ManifestSource, position: int, project_root: Path
 ) -> Registration:
     """Validate one record's keys, path spelling, target, and metadata, in that order."""
+    declared_path, where = _record_path(record, source.declared, position)
+    target = _resolve_regular_file(
+        declared_path, project_root, subject=where, remedy="restore it, or remove the record"
+    )
+    meta = _record_meta(record, where)
+    return Registration(
+        declared_path=declared_path,
+        target=target,
+        manifest=source,
+        position=position,
+        meta=meta,
+    )
+
+
+def _record_path(record: object, manifest: str, position: int) -> tuple[str, str]:
+    """Check one record's shape and declared path before any target resolution."""
     if not isinstance(record, dict):
-        where = format_record_location(source.declared, position, None)
+        where = format_record_location(manifest, position, None)
         msg = f"{where} is not a mapping; a record is a mapping of exactly 'path' and 'meta'"
         raise ManifestError(msg)
     raw_path = record.get("path")
     declared_path = raw_path if isinstance(raw_path, str) else None
-    where = format_record_location(source.declared, position, declared_path)
+    where = format_record_location(manifest, position, declared_path)
     keys = set(record)
     if keys != _RECORD_KEYS:
         missing = sorted(repr(key) for key in _RECORD_KEYS - keys)
@@ -241,9 +312,12 @@ def _validate_record(
         msg = f"{where} has a 'path' that is not a string; write a relative '.md' path"
         raise ManifestError(msg)
     _check_path_spelling(declared_path, where)
-    target = _resolve_regular_file(
-        declared_path, project_root, subject=where, remedy="restore it, or remove the record"
-    )
+    return declared_path, where
+
+
+def _record_meta(record: object, where: str) -> NodeMeta:
+    """Validate metadata after the loading path has resolved the record's target."""
+    assert isinstance(record, dict)  # noqa: S101 - _record_path established the shape
     try:
         meta = NodeMeta.model_validate(record.get("meta"))
     except ValidationError as exc:
@@ -254,13 +328,7 @@ def _validate_record(
             root_label=_META_ROOT_LABEL,
         )
         raise ManifestError(msg) from exc
-    return Registration(
-        declared_path=declared_path,
-        target=target,
-        manifest=source,
-        position=position,
-        meta=meta,
-    )
+    return meta
 
 
 def _check_path_spelling(declared_path: str, where: str) -> None:
