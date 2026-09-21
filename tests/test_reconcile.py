@@ -2561,6 +2561,45 @@ def test_plan_rewrites_read_failure_carries_the_document_as_structured_data():
     assert exc.value.source == path
 
 
+def test_plan_rewrites_read_failure_preserves_origin_identity_for_resolved_destination():
+    destination = Path("actual.md")
+    identity = Path("alias.md")
+    plan = {
+        destination: {
+            ("downstream", "upstream"): reconcile_module.ReconcileUpdate(
+                "newhash", DocumentOrigin(identity)
+            )
+        }
+    }
+
+    def raise_os_error(_path: Path) -> bytes:
+        raise OSError("disk vanished")
+
+    with pytest.raises(UnreadableDocError) as exc:
+        plan_rewrites(plan, raise_os_error)
+
+    assert exc.value.source == identity
+    assert str(exc.value) == "cannot read 'alias.md' to reconcile: disk vanished"
+
+
+def test_plan_rewrites_frontmatter_failure_preserves_origin_identity_for_resolved_destination():
+    destination = Path("actual.md")
+    identity = Path("alias.md")
+    plan = {
+        destination: {
+            ("downstream", "upstream"): reconcile_module.ReconcileUpdate(
+                "newhash", DocumentOrigin(identity)
+            )
+        }
+    }
+
+    with pytest.raises(UnreadableDocError) as exc:
+        plan_rewrites(plan, lambda _path: b"---\nid: [unclosed\n---\nbody\n")
+
+    assert exc.value.source == identity
+    assert str(exc.value).startswith("cannot parse frontmatter of 'alias.md' to reconcile:")
+
+
 @pytest.mark.parametrize(
     "text",
     [

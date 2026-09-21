@@ -1753,20 +1753,23 @@ def plan_rewrites(
             if the fresh frontmatter cannot be parsed or is malformed.
     """
     rewrites: list[Rewrite] = []
-    for path, logical_updates in plan.items():
+    for destination, logical_updates in plan.items():
+        source = next(
+            (update.origin.markdown_path for update in logical_updates.values()), destination
+        )
         updates = {
             target_ref: update.new_seen
             for (_node_id, target_ref), update in logical_updates.items()
         }
         try:
-            before = read_bytes(path)
+            before = read_bytes(destination)
             decoded = before.decode("utf-8")
         except (OSError, UnicodeDecodeError) as exc:
-            msg = f"cannot read {format_path_for_display(path)} to reconcile: {exc}"
-            raise UnreadableDocError(msg, source=path) from exc
-        new_text, applied = apply_reconcile(normalize_newlines(decoded), updates, path)
+            msg = f"cannot read {format_path_for_display(source)} to reconcile: {exc}"
+            raise UnreadableDocError(msg, source=source) from exc
+        new_text, applied = apply_reconcile(normalize_newlines(decoded), updates, source)
         if applied:
             ending = _line_ending(decoded)
             after = new_text if ending == "\n" else new_text.replace("\n", ending)
-            rewrites.append(Rewrite(path, before, after.encode("utf-8"), frozenset(applied)))
+            rewrites.append(Rewrite(destination, before, after.encode("utf-8"), frozenset(applied)))
     return rewrites
