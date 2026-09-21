@@ -12,7 +12,15 @@ from .discovery import decode_doc, discover_doc_candidates, read_doc_bytes
 from .error_types import DocumentError, RegistrationConflictError
 from .frontmatter_parser import parse_document
 from .loader import build_lattice, derive_file_sections
-from .model import DocumentOrigin, ExternalDeclaration, FileFacts, Lattice, ParsedDoc, ParsedMeta
+from .model import (
+    DocumentOrigin,
+    ExternalDeclaration,
+    ExternalIdentity,
+    FileFacts,
+    Lattice,
+    ParsedDoc,
+    ParsedMeta,
+)
 from .path_utils import format_path_for_display
 from .sidecar_coverage import enforce_coverage
 from .sidecar_manifest import RegistrationIndex, build_registration_index
@@ -311,6 +319,11 @@ def _assemble(
                     registration.manifest.declared,
                     registration.position,
                     registration.declared_path,
+                ),
+                ExternalIdentity(
+                    registration.declared_path,
+                    registration.target,
+                    registration.manifest.resolved,
                 ),
             )
         else:

@@ -268,11 +268,21 @@ class ExternalDeclaration:
 
 
 @dataclass(frozen=True, slots=True)
+class ExternalIdentity:
+    """Load-time paths against which a fresh manifest observation can be checked."""
+
+    declared_path: str
+    resolved_target: Path
+    resolved_manifest: Path
+
+
+@dataclass(frozen=True, slots=True)
 class DocumentOrigin:
     """Markdown identity and its optional external metadata declaration."""
 
     markdown_path: Path
     declaration: ExternalDeclaration | None = None
+    identity: ExternalIdentity | None = None
 
 
 @dataclass(frozen=True, slots=True)
