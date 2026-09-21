@@ -193,10 +193,21 @@ class SidecarCoverage(BaseModel):
     @field_validator("exempt")
     @classmethod
     def _validate_exempt(cls, value: list[CoverageExemption]) -> list[CoverageExemption]:
-        """Refuse a declared exemption list that names nothing."""
+        """Refuse an empty list or two exemptions for the same exact path."""
         if not value:
             msg = f"{SIDECAR_COVERAGE_EXEMPT_KEY} is declared but names no exemption"
             raise ValueError(msg)
+        first_indices: dict[str, int] = {}
+        for index, entry in enumerate(value):
+            first_index = first_indices.get(entry.path)
+            if first_index is not None:
+                msg = (
+                    f"{SIDECAR_COVERAGE_EXEMPT_KEY}.{first_index} and "
+                    f"{SIDECAR_COVERAGE_EXEMPT_KEY}.{index} both name path "
+                    f"{format_path_for_display(entry.path)}; keep one exemption for this path"
+                )
+                raise ValueError(msg)
+            first_indices[entry.path] = index
         return value
 
     @model_validator(mode="after")

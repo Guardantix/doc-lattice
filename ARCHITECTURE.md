@@ -3065,7 +3065,10 @@ that list would hide the omissions coverage exists to report.
   spellings, with no glob expansion, normalization, or resolved-target substitution. An alias
   exemption cannot transfer to another alias or a newly added earlier-sorting spelling. An
   exemption that matches no path the walk kept is refused as stale, the AD-49 rule for an entry
-  that matches nothing.
+  that matches nothing. Two exemption entries naming the same exact path are refused at config
+  load, naming both positions, because the second declaration grants nothing and would otherwise
+  be silent. This extends AD-51's exemption contract using AD-49's silent-grant reasoning as a
+  precedent; AD-49's own declaration rule remains scoped to `legacy_marker_sources`.
 - The coverage boundary calls `safe_resolve()` and requires a regular file before granting
   coverage or an exemption. An escaping or dangling symlink and a special file are refused; an
   exemption cannot waive these checks.
