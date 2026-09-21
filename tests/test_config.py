@@ -904,6 +904,92 @@ def test_config_refuses_invalid_sidecar_coverage_exclusions(
 
 
 @pytest.mark.parametrize(
+    ("selector", "replacement"),
+    [
+        ("**/node_modules/**", "**/node_modules"),
+        ("docs/**", "docs"),
+        ("docs/**/**", "docs"),
+        ("**/*.md/**", "**/*.md"),
+    ],
+)
+def test_config_refuses_terminal_recursive_coverage_exclusion_with_repair(
+    tmp_path: Path, selector: str, replacement: str
+):
+    config = tmp_path / ".doc-lattice.yml"
+    config.write_text(
+        "lattice_format: 2\nsidecar_coverage:\n  select: ['*.md']\n"
+        f"  exclude: [{{select: '{selector}', reason: dependencies}}]\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ConfigError) as info:
+        load_config(None, tmp_path)
+
+    message = str(info.value)
+    assert info.value.code == "CONFIG_ERROR"
+    assert "sidecar_coverage.exclude.0.select" in message
+    assert f"sidecar_coverage.exclude entry '{selector}'" in message
+    assert f"'{replacement}'" in message
+
+    config.write_text(
+        "lattice_format: 2\nsidecar_coverage:\n  select: ['*.md']\n"
+        f"  exclude: [{{select: '{replacement}', reason: dependencies}}]\n",
+        encoding="utf-8",
+    )
+    assert load_config(None, tmp_path).config.sidecar_coverage is not None
+
+
+@pytest.mark.parametrize("selector", ["**", "**/**"])
+def test_config_refuses_all_recursive_coverage_exclusion_without_replacement(
+    tmp_path: Path, selector: str
+):
+    (tmp_path / ".doc-lattice.yml").write_text(
+        "lattice_format: 2\nsidecar_coverage:\n  select: ['*.md']\n"
+        f"  exclude: [{{select: '{selector}', reason: dependencies}}]\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ConfigError) as info:
+        load_config(None, tmp_path)
+
+    message = str(info.value)
+    assert info.value.code == "CONFIG_ERROR"
+    assert "sidecar_coverage.exclude.0.select" in message
+    assert f"sidecar_coverage.exclude entry '{selector}'" in message
+    assert "names no specific subtree to prune" in message
+    assert "remove this exclusion or name specific subtrees" in message
+    assert "instead use '*'" not in message
+
+
+@pytest.mark.parametrize("selector", ["docs/**/*.tmp", "**/*.md/*", "**/node_modules"])
+def test_config_accepts_nonterminal_recursive_coverage_exclusion(tmp_path: Path, selector: str):
+    (tmp_path / ".doc-lattice.yml").write_text(
+        "lattice_format: 2\nsidecar_coverage:\n  select: ['*.md']\n"
+        f"  exclude: [{{select: '{selector}', reason: dependencies}}]\n",
+        encoding="utf-8",
+    )
+
+    coverage = load_config(None, tmp_path).config.sidecar_coverage
+    assert coverage is not None
+    assert coverage.exclude == [CoverageExclusion(select=selector, reason="dependencies")]
+
+
+def test_config_allows_terminal_recursion_in_file_selectors(tmp_path: Path):
+    (tmp_path / ".doc-lattice.yml").write_text(
+        "lattice_format: 2\n"
+        "link_sources: ['docs/**']\n"
+        "legacy_marker_sources: ['docs/**']\n"
+        "sidecar_coverage: {select: ['docs/**']}\n",
+        encoding="utf-8",
+    )
+
+    config = load_config(None, tmp_path).config
+    assert config.link_sources == ["docs/**"]
+    assert config.legacy_marker_sources == ["docs/**"]
+    assert config.sidecar_coverage == SidecarCoverage(select=["docs/**"])
+
+
+@pytest.mark.parametrize(
     ("exempted", "excluded"),
     [
         pytest.param("skills/a.md", "skills/a.md", id="the-exempt-path-itself"),

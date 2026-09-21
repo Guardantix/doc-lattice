@@ -977,11 +977,14 @@ a clean clone and from any CI leg that has not installed one.
 An exclusion names the directory itself, and selectors are anchored at the project root as they
 are everywhere in this grammar: a bare `node_modules` prunes only a top-level one, while
 `**/node_modules` prunes it at any depth and nothing beneath a pruned directory is read. A
-contents-shaped selector is the trap, because it matches only what is strictly inside:
-`**/node_modules/**` prunes a symlinked directory nested under a real `node_modules`, but cannot
-prune `node_modules` itself where that directory is the symlink. It therefore passes in one
-layout and refuses in the other while looking correct in both, so name the directory. Matching is
-by code point, again as the grammar is throughout, so `**/Node_Modules` does not prune
+`sidecar_coverage.exclude` selector ending in `**`, such as `**/node_modules/**`, is refused at
+config load. With a concrete prefix, the suffix matches only its contents and cannot prune the
+named directory itself when that directory is a symlink. The diagnostic suggests naming the
+matching entry, such as `**/node_modules`. For an all-recursive selector, it says to remove the
+exclusion or name specific subtrees. Check a suggestion before using it: a selector ending in a
+file glob can prune more files without the suffix. This refusal prevents the common
+contents-shaped mistake; other contents-only selectors, such as `**/*.md/*`, remain valid.
+Matching is by code point, again as the grammar is throughout, so `**/Node_Modules` does not prune
 `**/node_modules`. Exclusion is per spelling and not per resolved target, exactly as exemption is:
 excluding `a.md` leaves its alias `b.md` selected and still obligated.
 

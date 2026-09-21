@@ -3090,6 +3090,17 @@ that list would hide the omissions coverage exists to report.
   deliberate and is a weakening: a scan or inspection failure inside a pruned subtree no longer
   refuses, so an unreadable dependency tree stops failing the gate. That is the same class of
   unactionable refusal, and pruning answers both with one mechanism rather than two.
+- An `exclude` selector whose final segment is `**` is refused at config load (GTX-795). The
+  contents-shaped spelling with a concrete prefix cannot prune that entry before traversal, so it
+  can still reach the symlink or scan refusal the exclusion was meant to avoid. The diagnostic
+  removes the entire trailing run of `**` segments when suggesting a concrete prefix. An
+  all-recursive selector has no such suggestion. Removing that suffix can broaden a file-glob
+  exclusion, so the author must decide whether the suggested entry-shaped selector is intended.
+  This is a lexical policy on `sidecar_coverage.exclude` alone: file-selecting keys and direct
+  users of the shared matcher retain trailing recursion. A wider rule based on whether a pattern
+  can match a directory entry was rejected because matching is lexical and does not establish
+  entry type. Making pruning a selector imply pruning every directory it descends into was also
+  rejected: `docs/**/*.tmp` must not prune all of `docs`.
 - An exclusion that prunes nothing is accepted, departing from AD-49's rule that a declaration
   matching nothing is refused. AD-49 targets a declaration that grants something while adding
   nothing, whose failure mode is silent; an unmatched exclusion fails loud instead, because the

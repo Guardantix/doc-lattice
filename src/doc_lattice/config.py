@@ -141,8 +141,30 @@ class CoverageExclusion(BaseModel):
     @field_validator("select")
     @classmethod
     def _validate_selector(cls, value: str) -> str:
-        """Refuse a selector the shared grammar cannot read, as the sibling keys do."""
+        """Refuse malformed and contents-shaped coverage exclusions."""
         _validate_selectors(SIDECAR_COVERAGE_EXCLUDE_KEY, [value])
+        if value == "**" or value.endswith("/**"):
+            segments = value.split("/")
+            while segments and segments[-1] == "**":
+                segments.pop()
+            if segments:
+                replacement = format_path_for_display("/".join(segments))
+                remedy = (
+                    "it matches only contents beneath its prefix; "
+                    f"to prune the matching entry with {SIDECAR_COVERAGE_EXCLUDE_KEY}, "
+                    f"consider {replacement} instead and review whether the broader "
+                    "exclusion is intended"
+                )
+            else:
+                remedy = (
+                    "it names no specific subtree to prune; "
+                    "remove this exclusion or name specific subtrees instead"
+                )
+            msg = (
+                f"{SIDECAR_COVERAGE_EXCLUDE_KEY} entry {format_path_for_display(value)} "
+                f"ends in recursive '**'; {remedy}"
+            )
+            raise ValueError(msg)
         return value
 
 
