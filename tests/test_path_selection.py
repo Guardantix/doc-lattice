@@ -75,9 +75,9 @@ def test_selection_retains_aliases_and_sorted_unique_selectors(tmp_path):
 @pytest.mark.parametrize("selectors", [["*.md", "missing.md"], ["missing.md", "*.md"]])
 def test_a_matching_selector_cannot_hide_an_empty_one(tmp_path, selectors):
     (tmp_path / "covered.md").write_text("# Covered\n")
-    with pytest.raises(ValueError, match="SelectionRefusal") as info:
-        select_paths(tmp_path, selectors, policy=_COVERAGE)
-    refusal = _refusal(info.value)
+    result = select_paths(tmp_path, selectors, policy=_COVERAGE)
+    assert result.paths == (SelectedPath("covered.md", ("*.md",)),)
+    (refusal,) = result.refusals
     assert (refusal.kind, refusal.spelling) == ("no-match", "missing.md")
 
 
@@ -217,9 +217,9 @@ def test_exclusion_precedes_scan_refusal(tmp_path, monkeypatch):
 
 def test_pruning_every_match_refuses_the_selector(tmp_path):
     (tmp_path / "a.md").write_text("# A\n")
-    with pytest.raises(ValueError, match="SelectionRefusal") as info:
-        select_paths(tmp_path, ["*.md"], policy=_COVERAGE, exclude=_exclude("*.md"))
-    refusal = _refusal(info.value)
+    result = select_paths(tmp_path, ["*.md"], policy=_COVERAGE, exclude=_exclude("*.md"))
+    assert result.paths == ()
+    (refusal,) = result.refusals
     assert (refusal.kind, refusal.pruned) == ("no-match", True)
 
 

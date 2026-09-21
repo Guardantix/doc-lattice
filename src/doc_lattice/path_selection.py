@@ -22,7 +22,7 @@ from .link_selectors import (
 
 @dataclass(frozen=True, slots=True)
 class SelectionPolicy:
-    """Choose whether traversable directory symlinks become refusal records."""
+    """Choose strict coverage refusal collection or links selection behavior."""
 
     refuse_symlink_directories: bool = False
 
@@ -89,7 +89,7 @@ def refusal_from_error(error: ValueError) -> SelectionRefusal:
 
 @dataclass(frozen=True, slots=True)
 class SelectionResult:
-    """Selected paths and collectable traversal or symlink-only no-match refusals."""
+    """Selected paths and collectable traversal or unmatched-selector refusals."""
 
     paths: tuple[SelectedPath, ...]
     refusals: tuple[SelectionRefusal, ...]
@@ -142,17 +142,17 @@ def select_paths(
     Args:
         project_root: Root from which every selector is expanded.
         selectors: Selectors in the shared grammar, validated here even for direct callers.
-        policy: Whether traversable directory symlinks are refused.
+        policy: Whether to collect traversable directory symlinks and unmatched selectors.
         exclude: Selectors that prune the walk. An excluded directory is never entered, so
             nothing beneath it is selected, inspected, or scanned; an excluded file is never
             selected.
 
     Returns:
-        Matched spellings and traversal refusals in project-relative order.
+        Matched spellings and collected refusals in project-relative order.
 
     Raises:
-        ValueError: Carrying a ``SelectionRefusal`` when a selector is invalid, matches nothing,
-            or the filesystem cannot be inspected.
+        ValueError: Carrying a ``SelectionRefusal`` when a selector is invalid, an uncollected
+            selector matches nothing, or the filesystem cannot be inspected.
     """
     try:
         root = project_root.resolve()
@@ -176,7 +176,7 @@ def select_paths(
         found = _walk(root, segments, selection)
         if not found:
             unmatched = SelectionRefusal("no-match", selector, detail=str(root), pruned=pruned)
-            if not refusals:
+            if not policy.refuse_symlink_directories:
                 raise ValueError(unmatched)
             refusals.append(unmatched)
         for path in found:

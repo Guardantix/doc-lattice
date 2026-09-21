@@ -1008,6 +1008,8 @@ project-relative order alongside uncovered and invalid selected paths. Each refu
 selector that reached it and the `sidecar_coverage.exclude` remedy.
 If a selector reaches only refused directories, the same error also says that it matches no file;
 pruning that directory alone cannot make an empty selector valid.
+An unmatched selector does not stop coverage from checking later selectors, so the same error can
+include their traversal refusals regardless of the selectors' order.
 
 Coverage runs after validated lattice assembly on every load, including warm-cache loads, and
 before cache persistence. Exemptions cannot waive invalid registrations or ownership conflicts.

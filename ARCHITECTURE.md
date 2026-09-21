@@ -2492,7 +2492,9 @@ directory-symlink refusals alongside selected paths and sorts them by project-re
 deduplicating repeated visits from adjacent `**` segments without sorting each directory listing
 on the `links` path (GTX-794, including GTX-787). A selector that reaches only refused
 directories also reports that it matches no file, so pruning alone does not defer that failure
-to the next run.
+to the next run. Coverage collects unmatched selectors through the full walk, allowing later
+selectors' traversal refusals to appear regardless of declaration order; `links` still fails at
+the first unmatched selector.
 
 **Containment after selection, so an escaping source is a finding.** `docs_roots` resolution
 rejects an escaping entry at load and discovery skips one with a warning; both are wrong here,

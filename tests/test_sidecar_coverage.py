@@ -322,16 +322,20 @@ def test_symlink_only_selector_reports_empty_match_in_the_same_run(tmp_path):
     assert "'linked/**/*.md' matches no file" in message
 
 
-def test_later_empty_selector_does_not_hide_prior_traversal_refusal(tmp_path):
+def test_empty_selector_order_does_not_change_traversal_diagnostics(tmp_path):
     real = tmp_path / "real"
     real.mkdir()
     (real / "SKILL.md").write_text("# Covered\n")
     (tmp_path / "linked").symlink_to(real, target_is_directory=True)
 
-    with pytest.raises(CoverageError) as info:
-        enforce_coverage(tmp_path, _policy(["linked/**/*.md", "missing.md"]), set())
+    messages = []
+    for selectors in (["linked/**/*.md", "missing.md"], ["missing.md", "linked/**/*.md"]):
+        with pytest.raises(CoverageError) as info:
+            enforce_coverage(tmp_path, _policy(selectors), set())
+        messages.append(str(info.value))
 
-    message = str(info.value)
+    assert messages[0] == messages[1]
+    message = messages[0]
     assert "'linked': selected by 'linked/**/*.md'" in message
     assert "'linked/**/*.md' matches no file" in message
     assert "'missing.md' matches no file" in message
