@@ -8,6 +8,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ### Changed
 
+- `sidecar_coverage.exempt` now refuses duplicate exact paths at config load with `CONFIG_ERROR`,
+  naming both entries even when their reasons differ. Keep one exemption per path. See
+  [Sidecar coverage](README.md#sidecar-coverage) and [AD-51](ARCHITECTURE.md#ad-51-a-document-another-tool-owns-is-enrolled-by-a-sidecar-manifest-and-its-metadata-never-enters-the-file).
+
 - Internal: the Markdown load cache retains complete file facts for id-less and untracked
   documents, including their body after any recognized fence, body line offset, and sections.
   Cold parses and both cache-hit tiers now return the same facts for later enrollment, while

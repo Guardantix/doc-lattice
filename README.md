@@ -973,6 +973,9 @@ an exemption a declared exclusion prunes is refused at config load, naming both 
 surfacing later as a stale exemption. An exclusion that prunes nothing is accepted, because it can
 only fail to prevent a refusal and never conceal one, and because a dependency tree is absent from
 a clean clone and from any CI leg that has not installed one.
+Two `exempt` entries naming the same exact path are also refused at config load with
+`CONFIG_ERROR`, even when their reasons differ. The diagnostic names the path and both entry
+positions; keep one exemption for that path.
 
 An exclusion names the directory itself, and selectors are anchored at the project root as they
 are everywhere in this grammar: a bare `node_modules` prunes only a top-level one, while

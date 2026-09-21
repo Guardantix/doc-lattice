@@ -933,6 +933,62 @@ def test_config_refuses_an_exemption_an_exclusion_prunes(
     assert "remove one of the two declarations" in message
 
 
+@pytest.mark.parametrize(
+    ("last_reason", "path_yaml", "path"),
+    [
+        pytest.param("first", "'skills/a.md'", "skills/a.md", id="identical-reasons"),
+        pytest.param("second", "'skills/a.md'", "skills/a.md", id="different-reasons"),
+        pytest.param("second", '"skills/a\\u001b.md"', "skills/a\x1b.md", id="control-character"),
+    ],
+)
+def test_config_refuses_duplicate_sidecar_exemption_paths(
+    tmp_path: Path, last_reason: str, path_yaml: str, path: str
+):
+    (tmp_path / ".doc-lattice.yml").write_text(
+        "lattice_format: 2\n"
+        "sidecar_coverage:\n"
+        "  select: ['skills/**']\n"
+        "  exempt:\n"
+        f"    - {{path: {path_yaml}, reason: first}}\n"
+        "    - {path: 'skills/other.md', reason: between}\n"
+        f"    - {{path: {path_yaml}, reason: {last_reason}}}\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ConfigError) as info:
+        load_config(None, tmp_path)
+
+    message = str(info.value)
+    assert info.value.code == "CONFIG_ERROR"
+    assert "sidecar_coverage.exempt.0" in message
+    assert "sidecar_coverage.exempt.2" in message
+    assert format_path_for_display(path) in message
+    assert "keep one exemption" in message
+    assert "\x1b" not in message
+
+
+def test_config_preserves_distinct_sidecar_exemption_spellings_and_reasons(tmp_path: Path):
+    (tmp_path / ".doc-lattice.yml").write_text(
+        "lattice_format: 2\n"
+        "sidecar_coverage:\n"
+        "  select: ['*.md']\n"
+        "  exempt:\n"
+        "    - {path: a.md, reason: first}\n"
+        "    - {path: ./a.md, reason: alias}\n"
+        "    - {path: b.md, reason: third}\n",
+        encoding="utf-8",
+    )
+
+    coverage = load_config(None, tmp_path).config.sidecar_coverage
+
+    assert coverage is not None
+    assert coverage.exempt == [
+        CoverageExemption(path="a.md", reason="first"),
+        CoverageExemption(path="./a.md", reason="alias"),
+        CoverageExemption(path="b.md", reason="third"),
+    ]
+
+
 def test_config_keeps_an_exemption_no_exclusion_prunes(tmp_path: Path):
     (tmp_path / ".doc-lattice.yml").write_text(
         "lattice_format: 2\n"
