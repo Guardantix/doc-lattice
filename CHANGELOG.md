@@ -40,8 +40,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   excluded directory is pruned before the walk classifies it, so nothing beneath it is selected,
   inspected, or refused, which is what makes a subtree carrying an interior symlinked directory
   or an unreadable directory declarable rather than fatal. An exclusion that prunes nothing is
-  accepted; an exemption an exclusion prunes is refused at config load. Explicit journal recovery
-  stays available; automatic recovery precedes the gate.
+  accepted; an exclusion ending in `**` and an exemption an exclusion prunes are refused at config
+  load. Explicit journal recovery stays available; automatic recovery precedes the gate.
   [README.md](README.md#sidecar-coverage) owns configuration, exclusion and exemption semantics,
   and diagnostics. The shared selector walk preserves the existing `links` behavior and prunes
   nothing for it.
