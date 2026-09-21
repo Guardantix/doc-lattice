@@ -1003,6 +1003,13 @@ directories and refuses one wherever a coverage selector would otherwise travers
 covered sibling matches; `exclude` is the way out of such a refusal, and the diagnostic names the
 spelling to write. The `links` command keeps its existing symlink-directory behavior and prunes
 nothing.
+When several directories refuse traversal, one `COVERAGE_ERROR` lists all of them in
+project-relative order alongside uncovered and invalid selected paths. Each refusal names the
+selector that reached it and the `sidecar_coverage.exclude` remedy.
+If a selector reaches only refused directories, the same error also says that it matches no file;
+pruning that directory alone cannot make an empty selector valid.
+An unmatched selector does not stop coverage from checking later selectors, so the same error can
+include their traversal refusals regardless of the selectors' order.
 
 Coverage runs after validated lattice assembly on every load, including warm-cache loads, and
 before cache persistence. Exemptions cannot waive invalid registrations or ownership conflicts.

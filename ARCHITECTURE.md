@@ -2485,6 +2485,16 @@ GTX-756 extracts the walk into `path_selection.py`, which retains all spellings 
 selecting declarations. `select_link_sources` still judges and collapses aliases afterward; its
 errors, ordering, and symlink behavior are unchanged. Coverage chooses the stricter traversal
 policy AD-51 records without changing the `links` contract.
+The shared walk reports consumer-neutral refusal records with a kind, spelling, and reaching
+selector; each consumer supplies its own error type and diagnostic prose. For `links`, selection
+still stops at the first refusal and keeps the existing diagnostics. Coverage collects traversable
+directory-symlink refusals alongside selected paths and sorts them by project-relative spelling,
+deduplicating repeated visits from adjacent `**` segments without sorting each directory listing
+on the `links` path (GTX-794, including GTX-787). A selector that reaches only refused
+directories also reports that it matches no file, so pruning alone does not defer that failure
+to the next run. Coverage collects unmatched selectors through the full walk, allowing later
+selectors' traversal refusals to appear regardless of declaration order; `links` still fails at
+the first unmatched selector.
 
 **Containment after selection, so an escaping source is a finding.** `docs_roots` resolution
 rejects an escaping entry at load and discovery skips one with a warning; both are wrong here,
@@ -3060,17 +3070,20 @@ that list would hide the omissions coverage exists to report.
   coverage or an exemption. An escaping or dangling symlink and a special file are refused; an
   exemption cannot waive these checks.
 - Coverage refuses a symlinked directory wherever the selector would otherwise traverse it,
-  without entering it. A covered sibling cannot conceal the refusal. This strengthens coverage
+  without entering it. A covered sibling cannot conceal the refusal. The walk collects every such
+  refusal in project-relative order, and coverage reports them with invalid and uncovered paths
+  in one `COVERAGE_ERROR` (GTX-794). This strengthens coverage
   specifically; AD-45's `links` behavior stays unchanged. Declining instead was rejected: a
   document behind such a directory would go unselected and so unreported, which is the omission
   coverage exists to find. The refusal is therefore paired with `exclude`, because a refusal with
   no way out of it is one an adopter cannot act on: a single interior symlink, a pnpm store or a
   virtualenv's linked `lib64`, would end every lattice-loading command at exit 2 with no
-  declaration able to say the subtree is out of scope. `SelectionPolicy` holds that pairing as an
-  invariant, refusing a strict traversal policy that carries no note, since the note is where a
-  consumer's remedy reaches the terminal.
+  declaration able to say the subtree is out of scope. `SelectionPolicy` now carries only the
+  traversal choice. Coverage owns the refusal's remedy and the `CoverageError` wording, while
+  `links` owns its unchanged `ConfigError` wording. `Exclusions` carries only pruning selectors;
+  the consumer names its own exclusion key when it reports an invalid or unmatched selector.
 - `exclude` prunes the walk rather than filtering its result (GTX-756). Pruning is what makes it
-  an answer to the refusal at all: the refusal is raised while classifying an entry, so a
+  an answer to the refusal at all: the refusal is recorded while classifying an entry, so a
   declaration that removed spellings afterward would arrive after the walk had already refused.
   Applying it to each listing as it is scanned, ahead of every classification, makes that ordering
   structural rather than a rule each branch of the walk has to repeat. One consequence is

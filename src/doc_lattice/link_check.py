@@ -88,19 +88,40 @@ from .markdown_compat import (
     full_heading_inventory,
     rendered_heading_walk,
 )
-from .path_selection import SelectionPolicy, select_paths
+from .path_selection import SelectionPolicy, SelectionRefusal, refusal_from_error, select_paths
 from .path_utils import format_path_for_display
 
-# This gate's half of the shared selection contract, spelled here rather than defaulted in
-# ``path_selection``: the key and the prose belong to the consumer that reports them. A
-# symlinked directory is declined rather than refused, which is the behavior AD-45 records, and
-# no ``selector_note`` is set, so a refusal carries no note: widening this gate's diagnostics is
-# a contract change of its own. This gate prunes nothing, so it passes no exclusions.
-_SELECTION_POLICY = SelectionPolicy(
-    key=LINK_SOURCES_KEY,
-    purpose="links command",
-    error_type=ConfigError,
-)
+# A symlinked directory is declined rather than refused, as AD-45 records.
+_SELECTION_POLICY = SelectionPolicy()
+
+
+def _selection_error(refusal: SelectionRefusal) -> ConfigError:
+    """Render a shared selection refusal in the links command's existing taxonomy."""
+    key = LINK_SOURCES_KEY
+    displayed = format_path_for_display(refusal.spelling)
+    if refusal.kind == "root-unresolved":
+        message = f"{key} project root {displayed} could not be resolved: {refusal.detail}"
+    elif refusal.kind == "no-selectors":
+        message = (
+            f"{key} names no selector for the project root {displayed}; "
+            "the links command refuses to run without a selector"
+        )
+    elif refusal.kind == "invalid-selector":
+        message = selector_defect_message(key, refusal.spelling, ValueError(refusal.detail or ""))
+    elif refusal.kind == "no-match":
+        root = format_path_for_display(refusal.detail or "")
+        message = (
+            f"{key} entry {displayed} matches no file under the project root {root}; "
+            "the links command refuses to run over a selector that selects nothing"
+        )
+    elif refusal.kind == "scan-failed":
+        message = f"{key} selection could not scan {displayed}: {refusal.detail}"
+    elif refusal.kind == "inspect-failed":
+        message = f"{key} selection could not inspect {displayed}: {refusal.detail}"
+    else:
+        message = f"{key} selection refuses to traverse symlinked directory {displayed}"
+    return ConfigError(message)
+
 
 _PARSER = MarkdownIt("commonmark")
 _MARKDOWN_SUFFIX = ".md"
@@ -831,10 +852,13 @@ def select_link_sources(project_root: Path, selectors: Sequence[str]) -> list[Pa
             can block indefinitely.
     """
     root = project_root.resolve()
-    matched = select_paths(root, selectors, policy=_SELECTION_POLICY)
+    try:
+        selection = select_paths(root, selectors, policy=_SELECTION_POLICY)
+    except ValueError as exc:
+        raise _selection_error(refusal_from_error(exc)) from exc
     seen: set[Path] = set()
     sources: list[Path] = []
-    for selected in matched:
+    for selected in selection.paths:
         relative = selected.path
         candidate = root.joinpath(*relative.split(SELECTOR_SEPARATOR))
         resolved = _resolved(candidate)
