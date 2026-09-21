@@ -14,24 +14,16 @@ from doc_lattice.path_selection import (
     Exclusions,
     SelectedPath,
     SelectionPolicy,
-    SelectionRefusal,
+    refusal_from_error,
     select_paths,
 )
 from doc_lattice.sidecar_coverage import enforce_coverage
 
 _COVERAGE = SelectionPolicy(refuse_symlink_directories=True)
-_LINKS = SelectionPolicy()
 
 
 def _exclude(*selectors):
     return Exclusions(selectors)
-
-
-def _refusal(error: ValueError) -> SelectionRefusal:
-    assert len(error.args) == 1
-    refusal = error.args[0]
-    assert isinstance(refusal, SelectionRefusal)
-    return refusal
 
 
 def _coverage(*selectors, exclude=()):
@@ -136,7 +128,7 @@ def test_scan_failure_is_structured_and_consumers_keep_error_types(tmp_path, mon
     monkeypatch.setattr(os, "scandir", refuse)
     with pytest.raises(ValueError, match="SelectionRefusal") as info:
         select_paths(tmp_path, ["**/*.md"], policy=_COVERAGE)
-    refusal = _refusal(info.value)
+    refusal = refusal_from_error(info.value)
     assert (refusal.kind, refusal.selector) == ("scan-failed", "**/*.md")
     with pytest.raises(CoverageError, match="could not scan"):
         enforce_coverage(tmp_path, _coverage("**/*.md"), set())
@@ -155,7 +147,7 @@ def test_inspection_failure_is_structured_and_consumers_keep_error_types(tmp_pat
     monkeypatch.setattr(os, "scandir", refuse)
     with pytest.raises(ValueError, match="SelectionRefusal") as info:
         select_paths(tmp_path, ["*"], policy=_COVERAGE)
-    refusal = _refusal(info.value)
+    refusal = refusal_from_error(info.value)
     assert (refusal.kind, refusal.spelling) == ("inspect-failed", "/project/locked")
     with pytest.raises(CoverageError, match="could not inspect"):
         enforce_coverage(tmp_path, _coverage("*"), set())
@@ -170,7 +162,7 @@ def test_unresolvable_root_is_structured_and_coverage_maps_it(tmp_path, monkeypa
     monkeypatch.setattr(Path, "resolve", refuse)
     with pytest.raises(ValueError, match="SelectionRefusal") as info:
         select_paths(tmp_path, ["*.md"], policy=_COVERAGE)
-    assert _refusal(info.value).kind == "root-unresolved"
+    assert refusal_from_error(info.value).kind == "root-unresolved"
     with pytest.raises(CoverageError, match=r"project root .* could not be resolved"):
         enforce_coverage(tmp_path, _coverage("*.md"), set())
 
@@ -210,7 +202,7 @@ def test_exclusion_precedes_scan_refusal(tmp_path, monkeypatch):
     monkeypatch.setattr(os, "scandir", refuse)
     with pytest.raises(ValueError, match="SelectionRefusal") as info:
         select_paths(tmp_path, ["**/*.md"], policy=_COVERAGE)
-    assert _refusal(info.value).kind == "scan-failed"
+    assert refusal_from_error(info.value).kind == "scan-failed"
     result = select_paths(tmp_path, ["**/*.md"], policy=_COVERAGE, exclude=_exclude("locked"))
     assert result.paths == (SelectedPath("keep.md", ("**/*.md",)),)
 
@@ -261,7 +253,7 @@ def test_invalid_exclusion_is_structured_and_coverage_names_its_key(tmp_path):
     (tmp_path / "a.md").write_text("# A\n")
     with pytest.raises(ValueError, match="SelectionRefusal") as info:
         select_paths(tmp_path, ["*.md"], policy=_COVERAGE, exclude=_exclude("../x"))
-    refusal = _refusal(info.value)
+    refusal = refusal_from_error(info.value)
     assert (refusal.kind, refusal.source) == ("invalid-selector", "exclude")
     direct_policy = SidecarCoverage.model_construct(
         select=["*.md"],
@@ -292,8 +284,3 @@ def test_exclusion_that_prunes_nothing_is_accepted(tmp_path):
         tmp_path, ["*.md"], policy=_COVERAGE, exclude=_exclude("absent/**/node_modules")
     )
     assert result.paths == (SelectedPath("a.md", ("*.md",)),)
-
-
-def test_selection_policy_has_only_the_behavior_flag():
-    assert SelectionPolicy() == _LINKS
-    assert SelectionPolicy(refuse_symlink_directories=True) == _COVERAGE
