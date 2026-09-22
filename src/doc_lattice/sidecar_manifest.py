@@ -231,7 +231,8 @@ def observe_manifest_records(
         source_bytes: Exact bytes captured from the manifest.
         source: The manifest's freshly resolved declared and physical paths.
         project_root: The root selected record paths resolve against.
-        selected_ids: Node ids whose fresh identities the caller needs.
+        selected_ids: Node ids whose fresh identities the caller needs. Failures are reported
+            in lexical node-id order so unordered collections produce deterministic diagnostics.
 
     Returns:
         Fresh external identities keyed by selected node id.
@@ -247,7 +248,7 @@ def observe_manifest_records(
             positions.setdefault(record.meta.id, []).append(position)
 
     observed: dict[str, ExternalIdentity] = {}
-    for node_id in selected_ids:
+    for node_id in sorted(selected_ids):
         matches = positions.get(node_id, [])
         if not matches:
             raise ManifestError(f"selected manifest record {node_id!r} is missing")

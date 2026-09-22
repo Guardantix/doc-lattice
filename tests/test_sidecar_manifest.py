@@ -304,6 +304,20 @@ def test_observe_selected_records_refuses_a_missing_selected_target(tmp_path: Pa
         sidecar_manifest.observe_manifest_records(captured, source, root, frozenset({"vanished"}))
 
 
+def test_observe_selected_records_reports_failures_in_node_id_order(tmp_path: Path):
+    root = _project(tmp_path)
+    source = ManifestSource(_MANIFEST, (root / _MANIFEST).resolve())
+    captured = b"nodes:\n  - path: skills/a.md\n    meta: {id: skill-a}\n"
+
+    with pytest.raises(ManifestError) as excinfo:
+        sidecar_manifest.observe_manifest_records(
+            captured, source, root, ("z-missing", "a-missing")
+        )
+
+    assert "a-missing" in str(excinfo.value)
+    assert "z-missing" not in str(excinfo.value)
+
+
 def test_observe_selected_records_refuses_a_duplicated_selected_id(tmp_path: Path):
     root = _project(tmp_path)
     source = ManifestSource(_MANIFEST, (root / _MANIFEST).resolve())
