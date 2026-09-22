@@ -4,6 +4,9 @@
 was written for (AD-34); the two predicates beside it answer the same range question for a
 caller that refuses text rather than cleaning it (AD-35). One range, three helpers, so a change
 to what counts as a control character cannot move one of them and leave the others behind.
+
+``uniform_line_ending`` is the other kind of helper this module holds: a pure classification two
+writers with different policies both ask for, kept here so neither owns the answer.
 """
 
 from .constants import ASCII_DELETE, ASCII_PRINTABLE_MIN, C1_CONTROL_MAX, C1_CONTROL_MIN

@@ -109,7 +109,9 @@ def _selection_error(refusal: SelectionRefusal) -> ConfigError:
     this gate's diagnostics is a contract change of its own.
     """
     return ConfigError(
-        selection_refusal_message(refusal, key=LINK_SOURCES_KEY, purpose="the links command")
+        selection_refusal_message(
+            refusal, key=LINK_SOURCES_KEY, purpose="the links command", exclude_key=None
+        )
     )
 
 

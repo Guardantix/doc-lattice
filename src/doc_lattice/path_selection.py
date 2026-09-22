@@ -91,7 +91,7 @@ def refusal_from_error(error: ValueError) -> SelectionRefusal:
 
 
 def selection_refusal_message(
-    refusal: SelectionRefusal, *, key: str, purpose: str, exclude_key: str | None = None
+    refusal: SelectionRefusal, *, key: str, purpose: str, exclude_key: str | None
 ) -> str:
     """Write one refusal as the diagnostic its consumer will raise.
 
@@ -108,6 +108,8 @@ def selection_refusal_message(
         purpose: The subject of the two "refuses to run" sentences, such as ``the links command``.
         exclude_key: The pruning key to name when an unmatched selector survived pruning. None
             for a consumer that prunes nothing, whose refusals are never marked pruned anyway.
+            Required rather than defaulted, since a pruning consumer that omitted it would
+            silently drop the surviving-selector clause this template exists to keep uniform.
 
     Returns:
         The full diagnostic, ready to carry whatever error type the caller raises.
