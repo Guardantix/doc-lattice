@@ -14,7 +14,11 @@ from .error_types import ManifestError, UnreadableDocError
 from .hashing import normalize_newlines
 from .model import ExternalIdentity
 from .path_utils import format_path_for_display
-from .sidecar_manifest import ManifestRecordSnapshot, parse_manifest_snapshot
+from .sidecar_manifest import (
+    ManifestRecordSnapshot,
+    iter_selected_record_positions,
+    parse_manifest_snapshot,
+)
 from .text_utils import uniform_line_ending
 
 
@@ -72,22 +76,19 @@ def _selected_positions(
     observed: Mapping[str, ExternalIdentity],
     updates: Mapping[tuple[str, str], str],
 ) -> dict[str, int]:
-    """Locate each selected id uniquely and bind it to load-time and fresh path evidence."""
-    by_id: dict[str, list[int]] = {}
-    for position, record in enumerate(records):
-        by_id.setdefault(record.meta.id, []).append(position)
+    """Locate each selected id uniquely and bind it to load-time and fresh path evidence.
+
+    Every refusal is reported in lexical node-id order, whatever its kind, because each id is
+    located and checked in one pass.
+    """
     selected: dict[str, int] = {}
-    for node_id in {node_id for node_id, _ in updates}:
-        positions = by_id.get(node_id, [])
-        if not positions:
-            raise ManifestError(f"selected manifest record {node_id!r} is missing")
-        if len(positions) != 1:
-            raise ManifestError(f"selected manifest record {node_id!r} is duplicated")
+    selected_ids = {node_id for node_id, _ in updates}
+    for node_id, position in iter_selected_record_positions(records, selected_ids):
         load_identity = expected.get(node_id)
         fresh_identity = observed.get(node_id)
         if load_identity is None or fresh_identity is None:
             raise ManifestError(f"selected manifest record {node_id!r} lacks identity evidence")
-        declared = records[positions[0]].declared_path
+        declared = records[position].declared_path
         if (
             load_identity.declared_path != declared
             or fresh_identity.declared_path != declared
@@ -95,7 +96,7 @@ def _selected_positions(
             or load_identity.resolved_manifest != fresh_identity.resolved_manifest
         ):
             raise ManifestError(f"selected manifest record {node_id!r} was repointed")
-        selected[node_id] = positions[0]
+        selected[node_id] = position
     return selected
 
 

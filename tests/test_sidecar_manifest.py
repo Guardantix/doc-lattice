@@ -275,6 +275,91 @@ def test_parse_manifest_bytes_uses_captured_bytes_without_rereading(tmp_path: Pa
     assert registrations[0].target == (root / "skills/a.md").resolve()
 
 
+def test_observe_selected_records_resolves_only_the_selected_targets(tmp_path: Path):
+    root = _project(tmp_path)
+    source = ManifestSource(_MANIFEST, (root / _MANIFEST).resolve())
+    captured = (
+        b"nodes:\n"
+        b"  - path: skills/a.md\n    meta: {id: skill-a}\n"
+        b"  - path: skills/vanished.md\n    meta: {id: vanished}\n"
+    )
+
+    observed = sidecar_manifest.observe_manifest_records(
+        captured, source, root, frozenset({"skill-a"})
+    )
+
+    assert set(observed) == {"skill-a"}
+    identity = observed["skill-a"]
+    assert identity.declared_path == "skills/a.md"
+    assert identity.resolved_target == (root / "skills/a.md").resolve()
+    assert identity.resolved_manifest == source.resolved
+
+
+def test_observe_selected_records_refuses_a_missing_selected_target(tmp_path: Path):
+    root = _project(tmp_path)
+    source = ManifestSource(_MANIFEST, (root / _MANIFEST).resolve())
+    captured = b"nodes:\n  - path: skills/vanished.md\n    meta: {id: vanished}\n"
+
+    with pytest.raises(ManifestError, match=r"skills/vanished.md.*does not exist"):
+        sidecar_manifest.observe_manifest_records(captured, source, root, frozenset({"vanished"}))
+
+
+def test_observe_selected_records_reports_failures_in_node_id_order(tmp_path: Path):
+    root = _project(tmp_path)
+    source = ManifestSource(_MANIFEST, (root / _MANIFEST).resolve())
+    captured = b"nodes:\n  - path: skills/a.md\n    meta: {id: skill-a}\n"
+
+    with pytest.raises(ManifestError) as excinfo:
+        sidecar_manifest.observe_manifest_records(
+            captured, source, root, frozenset({"z-missing", "a-missing"})
+        )
+
+    assert "a-missing" in str(excinfo.value)
+    assert "z-missing" not in str(excinfo.value)
+
+
+def test_observe_selected_records_orders_an_unresolvable_target_before_a_later_missing_id(
+    tmp_path: Path,
+):
+    """Lexical order holds across failure kinds, not only among missing ids."""
+    root = _project(tmp_path)
+    source = ManifestSource(_MANIFEST, (root / _MANIFEST).resolve())
+    captured = b"nodes:\n  - path: skills/gone.md\n    meta: {id: a-gone}\n"
+
+    with pytest.raises(ManifestError, match=r"skills/gone.md.*does not exist") as excinfo:
+        sidecar_manifest.observe_manifest_records(
+            captured, source, root, frozenset({"z-missing", "a-gone"})
+        )
+
+    assert "z-missing" not in str(excinfo.value)
+
+
+def test_observe_selected_records_refuses_a_duplicated_selected_id(tmp_path: Path):
+    root = _project(tmp_path)
+    source = ManifestSource(_MANIFEST, (root / _MANIFEST).resolve())
+    captured = (
+        b"nodes:\n"
+        b"  - path: skills/a.md\n    meta: {id: repeated}\n"
+        b"  - path: skills/b.md\n    meta: {id: repeated}\n"
+    )
+
+    with pytest.raises(ManifestError, match="selected manifest record 'repeated' is duplicated"):
+        sidecar_manifest.observe_manifest_records(captured, source, root, frozenset({"repeated"}))
+
+
+def test_observe_selected_records_validates_unselected_record_schema(tmp_path: Path):
+    root = _project(tmp_path)
+    source = ManifestSource(_MANIFEST, (root / _MANIFEST).resolve())
+    captured = (
+        b"nodes:\n"
+        b"  - path: skills/a.md\n    meta: {id: skill-a}\n"
+        b"  - path: skills/vanished.md\n    meta: {id: 42}\n"
+    )
+
+    with pytest.raises(ManifestError, match="invalid metadata"):
+        sidecar_manifest.observe_manifest_records(captured, source, root, frozenset({"skill-a"}))
+
+
 @pytest.mark.parametrize(
     "records",
     [
