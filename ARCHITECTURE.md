@@ -3182,7 +3182,11 @@ path for the Markdown path would merge two nodes that share a manifest and an up
   containment checks, before the fresh read and at the transaction boundary.
 - Human and JSON reporting stay per node and name both locations. The output shape belongs to
   RECONCILE.md and GTX-757. Until GTX-757 ships, a reconcile selection that would update an
-  external node refuses with an actionable message (GTX-766).
+  external node refuses with an actionable message (GTX-766), and the Markdown rewriter refuses
+  a destination carrying more than one node rather than flattening the group to one update per
+  ref, which would keep only the last node's `seen`. That second refusal is a caller contract
+  behind the first, so it is a `ValueError` with no error code: nothing a user runs can reach
+  it while external updates are refused, and GTX-757 retires it by consuming those groups.
 
 **The advisory review's four contracts.** GTX-752's advisory review proposed four: node identity
 separate from the rewritten file, coverage independent of discovery, foreign envelope ownership

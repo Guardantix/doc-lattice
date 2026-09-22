@@ -2796,6 +2796,56 @@ def test_reconcile_keeps_shared_manifest_shared_ref_updates_distinct():
     }
 
 
+def test_plan_rewrites_refuses_a_destination_two_nodes_share():
+    # The group the test above builds is exactly what this rewriter cannot flatten: one ref,
+    # two nodes, so {ref: new_seen} would silently keep only the last node's hash. Destination
+    # resolution refuses the external update first, so this is the caller contract that keeps
+    # the re-key intact for GTX-757's manifest rewriter rather than a diagnostic a user sees.
+    plan = {
+        Path("meta/nodes.yml"): {
+            ("external-a", "up"): reconcile_module.ReconcileUpdate(
+                "hash-a", DocumentOrigin(Path("skills/a.md"))
+            ),
+            ("external-b", "up"): reconcile_module.ReconcileUpdate(
+                "hash-b", DocumentOrigin(Path("skills/b.md"))
+            ),
+        }
+    }
+
+    def never_read(_path: Path) -> bytes:
+        raise AssertionError("the refusal must precede the fresh read")
+
+    with pytest.raises(ValueError, match="belongs to the manifest rewriter") as exc:
+        plan_rewrites(plan, never_read)
+
+    assert "'external-a', 'external-b'" in str(exc.value)
+
+
+def test_plan_rewrites_allows_one_node_holding_several_refs_on_one_destination():
+    # The refusal counts nodes, not updates: an ordinary Markdown node reconciling two of its
+    # own refs in one pass stays a single group and must still be rewritten.
+    source = (
+        b"---\nid: d\nderives_from:\n"
+        b"  - ref: a#x\n    seen: old\n"
+        b"  - ref: b#y\n    seen: old\n"
+        b"---\nbody\n"
+    )
+    plan = {
+        Path("down.md"): {
+            ("d", "a#x"): reconcile_module.ReconcileUpdate(
+                "hash-x", DocumentOrigin(Path("down.md"))
+            ),
+            ("d", "b#y"): reconcile_module.ReconcileUpdate(
+                "hash-y", DocumentOrigin(Path("down.md"))
+            ),
+        }
+    }
+
+    rewrites = plan_rewrites(plan, lambda _path: source)
+
+    assert [rewrite.applied for rewrite in rewrites] == [frozenset({"a#x", "b#y"})]
+
+
 @pytest.mark.parametrize("external_first", [False, True], ids=["ambiguity-first", "external-first"])
 def test_reconcile_preserves_refusal_selection_order_across_destination_resolution(
     external_first: bool,

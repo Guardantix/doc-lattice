@@ -1553,7 +1553,12 @@ def reconcile(
     Raises:
         ValidationError: If ``downstream_id`` is not in the lattice, if ``ref`` is given but
             matches no edge on the node (both only when not ``reconcile_all``), or if an edge
-            resolves to a target id that sits in a slug-collision component.
+            resolves to a target id that sits in a slug-collision component. The collision
+            refusal is suppressed once an earlier selected edge has recorded an external
+            update, because destination resolution refuses that update and the earlier
+            refusal is the one the selection order owes the caller. A caller that plans
+            without resolving destinations therefore has to refuse an external update itself,
+            or it silently loses the ambiguity the suppressed refusal named.
         BrokenRefError: If ``ref`` targets an edge that has no resolvable target.
     """
     if not reconcile_all and downstream_id not in lattice.nodes_by_id:
@@ -1629,12 +1634,22 @@ def group_reconcile_updates(plan: ReconcilePlan) -> ReconcileDestinationPlan:
     """
     destinations: dict[Path, ReconcilePlan] = defaultdict(dict)
     for key, update in plan.items():
-        declaration = update.origin.declaration
-        destination = (
-            update.origin.markdown_path if declaration is None else Path(declaration.manifest_path)
-        )
-        destinations[destination][key] = update
+        destinations[_write_destination(update.origin)][key] = update
     return dict(destinations)
+
+
+def _write_destination(origin: DocumentOrigin) -> Path:
+    """Return the file a node's ``seen`` update is written to."""
+    declaration = origin.declaration
+    if declaration is None:
+        return origin.markdown_path
+    if origin.identity is not None:
+        # The load-time resolution, not the declared spelling: two spellings of one manifest
+        # would otherwise become two destinations and stage two rewrites of the same file,
+        # and a relative spelling would resolve against the process directory rather than the
+        # project root.
+        return origin.identity.resolved_manifest
+    return Path(declaration.manifest_path)
 
 
 def apply_reconcile(
@@ -1729,6 +1744,29 @@ def _line_ending(text: str) -> str:
     return "\n"
 
 
+def _refuse_multi_node_destination(destination: Path, logical_updates: ReconcilePlan) -> None:
+    """Refuse a Markdown rewrite group that carries updates for more than one node.
+
+    Args:
+        destination: The file the group would be written to.
+        logical_updates: The group's logical updates, keyed by node id and target ref.
+
+    Raises:
+        ValueError: If two nodes share the destination.
+    """
+    node_ids = list(dict.fromkeys(node_id for node_id, _target_ref in logical_updates))
+    if len(node_ids) == 1:
+        return
+    shared = ", ".join(repr(node_id) for node_id in node_ids)
+    msg = (
+        f"cannot rewrite {format_path_for_display(destination)} as Markdown: it carries "
+        f"{len(node_ids)} nodes ({shared}), so flattening the group to one update per ref "
+        "would keep only the last node's seen; a destination two nodes share is a manifest "
+        "and belongs to the manifest rewriter"
+    )
+    raise ValueError(msg)
+
+
 def plan_rewrites(
     plan: ReconcileDestinationPlan,
     read_bytes: Callable[[Path], bytes],
@@ -1740,8 +1778,16 @@ def plan_rewrites(
     ``apply_reconcile``. A file written entirely in CRLF or in lone CR is rewritten in that
     same ending, so updating one ``seen`` does not restyle every other line.
 
+    This is the Markdown rewriter, so it refuses a destination carrying more than one node
+    before flattening each group back to ``{ref: new_seen}`` for ``apply_reconcile``. A
+    destination two nodes share is a manifest, which ``group_reconcile_updates`` keeps keyed
+    by node precisely because two nodes can share a manifest and an upstream ref; flattening
+    such a group would keep only the last node's hash. Destination resolution refuses an
+    external update before this point, so that refusal is a caller contract rather than a
+    user diagnostic, and GTX-757's manifest rewriter is what consumes those groups.
+
     Args:
-        plan: Logical updates grouped by their write destination.
+        plan: Logical updates grouped by their write destination, one node per destination.
         read_bytes: Reader injected by the caller for fresh downstream file bytes.
 
     Returns:
@@ -1749,11 +1795,14 @@ def plan_rewrites(
         updates are already applied are skipped.
 
     Raises:
+        ValueError: If a destination carries updates for more than one node. Only a manifest
+            destination does, and this rewriter cannot write one.
         UnreadableDocError: If the injected reader cannot read a downstream file, or
             if the fresh frontmatter cannot be parsed or is malformed.
     """
     rewrites: list[Rewrite] = []
     for destination, logical_updates in plan.items():
+        _refuse_multi_node_destination(destination, logical_updates)
         source = next(
             (update.origin.markdown_path for update in logical_updates.values()), destination
         )
