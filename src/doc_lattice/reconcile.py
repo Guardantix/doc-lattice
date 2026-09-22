@@ -38,10 +38,10 @@ from .error_types import BrokenRefError, FrontmatterError, UnreadableDocError, V
 from .frontmatter_parser import FrontmatterParts, refuse_double_hyphen, split_frontmatter_parts
 from .hashing import normalize_newlines
 from .model import (
+    DocumentOrigin,
     Lattice,
     TargetId,
     format_collision,
-    format_document_origin,
     format_origins,
     node_origins,
     parse_ref,
@@ -91,7 +91,7 @@ class Rewrite:
     """Describe one exact-byte reconcile rewrite.
 
     Attributes:
-        path: Document identity path for the rewrite.
+        path: Write destination for the rewrite.
         before: Exact source bytes read before planning the rewrite.
         after: UTF-8 replacement bytes with planned updates applied.
         applied: Refs whose seen scalar changed.
@@ -101,6 +101,26 @@ class Rewrite:
     before: bytes
     after: bytes
     applied: frozenset[str]
+
+
+type ReconcileKey = tuple[str, str]
+
+
+@dataclass(frozen=True, slots=True)
+class ReconcileUpdate:
+    """One logical ``seen`` update and the declaration that owns it.
+
+    Attributes:
+        new_seen: Replacement hash for the selected edge.
+        origin: Markdown identity and optional external declaration of the downstream node.
+    """
+
+    new_seen: str
+    origin: DocumentOrigin
+
+
+type ReconcilePlan = dict[ReconcileKey, ReconcileUpdate]
+type ReconcileDestinationPlan = dict[Path, ReconcilePlan]
 
 
 @dataclass(frozen=True, slots=True)
@@ -1504,7 +1524,7 @@ def _expected_frontmatter(data: MutableMapping, entry_updates: tuple[_EntryUpdat
 
 def reconcile(
     lattice: Lattice, downstream_id: str, *, ref: str | None, reconcile_all: bool
-) -> dict[Path, dict[str, str]]:
+) -> ReconcilePlan:
     """Plan the seen-scalar updates needed to clear drift for the selection.
 
     Selection: when ``reconcile_all`` is True, every STALE and UNRECONCILED edge across
@@ -1517,9 +1537,8 @@ def reconcile(
     edge is skipped (it does not block the node's reconcilable edges); only a single-node
     ``--ref`` aimed directly at a broken edge is refused, and a single-node ``--ref`` that
     matches no edge on the node is reported rather than silently doing nothing.
-    Until manifest rewriting is supported, a selected external node's edge that needs a new
-    ``seen`` refuses the whole plan. An external upstream or an already-OK external edge does
-    not prevent inline updates.
+    External and inline downstreams are both represented here. Destination resolution owns the
+    interim refusal for an external update until manifest rewriting is supported.
 
     Args:
         lattice: The built lattice (its upstream content is the reconcile snapshot).
@@ -1528,14 +1547,18 @@ def reconcile(
         reconcile_all: Reconcile every node's STALE or UNRECONCILED edges.
 
     Returns:
-        A mapping of downstream file path to ``{target_ref: new_seen}`` updates. The
-        caller applies these via ``apply_reconcile`` and an atomic write (the CLI does).
+        Logical updates keyed by ``(downstream node id, target ref)``. Each update carries the
+        node origin needed to choose its write destination without collapsing distinct nodes.
 
     Raises:
         ValidationError: If ``downstream_id`` is not in the lattice, if ``ref`` is given but
             matches no edge on the node (both only when not ``reconcile_all``), or if an edge
-            resolves to a target id that sits in a slug-collision component, or if a selected
-            update would change an external node's manifest record.
+            resolves to a target id that sits in a slug-collision component. The collision
+            refusal is suppressed once an earlier selected edge has recorded an external
+            update, because destination resolution refuses that update and the earlier
+            refusal is the one the selection order owes the caller. A caller that plans
+            without resolving destinations therefore has to refuse an external update itself,
+            or it silently loses the ambiguity the suppressed refusal named.
         BrokenRefError: If ``ref`` targets an edge that has no resolvable target.
     """
     if not reconcile_all and downstream_id not in lattice.nodes_by_id:
@@ -1543,9 +1566,10 @@ def reconcile(
     node_ids = sorted(lattice.nodes_by_id) if reconcile_all else [downstream_id]
     requested_target_id = parse_ref(ref) if ref is not None else None
     targeting_specific_ref = ref is not None and not reconcile_all
-    plan: dict[Path, dict[str, str]] = defaultdict(dict)
+    plan: ReconcilePlan = {}
     cache: dict[TargetId, str] = {}
     ref_matched = False
+    deferred_external_refusal = False
     for node_id in node_ids:
         node = lattice.nodes_by_id[node_id]
         for edge in node.derives_from:
@@ -1571,6 +1595,10 @@ def reconcile(
                 continue
             collision = lattice.collisions.get(edge.target_id)
             if collision is not None:
+                if deferred_external_refusal:
+                    # Destination resolution owns the earlier external refusal. Preserve the
+                    # selection-order contract by not replacing it with a later ambiguity.
+                    continue
                 # Refusing keeps the tool from blessing a dependency the declaration cannot
                 # unambiguously name. Writing `seen` here would lock a hash to an id document
                 # order can hand to a different heading, which resolves without breaking.
@@ -1584,21 +1612,44 @@ def reconcile(
             new_seen = cached_target_hash(lattice, edge.target_id, cache)
             if edge.seen is not None and new_seen == edge.seen:
                 continue
-            if external := node_origins(node):
-                raise ValidationError(
-                    f"cannot reconcile {node_id!r} -> {edge.target_ref!r} at "
-                    f"{format_document_origin(external[node.id])}: updating an external node's "
-                    "seen is not supported in this release, and this refusal names one edge at a "
-                    "time; review the upstream, then update each drifting edge's seen in its "
-                    "manifest record by hand using that edge's actual value from "
-                    "'doc-lattice check --format json' with cache_trust_stat disabled"
-                )
-            plan[node.path][edge.target_ref] = new_seen
+            origin = node.origin or DocumentOrigin(node.path)
+            plan[(node_id, edge.target_ref)] = ReconcileUpdate(new_seen, origin)
+            deferred_external_refusal |= origin.declaration is not None
     if targeting_specific_ref and not ref_matched:
         raise ValidationError(
             f"node {downstream_id!r} has no edge matching ref {ref!r}; run check to list its edges"
         )
-    return dict(plan)
+    return plan
+
+
+def group_reconcile_updates(plan: ReconcilePlan) -> ReconcileDestinationPlan:
+    """Group logical updates by their declared write destination.
+
+    Args:
+        plan: Updates keyed independently by downstream node id and target ref.
+
+    Returns:
+        Updates grouped by Markdown path for inline nodes and manifest path for external nodes.
+        Logical keys remain intact inside each group, so shared refs never merge two nodes.
+    """
+    destinations: dict[Path, ReconcilePlan] = defaultdict(dict)
+    for key, update in plan.items():
+        destinations[_write_destination(update.origin)][key] = update
+    return dict(destinations)
+
+
+def _write_destination(origin: DocumentOrigin) -> Path:
+    """Return the file a node's ``seen`` update is written to."""
+    declaration = origin.declaration
+    if declaration is None:
+        return origin.markdown_path
+    if origin.identity is not None:
+        # The load-time resolution, not the declared spelling: two spellings of one manifest
+        # would otherwise become two destinations and stage two rewrites of the same file,
+        # and a relative spelling would resolve against the process directory rather than the
+        # project root.
+        return origin.identity.resolved_manifest
+    return Path(declaration.manifest_path)
 
 
 def apply_reconcile(
@@ -1693,8 +1744,31 @@ def _line_ending(text: str) -> str:
     return "\n"
 
 
+def _refuse_multi_node_destination(destination: Path, logical_updates: ReconcilePlan) -> None:
+    """Refuse a Markdown rewrite group that carries updates for more than one node.
+
+    Args:
+        destination: The file the group would be written to.
+        logical_updates: The group's logical updates, keyed by node id and target ref.
+
+    Raises:
+        ValueError: If two nodes share the destination.
+    """
+    node_ids = list(dict.fromkeys(node_id for node_id, _target_ref in logical_updates))
+    if len(node_ids) == 1:
+        return
+    shared = ", ".join(repr(node_id) for node_id in node_ids)
+    msg = (
+        f"cannot rewrite {format_path_for_display(destination)} as Markdown: it carries "
+        f"{len(node_ids)} nodes ({shared}), so flattening the group to one update per ref "
+        "would keep only the last node's seen; a destination two nodes share is a manifest "
+        "and belongs to the manifest rewriter"
+    )
+    raise ValueError(msg)
+
+
 def plan_rewrites(
-    plan: dict[Path, dict[str, str]],
+    plan: ReconcileDestinationPlan,
     read_bytes: Callable[[Path], bytes],
 ) -> list[Rewrite]:
     """Compute exact-byte fresh-read reconcile rewrites before any write lands.
@@ -1704,8 +1778,16 @@ def plan_rewrites(
     ``apply_reconcile``. A file written entirely in CRLF or in lone CR is rewritten in that
     same ending, so updating one ``seen`` does not restyle every other line.
 
+    This is the Markdown rewriter, so it refuses a destination carrying more than one node
+    before flattening each group back to ``{ref: new_seen}`` for ``apply_reconcile``. A
+    destination two nodes share is a manifest, which ``group_reconcile_updates`` keeps keyed
+    by node precisely because two nodes can share a manifest and an upstream ref; flattening
+    such a group would keep only the last node's hash. Destination resolution refuses an
+    external update before this point, so that refusal is a caller contract rather than a
+    user diagnostic, and GTX-757's manifest rewriter is what consumes those groups.
+
     Args:
-        plan: The planned mapping of downstream file path to ``{ref: new_seen}``.
+        plan: Logical updates grouped by their write destination, one node per destination.
         read_bytes: Reader injected by the caller for fresh downstream file bytes.
 
     Returns:
@@ -1713,20 +1795,30 @@ def plan_rewrites(
         updates are already applied are skipped.
 
     Raises:
+        ValueError: If a destination carries updates for more than one node. Only a manifest
+            destination does, and this rewriter cannot write one.
         UnreadableDocError: If the injected reader cannot read a downstream file, or
             if the fresh frontmatter cannot be parsed or is malformed.
     """
     rewrites: list[Rewrite] = []
-    for path, updates in plan.items():
+    for destination, logical_updates in plan.items():
+        _refuse_multi_node_destination(destination, logical_updates)
+        source = next(
+            (update.origin.markdown_path for update in logical_updates.values()), destination
+        )
+        updates = {
+            target_ref: update.new_seen
+            for (_node_id, target_ref), update in logical_updates.items()
+        }
         try:
-            before = read_bytes(path)
+            before = read_bytes(destination)
             decoded = before.decode("utf-8")
         except (OSError, UnicodeDecodeError) as exc:
-            msg = f"cannot read {format_path_for_display(path)} to reconcile: {exc}"
-            raise UnreadableDocError(msg, source=path) from exc
-        new_text, applied = apply_reconcile(normalize_newlines(decoded), updates, path)
+            msg = f"cannot read {format_path_for_display(source)} to reconcile: {exc}"
+            raise UnreadableDocError(msg, source=source) from exc
+        new_text, applied = apply_reconcile(normalize_newlines(decoded), updates, source)
         if applied:
             ending = _line_ending(decoded)
             after = new_text if ending == "\n" else new_text.replace("\n", ending)
-            rewrites.append(Rewrite(path, before, after.encode("utf-8"), frozenset(applied)))
+            rewrites.append(Rewrite(destination, before, after.encode("utf-8"), frozenset(applied)))
     return rewrites

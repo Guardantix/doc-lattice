@@ -36,7 +36,14 @@ from doc_lattice import frontmatter_parser
 from doc_lattice.error_types import FrontmatterError, UnreadableDocError
 from doc_lattice.frontmatter_parser import FrontmatterParts, parse_meta, split_frontmatter_parts
 from doc_lattice.hashing import normalize_newlines
-from doc_lattice.reconcile import Rewrite, apply_reconcile, plan_rewrites
+from doc_lattice.model import DocumentOrigin
+from doc_lattice.reconcile import (
+    ReconcileUpdate,
+    Rewrite,
+    apply_reconcile,
+    group_reconcile_updates,
+    plan_rewrites,
+)
 
 DOC = Path("doc.md")
 BOM = chr(0xFEFF)
@@ -1188,7 +1195,13 @@ def _reload(text: str) -> object:
 def _rewrite_bytes(text: str, updates: dict[str, str]) -> list[Rewrite]:
     """Drive the production planner over one in-memory document."""
     before = text.encode("utf-8")
-    return plan_rewrites({DOC: updates}, lambda _path: before)
+    plan = group_reconcile_updates(
+        {
+            ("doc", target_ref): ReconcileUpdate(new_seen, DocumentOrigin(DOC))
+            for target_ref, new_seen in updates.items()
+        }
+    )
+    return plan_rewrites(plan, lambda _path: before)
 
 
 # --------------------------------------------------------------------------------------------

@@ -33,18 +33,21 @@ marker), then re-run. See the drift-state table in [README.md](README.md) for wh
 means.
 
 External downstream metadata remains manifest-owned in this release. For each selected edge, after
-selector matching, BROKEN and collision handling, and the unchanged-`seen` skip, reconcile refuses
-with `VALIDATION_ERROR` if the edge is STALE or UNRECONCILED and belongs to an externally declared
-downstream. Downstream nodes are visited in id order and each node's edges in declared order, so
-when a selection holds both an `AMBIGUOUS` edge and a drifting external one, the refusal names
-whichever is reached first; either way nothing is written. Each refusal names one edge, so run
-`doc-lattice check` to list them all. The pure guard runs before rewrite planning or staging, so a
-mixed batch writes no inline `seen` values either. It exits 2 with no success output in either human
-or JSON format, and applies to `--dry-run` as well. An inline downstream may still reconcile an
-external upstream, and an external downstream with no remaining drift does not block other selected
-inline updates. An external-only selection with no update is a normal successful no-op. Follow the
-[manual external acknowledgement workflow](README.md#manual-external-acknowledgement) after
-reviewing an external downstream's upstream change.
+selector matching, BROKEN and collision handling, and the unchanged-`seen` skip, the logical
+planner records STALE or UNRECONCILED edges keyed by downstream node and ref, including those that
+belong to externally declared downstreams. Destination resolution then refuses an external update
+with `VALIDATION_ERROR` before any fresh-read rewrite is planned or staged. Downstream nodes are
+visited in id order and each node's edges in declared order, so when a selection holds both an
+`AMBIGUOUS` edge and a drifting external one, the refusal still names whichever is reached first:
+an earlier ambiguity refuses immediately, while an earlier external update remains the selected
+refusal when destinations are resolved. Either way nothing is written. Each refusal names one
+edge, so run `doc-lattice check` to list them all. A mixed batch writes no inline `seen` values
+either. It exits 2 with no success output in either human or JSON format, and applies to
+`--dry-run` as well. An inline downstream may still reconcile an external upstream, and an external
+downstream with no remaining drift does not block other selected inline updates. An external-only
+selection with no update is a normal successful no-op. Follow the [manual external acknowledgement
+workflow](README.md#manual-external-acknowledgement) after reviewing an external downstream's
+upstream change.
 
 ## Dry-run previews
 
@@ -112,9 +115,10 @@ the lattice, planning, or writing, since planning against a tree that was never 
 would reconcile from unrecovered bytes.
 
 The external-downstream refusal is later than this recovery and load path. A real run may restore
-an outstanding journal and persist an eligible load-cache update before the planner refuses an
-external edge. The refusal guarantees no new batch rewrite or staging. `--dry-run` remains
-namespace- and cache-read-only: it performs neither recovery nor cache persistence.
+an outstanding journal and persist an eligible load-cache update before destination resolution
+refuses an external edge. The refusal guarantees no fresh-read rewrite planning or staging.
+`--dry-run` remains namespace- and cache-read-only: it performs neither recovery nor cache
+persistence.
 
 ## Transaction artifacts
 

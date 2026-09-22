@@ -73,7 +73,7 @@ from doc_lattice.error_types import (
 )
 from doc_lattice.frontmatter_parser import parse_meta, split_frontmatter_parts
 from doc_lattice.loader import build_lattice
-from doc_lattice.model import Node, NodeMeta, ParsedDoc, RawEdge
+from doc_lattice.model import DocumentOrigin, Node, NodeMeta, ParsedDoc, RawEdge
 from doc_lattice.path_utils import format_path_for_display
 from doc_lattice.reconcile_transaction import (
     JournalEntry,
@@ -96,6 +96,16 @@ HOSTILE = "pwn\x1b[31m\x1b[Aevil.md"
 CONTROLS = frozenset(chr(code) for code in [*range(0x20), 0x7F, *range(0x80, 0xA0)]) - {
     "\n",  # a message may legitimately span lines; the filename itself carries no newline
 }
+
+
+def _rewrite_plan(path: Path, updates: dict[str, str]) -> reconcile.ReconcileDestinationPlan:
+    """Build one destination plan for tests that exercise path rendering."""
+    return reconcile.group_reconcile_updates(
+        {
+            ("node", target_ref): reconcile.ReconcileUpdate(new_seen, DocumentOrigin(path))
+            for target_ref, new_seen in updates.items()
+        }
+    )
 
 
 def _assert_displayed(text: str, path: str | Path) -> None:
@@ -222,7 +232,7 @@ class TestTypedErrorSinks:
             raise OSError(msg)
 
         with pytest.raises(ProjectError) as exc:
-            reconcile.plan_rewrites({path: {"a#x": "newhash"}}, raise_os_error)
+            reconcile.plan_rewrites(_rewrite_plan(path, {"a#x": "newhash"}), raise_os_error)
         _assert_displayed(str(exc.value), path)
 
     def test_reconcile_unparseable_frontmatter(self, tmp_path: Path):
@@ -231,7 +241,7 @@ class TestTypedErrorSinks:
 
         with pytest.raises(ProjectError) as exc:
             reconcile.plan_rewrites(
-                {path: {"b": "newhash"}},
+                _rewrite_plan(path, {"b": "newhash"}),
                 lambda _path: source.replace("id: a", "id: [unclosed").encode("utf-8"),
             )
         _assert_displayed(str(exc.value), path)
@@ -239,7 +249,9 @@ class TestTypedErrorSinks:
     def test_reconcile_unclosed_fence(self, tmp_path: Path):
         path = tmp_path / HOSTILE
         with pytest.raises(ProjectError) as exc:
-            reconcile.plan_rewrites({path: {"b": "newhash"}}, lambda _path: b"---\nid: a\n")
+            reconcile.plan_rewrites(
+                _rewrite_plan(path, {"b": "newhash"}), lambda _path: b"---\nid: a\n"
+            )
         _assert_displayed(str(exc.value), path)
 
 
@@ -582,9 +594,7 @@ class TestTransactionSinks:
         journal = tmp_path / HOSTILE
         rewrite = reconcile.Rewrite(path=destination, before=b"", after=b"", applied=frozenset())
         with pytest.raises(ValueError, match="aliases journal path") as exc:
-            reconcile_transaction._preflight_rewrite_destinations(
-                tmp_path, journal, [rewrite], {destination: destination}
-            )
+            reconcile_transaction._preflight_rewrite_destinations(tmp_path, journal, [rewrite])
         _assert_displayed(str(exc.value), destination.resolve())
 
     def test_preflight_duplicate_destination(self, tmp_path: Path):
@@ -593,7 +603,7 @@ class TestTransactionSinks:
         rewrite = reconcile.Rewrite(path=destination, before=b"", after=b"", applied=frozenset())
         with pytest.raises(ValueError, match="duplicate reconcile destination") as exc:
             reconcile_transaction._preflight_rewrite_destinations(
-                tmp_path, tmp_path / "journal", [rewrite, rewrite], {destination: destination}
+                tmp_path, tmp_path / "journal", [rewrite, rewrite]
             )
         _assert_displayed(str(exc.value), destination.resolve())
 

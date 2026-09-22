@@ -2,6 +2,7 @@
 
 import json
 import os
+from dataclasses import replace
 from datetime import datetime
 from pathlib import Path
 
@@ -36,11 +37,13 @@ def _commit_rewrites(
     selector: JournalSelector | None = None,
 ) -> None:
     """Run a behavior test's commit through the required lock capability."""
+    destination_rewrites = [
+        replace(rewrite, path=write_paths[rewrite.path]) for rewrite in rewrites
+    ]
     with reconcile_transaction.reconcile_lock(project_root) as lock:
         _UNLOCKED_COMMIT_REWRITES(
             project_root,
-            rewrites,
-            write_paths,
+            destination_rewrites,
             selector=selector or _ANY_SELECTOR,
             lock=lock,
         )
@@ -61,6 +64,23 @@ def _assert_no_transaction_artifacts(root: Path) -> None:
     """Assert that a completed abort left no journal or temporary stages."""
     assert not (root / RECONCILE_JOURNAL_NAME).exists()
     assert not list(root.rglob("*.tmp"))
+
+
+def test_commit_rewrites_uses_the_destination_carried_by_each_rewrite(tmp_path: Path):
+    destination = tmp_path / "document.md"
+    destination.write_bytes(b"before\n")
+    rewrite = _rewrite(destination, b"before\n", b"after\n", "up#section")
+
+    with reconcile_transaction.reconcile_lock(tmp_path) as lock:
+        _UNLOCKED_COMMIT_REWRITES(
+            tmp_path,
+            [rewrite],
+            selector=_ANY_SELECTOR,
+            lock=lock,
+        )
+
+    assert destination.read_bytes() == b"after\n"
+    _assert_no_transaction_artifacts(tmp_path)
 
 
 def _file_snapshot(root: Path) -> dict[str, bytes]:
@@ -131,7 +151,6 @@ def test_commit_requires_a_valid_active_lock_before_mutation(tmp_path: Path):
         _UNLOCKED_COMMIT_REWRITES(
             tmp_path,
             [rewrite],
-            {destination: destination},
             selector=_ANY_SELECTOR,
             lock=None,  # ty: ignore[invalid-argument-type] - deliberate misuse
         )
@@ -156,7 +175,6 @@ def test_commit_rejects_wrong_root_lock_before_mutation(tmp_path: Path):
         _UNLOCKED_COMMIT_REWRITES(
             project_root,
             [rewrite],
-            {destination: destination},
             selector=_ANY_SELECTOR,
             lock=wrong_lock,
         )
@@ -181,7 +199,6 @@ def test_commit_rejects_replaced_root_directory_before_mutation(tmp_path: Path):
             _UNLOCKED_COMMIT_REWRITES(
                 project_root,
                 [rewrite],
-                {destination: destination},
                 selector=_ANY_SELECTOR,
                 lock=stale_lock,
             )
@@ -202,7 +219,6 @@ def test_commit_rejects_released_lock_before_mutation(tmp_path: Path):
         _UNLOCKED_COMMIT_REWRITES(
             tmp_path,
             [rewrite],
-            {destination: destination},
             selector=_ANY_SELECTOR,
             lock=released_lock,
         )
@@ -220,7 +236,6 @@ def test_commit_accepts_current_root_bound_lock(tmp_path: Path):
         _UNLOCKED_COMMIT_REWRITES(
             tmp_path,
             [rewrite],
-            {destination: destination},
             selector=_ANY_SELECTOR,
             lock=lock,
         )
@@ -251,7 +266,6 @@ def test_commit_rejects_dangling_canonical_journal_before_staging(tmp_path: Path
         _UNLOCKED_COMMIT_REWRITES(
             tmp_path,
             [rewrite],
-            {destination: destination},
             selector=_ANY_SELECTOR,
             lock=lock,
         )
@@ -289,7 +303,6 @@ def test_commit_rejects_same_capability_reentrant_recovery(tmp_path: Path, monke
         _UNLOCKED_COMMIT_REWRITES(
             tmp_path,
             [rewrite],
-            {destination: destination},
             selector=_ANY_SELECTOR,
             lock=lock,
         )

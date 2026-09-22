@@ -8,9 +8,15 @@ import typer
 from rich.markup import escape
 
 from ...constants import VALID_BASIC_OUTPUT_FORMATS
-from ...error_types import UnreadableDocError
+from ...error_types import UnreadableDocError, ValidationError
+from ...model import format_document_origin
 from ...path_utils import format_path_for_display, safe_resolve
-from ...reconcile import Rewrite, plan_rewrites
+from ...reconcile import (
+    ReconcileDestinationPlan,
+    Rewrite,
+    group_reconcile_updates,
+    plan_rewrites,
+)
 from ...reconcile import reconcile as plan_reconcile
 from ...reconcile_transaction import (
     JournalProvenance,
@@ -30,21 +36,32 @@ from ..runtime import CliRuntime, get_runtime
 
 
 def _reconcile_json_payload(
-    plan: dict[Path, dict[str, str]], rewrites: list[Rewrite], *, dry_run: bool
+    plan: ReconcileDestinationPlan, rewrites: list[Rewrite], *, dry_run: bool
 ) -> str:
     entries = sorted(
         (
             {
-                "path": str(rewrite.path),
+                "path": str(path),
                 "ref": target_ref,
-                "new_seen": plan[rewrite.path][target_ref],
+                "new_seen": new_seen,
             }
             for rewrite in rewrites
-            for target_ref in rewrite.applied
+            for path, target_ref, new_seen in _reported_updates(plan, rewrite)
         ),
         key=lambda entry: (entry["path"], entry["ref"]),
     )
     return json.dumps({"dry_run": dry_run, "reconciled": entries})
+
+
+def _reported_updates(
+    plan: ReconcileDestinationPlan, rewrite: Rewrite
+) -> list[tuple[Path, str, str]]:
+    """Return applied updates with their preserved reporting identities."""
+    return [
+        (update.origin.markdown_path, target_ref, update.new_seen)
+        for (_node_id, target_ref), update in plan[rewrite.path].items()
+        if target_ref in rewrite.applied
+    ]
 
 
 def _print_reconcile_lines(
@@ -92,21 +109,32 @@ def _journal_selector(
 
 
 def _resolve_reconcile_write_paths(
-    plan: dict[Path, dict[str, str]], project_root: Path
-) -> dict[Path, Path]:
-    write_paths: dict[Path, Path] = {}
-    for path in plan:
+    plan: ReconcileDestinationPlan, project_root: Path
+) -> ReconcileDestinationPlan:
+    resolved_plan: ReconcileDestinationPlan = {}
+    for path, updates in plan.items():
+        for (node_id, target_ref), update in updates.items():
+            if update.origin.declaration is not None:
+                raise ValidationError(
+                    f"cannot reconcile {node_id!r} -> {target_ref!r} at "
+                    f"{format_document_origin(update.origin)}: updating an external node's "
+                    "seen is not supported in this release, and this refusal names one edge at a "
+                    "time; review the upstream, then update each drifting edge's seen in its "
+                    "manifest record by hand using that edge's actual value from "
+                    "'doc-lattice check --format json' with cache_trust_stat disabled"
+                )
         try:
-            write_paths[path] = safe_resolve(path, project_root)
+            destination = safe_resolve(path, project_root)
         except ValueError as exc:
             msg = f"cannot write {format_path_for_display(path)}: it escapes the project root"
             raise UnreadableDocError(msg, source=path) from exc
-    return write_paths
+        resolved_plan.setdefault(destination, {}).update(updates)
+    return resolved_plan
 
 
 def _report_reconcile(
     runtime: CliRuntime,
-    plan: dict[Path, dict[str, str]],
+    plan: ReconcileDestinationPlan,
     rewrites: list[Rewrite],
     *,
     dry_run: bool,
@@ -116,7 +144,10 @@ def _report_reconcile(
         write_text(runtime, _reconcile_json_payload(plan, rewrites, dry_run=dry_run))
         return
     for rewrite in rewrites:
-        _print_reconcile_lines(runtime, rewrite.path, rewrite.applied, dry_run=dry_run)
+        for path, target_ref, _new_seen in sorted(
+            _reported_updates(plan, rewrite), key=lambda update: update[1]
+        ):
+            _print_reconcile_lines(runtime, path, frozenset({target_ref}), dry_run=dry_run)
     if not rewrites:
         # The all-clear is a print like any other, so it carries the same one-record contract:
         # 20 characters must not wrap into two lines on a narrower console.
@@ -361,19 +392,19 @@ def register_reconcile(app: typer.Typer) -> None:
                 # this the load's warnings would carry the CLI's voice and the reread's would
                 # carry Python's default format, in the same run.
                 with runtime.rendered_warnings():
-                    plan = plan_reconcile(
+                    logical_plan = plan_reconcile(
                         lattice,
                         downstream_id,
                         ref=ref,
                         reconcile_all=reconcile_all,
                     )
-                    write_paths = _resolve_reconcile_write_paths(plan, project.project_root)
-                    rewrites = plan_rewrites(plan, lambda path: write_paths[path].read_bytes())
+                    plan = group_reconcile_updates(logical_plan)
+                    plan = _resolve_reconcile_write_paths(plan, project.project_root)
+                    rewrites = plan_rewrites(plan, Path.read_bytes)
                     if not dry_run and rewrites:
                         commit_rewrites(
                             project.project_root,
                             rewrites,
-                            write_paths,
                             selector=_journal_selector(
                                 downstream_id,
                                 reconcile_all=reconcile_all,

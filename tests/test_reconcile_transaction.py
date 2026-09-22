@@ -4,7 +4,7 @@ import json
 import os
 import stat
 from collections.abc import Callable
-from dataclasses import FrozenInstanceError, dataclass
+from dataclasses import FrozenInstanceError, dataclass, replace
 from datetime import UTC, datetime, timedelta
 from hashlib import sha256
 from pathlib import Path
@@ -2012,11 +2012,13 @@ def _commit_rewrites_through_lock(
     write_paths: dict[Path, Path],
 ) -> None:
     """Run one commit through the required project-bound lock capability."""
+    destination_rewrites = [
+        replace(rewrite, path=write_paths[rewrite.path]) for rewrite in rewrites
+    ]
     with reconcile_lock(project_root) as lock:
         _commit_rewrites_unlocked(
             project_root,
-            rewrites,
-            write_paths,
+            destination_rewrites,
             selector=JournalSelector(mode="all", downstream_id=None, ref=None),
             lock=lock,
         )
@@ -2568,7 +2570,6 @@ def test_prepare_rejects_a_journal_whose_provenance_did_not_survive_serializatio
         _commit_rewrites_unlocked(
             tmp_path,
             [rewrite],
-            {destination: destination},
             selector=JournalSelector(mode="downstream", downstream_id="doc", ref="up#x"),
             lock=lock,
         )

@@ -1425,7 +1425,6 @@ def _preflight_rewrite_destinations(
     project_root: Path,
     journal_path: Path,
     rewrites: list[Rewrite],
-    write_paths: dict[Path, Path],
 ) -> tuple[_PendingRewrite, ...]:
     """Validate all destination journal invariants knowable before staging."""
     pending: list[_PendingRewrite] = []
@@ -1433,7 +1432,7 @@ def _preflight_rewrite_destinations(
     canonical_root = project_root.resolve()
     canonical_journal = canonical_root / journal_path.name
     for index, rewrite in enumerate(rewrites):
-        destination = safe_resolve(write_paths[rewrite.path], canonical_root)
+        destination = safe_resolve(rewrite.path, canonical_root)
         destination_relative = destination.relative_to(canonical_root).as_posix()
         if destination == canonical_journal:
             message = (
@@ -1456,7 +1455,6 @@ def _preflight_rewrite_destinations(
 def _prepare_transaction(
     project_root: Path,
     rewrites: list[Rewrite],
-    write_paths: dict[Path, Path],
     selector: JournalSelector,
 ) -> _PreparedTransaction:
     """Stage exact images and durably publish an ordered prepared journal."""
@@ -1481,7 +1479,6 @@ def _prepare_transaction(
             project_root,
             journal_path,
             rewrites,
-            write_paths,
         )
         operation = _PREPARE_STAGING
         for pending in pending_rewrites:
@@ -1792,7 +1789,6 @@ def _abort_failed_marker(
 def commit_rewrites(
     project_root: Path,
     rewrites: list[Rewrite],
-    write_paths: dict[Path, Path],
     *,
     selector: JournalSelector,
     lock: ReconcileLock,
@@ -1801,8 +1797,7 @@ def commit_rewrites(
 
     Args:
         project_root: Configured project root containing the transaction journal.
-        rewrites: Ordered fresh-read rewrites to publish.
-        write_paths: Contained resolved destinations keyed by rewrite identity path.
+        rewrites: Ordered fresh-read rewrites, each carrying its write destination.
         selector: The selection this batch was planned from, recorded in the journal so a
             crash journal says what produced it. The caller builds it, because the arguments
             it describes never reach this boundary.
@@ -1814,17 +1809,16 @@ def commit_rewrites(
         ReconcilePersistenceError: If preparation or durable commit cannot complete.
     """
     with _reconcile_operation_lease(lock, project_root):
-        _commit_rewrites_locked(project_root, rewrites, write_paths, selector)
+        _commit_rewrites_locked(project_root, rewrites, selector)
 
 
 def _commit_rewrites_locked(
     project_root: Path,
     rewrites: list[Rewrite],
-    write_paths: dict[Path, Path],
     selector: JournalSelector,
 ) -> None:
     """Commit rewrites while the public API holds its capability lease."""
-    prepared = _prepare_transaction(project_root, rewrites, write_paths, selector)
+    prepared = _prepare_transaction(project_root, rewrites, selector)
     # Destinations this process may already have applied. An entry joins before its
     # replacement is attempted, never after: replace_staged renames first and only then
     # synchronizes the directory, so it can fail with the destination already changed.
