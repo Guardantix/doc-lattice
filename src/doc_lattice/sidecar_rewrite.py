@@ -15,35 +15,7 @@ from .hashing import normalize_newlines
 from .model import ExternalIdentity
 from .path_utils import format_path_for_display
 from .sidecar_manifest import ManifestRecordSnapshot, parse_manifest_snapshot
-
-
-def _line_ending(text: str) -> str | None:
-    """Return one uniform ending, or None when source mixes line-ending styles."""
-    endings = set()
-    without_crlf = text.replace("\r\n", "")
-    if "\r\n" in text:
-        endings.add("\r\n")
-    if "\r" in without_crlf:
-        endings.add("\r")
-    if "\n" in without_crlf:
-        endings.add("\n")
-    if not endings:
-        return "\n"
-    return next(iter(endings)) if len(endings) == 1 else None
-
-
-def _source_context(text: str, source: Path) -> source_edit._SourceContext:
-    """Build the source-mark view used by the existing byte-local edit planner."""
-    events = list(source_edit._yaml().parse(text))
-    root = source_edit._source_occurrence_tree(events, source)
-    return source_edit._SourceContext(
-        text,
-        root,
-        source_edit._build_anchor_index(root),
-        source_edit._token_marks(list(source_edit._yaml().scan(text))),
-        source_edit._document_version(events),
-        source,
-    )
+from .text_utils import uniform_line_ending
 
 
 def _nodes_occurrences(
@@ -206,9 +178,9 @@ def rewrite_manifest_bytes(
     shown = format_path_for_display(source)
     selected = _selected_positions(records, expected, observed, updates)
     text = fresh_bytes.decode("utf-8")
-    ending = _line_ending(text)
+    ending = uniform_line_ending(text)
     normalized = normalize_newlines(text)
-    context = _source_context(normalized, Path(source))
+    context = source_edit._build_source_context(normalized, Path(source))
     nodes = _nodes_occurrences(context, records)
     try:
         planned, expected_records = _plan_updates(context, nodes, records, selected, updates)

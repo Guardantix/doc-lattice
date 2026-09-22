@@ -2513,7 +2513,11 @@ selecting declarations. `select_link_sources` still judges and collapses aliases
 errors, ordering, and symlink behavior are unchanged. Coverage chooses the stricter traversal
 policy AD-51 records without changing the `links` contract.
 The shared walk reports consumer-neutral refusal records with a kind, spelling, and reaching
-selector; each consumer supplies its own error type and diagnostic prose. For `links`, selection
+selector. Each consumer supplies its own error type, its notes, and the configuration key and
+purpose that `selection_refusal_message` writes into one shared template, so two consumers cannot
+drift into two spellings of the same refusal. Parameterizing the prose does not reinstate the
+coupling AD-51 removed from `SelectionPolicy`: nothing the consumer supplies reaches the walk, and
+no value defaults. For `links`, selection
 still stops at the first refusal and keeps the existing diagnostics. Coverage collects traversable
 directory-symlink refusals alongside selected paths and sorts them by project-relative spelling,
 deduplicating repeated visits from adjacent `**` segments without sorting each directory listing

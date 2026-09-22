@@ -144,10 +144,16 @@ def _report_reconcile(
         write_text(runtime, _reconcile_json_payload(plan, rewrites, dry_run=dry_run))
         return
     for rewrite in rewrites:
-        for path, target_ref, _new_seen in sorted(
-            _reported_updates(plan, rewrite), key=lambda update: update[1]
-        ):
-            _print_reconcile_lines(runtime, path, frozenset({target_ref}), dry_run=dry_run)
+        reported = _reported_updates(plan, rewrite)
+        if reported:
+            # One node per destination, so every update in the group reports the same Markdown
+            # identity; the callee already sorts the refs it is handed.
+            _print_reconcile_lines(
+                runtime,
+                reported[0][0],
+                frozenset(target_ref for _path, target_ref, _new_seen in reported),
+                dry_run=dry_run,
+            )
     if not rewrites:
         # The all-clear is a print like any other, so it carries the same one-record contract:
         # 20 characters must not wrap into two lines on a narrower console.

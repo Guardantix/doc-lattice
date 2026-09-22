@@ -48,6 +48,7 @@ from .model import (
 )
 from .path_utils import format_path_for_display
 from .resolve import cached_target_hash
+from .text_utils import uniform_line_ending
 from .yaml_boundary import YAML_LOAD_ERRORS, is_merge_key_scalar
 from .yaml_error_render import format_yaml_error_for_display
 
@@ -1146,6 +1147,34 @@ def _append_seen_anchor_relocations(
             edited_spans.add((relocation.start, relocation.end))
 
 
+def _build_source_context(text: str, source: Path) -> _SourceContext:
+    """Assemble the source-mark view the byte-local edit planner reads.
+
+    One constructor because the assembly is an invariant, not a call-site choice: the anchor
+    index and the document version have to be derived from the same parse the occurrence tree
+    came from, and the token marks from a scan of the same text. ``sidecar_rewrite`` plans
+    manifest edits against this same view, so a second spelling of it would diverge silently
+    the moment ``_SourceContext`` gains a field.
+
+    Args:
+        text: The YAML source the edit offsets will be measured against.
+        source: The file the text came from, carried for diagnostics.
+
+    Returns:
+        The context the occurrence lookups and edit planner take.
+    """
+    events = list(_yaml().parse(text))
+    root = _source_occurrence_tree(events, source)
+    return _SourceContext(
+        text,
+        root,
+        _build_anchor_index(root),
+        _token_marks(list(_yaml().scan(text))),
+        _document_version(events),
+        source,
+    )
+
+
 def _apply_source_edits(raw_meta: str, edits: list[_SourceEdit]) -> str:
     # Two entries can only ever plan the same span from the same update, so keeping one
     # edit per span drops the repeat rather than choosing between rival replacements.
@@ -1702,16 +1731,7 @@ def apply_reconcile(
             "cannot reconcile"
         )
         raise UnreadableDocError(msg, source=source)
-    events = list(_yaml().parse(raw_meta))
-    source_root = _source_occurrence_tree(events, source)
-    context = _SourceContext(
-        raw_meta,
-        source_root,
-        _build_anchor_index(source_root),
-        _token_marks(list(_yaml().scan(raw_meta))),
-        _document_version(events),
-        source,
-    )
+    context = _build_source_context(raw_meta, source)
     entry_occurrences = _derives_from_occurrences(context, entries)
     plan = _plan_source_edits(context, entries, entry_occurrences, updates)
     if not plan.applied:
@@ -1735,13 +1755,10 @@ def _line_ending(text: str) -> str:
     ``apply_reconcile`` measures source offsets against LF text, so a file written with
     another ending is normalized to plan against and restored to its own ending afterwards.
     A file that mixes endings has no single ending to restore, so normalizing it is the
-    outcome, which is what the hashes have always compared anyway.
+    outcome, which is what the hashes have always compared anyway. That last clause is this
+    writer's policy, not the detector's: the sidecar rewriter refuses the same input.
     """
-    if "\r\n" in text and not set(text.replace("\r\n", "")) & {"\r", "\n"}:
-        return "\r\n"
-    if "\r" in text and "\n" not in text:
-        return "\r"
-    return "\n"
+    return uniform_line_ending(text) or "\n"
 
 
 def _refuse_multi_node_destination(destination: Path, logical_updates: ReconcilePlan) -> None:
@@ -1803,9 +1820,9 @@ def plan_rewrites(
     rewrites: list[Rewrite] = []
     for destination, logical_updates in plan.items():
         _refuse_multi_node_destination(destination, logical_updates)
-        source = next(
-            (update.origin.markdown_path for update in logical_updates.values()), destination
-        )
+        # Exactly one node, and therefore at least one update: an empty group has no node ids
+        # and the refusal above has already raised on it.
+        source = next(iter(logical_updates.values())).origin.markdown_path
         updates = {
             target_ref: update.new_seen
             for (_node_id, target_ref), update in logical_updates.items()

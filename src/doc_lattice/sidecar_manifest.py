@@ -210,8 +210,8 @@ def parse_manifest_snapshot(source_bytes: bytes, source: str) -> tuple[ManifestR
     for position, record in enumerate(
         _manifest_records(source_bytes, format_path_for_display(source))
     ):
-        declared_path, where = _record_path(record, source, position)
-        records.append(ManifestRecordSnapshot(declared_path, _record_meta(record, where)))
+        mapping, declared_path, where = _record_path(record, source, position)
+        records.append(ManifestRecordSnapshot(declared_path, _record_meta(mapping, where)))
     return tuple(records)
 
 
@@ -282,11 +282,11 @@ def _validate_record(
     record: object, source: ManifestSource, position: int, project_root: Path
 ) -> Registration:
     """Validate one record's keys, path spelling, target, and metadata, in that order."""
-    declared_path, where = _record_path(record, source.declared, position)
+    mapping, declared_path, where = _record_path(record, source.declared, position)
     target = _resolve_regular_file(
         declared_path, project_root, subject=where, remedy="restore it, or remove the record"
     )
-    meta = _record_meta(record, where)
+    meta = _record_meta(mapping, where)
     return Registration(
         declared_path=declared_path,
         target=target,
@@ -296,8 +296,14 @@ def _validate_record(
     )
 
 
-def _record_path(record: object, manifest: str, position: int) -> tuple[str, str]:
-    """Check one record's shape and declared path before any target resolution."""
+def _record_path(record: object, manifest: str, position: int) -> tuple[dict[Any, Any], str, str]:
+    """Check one record's shape and declared path before any target resolution.
+
+    Returns:
+        The record as the mapping this check established it to be, its declared path, and
+        the location prefix a later failure names. The mapping is returned rather than
+        re-narrowed by the caller, so the one shape check serves both parsers.
+    """
     if not isinstance(record, dict):
         where = format_record_location(manifest, position, None)
         msg = f"{where} is not a mapping; a record is a mapping of exactly 'path' and 'meta'"
@@ -323,12 +329,11 @@ def _record_path(record: object, manifest: str, position: int) -> tuple[str, str
         msg = f"{where} has a 'path' that is not a string; write a relative '.md' path"
         raise ManifestError(msg)
     _check_path_spelling(declared_path, where)
-    return declared_path, where
+    return record, declared_path, where
 
 
-def _record_meta(record: object, where: str) -> NodeMeta:
+def _record_meta(record: dict[Any, Any], where: str) -> NodeMeta:
     """Validate metadata after the loading path has resolved the record's target."""
-    assert isinstance(record, dict)  # noqa: S101 - _record_path established the shape
     try:
         meta = NodeMeta.model_validate(record.get("meta"))
     except ValidationError as exc:
