@@ -17,7 +17,6 @@ from .config import (
     SidecarCoverage,
 )
 from .error_types import CoverageError
-from .link_selectors import selector_defect_message
 from .path_selection import (
     Exclusions,
     SelectedPath,
@@ -25,6 +24,7 @@ from .path_selection import (
     SelectionRefusal,
     refusal_from_error,
     select_paths,
+    selection_refusal_message,
 )
 from .path_utils import format_path_for_display, safe_resolve
 
@@ -56,34 +56,23 @@ def _context(entry: SelectedPath) -> str:
 
 
 def _selection_error(refusal: SelectionRefusal) -> CoverageError:
-    """Render a fatal selection refusal with coverage's keys and actionable remedy."""
+    """Render a fatal selection refusal with coverage's keys and actionable remedy.
+
+    Coverage owns the error type and the note, which is where its remedy reaches the terminal,
+    and names the key each refusal is repaired under: an exclusion defect is reported against the
+    list that carried it, not against the selection list.
+    """
     key = (
         SIDECAR_COVERAGE_EXCLUDE_KEY if refusal.source == "exclude" else SIDECAR_COVERAGE_SELECT_KEY
     )
-    displayed = format_path_for_display(refusal.spelling)
-    if refusal.kind == "root-unresolved":
-        message = f"{key} project root {displayed} could not be resolved: {refusal.detail}"
-    elif refusal.kind == "no-selectors":
-        message = (
-            f"{key} names no selector for the project root {displayed}; "
-            "the sidecar coverage policy refuses to run without a selector"
+    error = CoverageError(
+        selection_refusal_message(
+            refusal,
+            key=key,
+            purpose="the sidecar coverage policy",
+            exclude_key=SIDECAR_COVERAGE_EXCLUDE_KEY,
         )
-    elif refusal.kind == "invalid-selector":
-        message = selector_defect_message(key, refusal.spelling, ValueError(refusal.detail or ""))
-    elif refusal.kind == "no-match":
-        root = format_path_for_display(refusal.detail or "")
-        surviving = f" that {SIDECAR_COVERAGE_EXCLUDE_KEY} did not prune" if refusal.pruned else ""
-        message = (
-            f"{key} entry {displayed} matches no file under the project root {root}{surviving}; "
-            "the sidecar coverage policy refuses to run over a selector that selects nothing"
-        )
-    elif refusal.kind == "scan-failed":
-        message = f"{key} selection could not scan {displayed}: {refusal.detail}"
-    elif refusal.kind == "inspect-failed":
-        message = f"{key} selection could not inspect {displayed}: {refusal.detail}"
-    else:
-        message = f"{key} selection refuses to traverse symlinked directory {displayed}"
-    error = CoverageError(message)
+    )
     if refusal.selector is not None:
         error.add_note(
             f"selected by {format_path_for_display(refusal.selector)}; repair the path, "

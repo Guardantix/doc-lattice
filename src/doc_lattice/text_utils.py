@@ -9,6 +9,33 @@ to what counts as a control character cannot move one of them and leave the othe
 from .constants import ASCII_DELETE, ASCII_PRINTABLE_MIN, C1_CONTROL_MAX, C1_CONTROL_MIN
 
 
+def uniform_line_ending(text: str) -> str | None:
+    """Return the one line ending the text is written in, or None when it mixes styles.
+
+    Detection only. What a mixed file deserves is the caller's policy and differs by writer: the
+    inline reconciler normalizes it to LF under AD-31 Layer 4's document-wide allowance, while
+    the sidecar rewriter refuses it, since a manifest rewrite is byte local and has no such
+    allowance to spend. Both ask the same question, so they ask it in one place.
+
+    Args:
+        text: The text to classify, which may be empty.
+
+    Returns:
+        ``"\\r\\n"``, ``"\\r"``, or ``"\\n"`` for uniform text, and None when more than one
+        style appears. Text with no line break at all is LF, since there is nothing to restore.
+    """
+    # The common file has no carriage return at all, so it never pays for the copy below.
+    if "\r" not in text:
+        return "\n"
+    without_crlf = text.replace("\r\n", "")
+    endings = {"\r\n"} if "\r\n" in text else set()
+    if "\r" in without_crlf:
+        endings.add("\r")
+    if "\n" in without_crlf:
+        endings.add("\n")
+    return next(iter(endings)) if len(endings) == 1 else None
+
+
 def strip_control_chars(text: str) -> str:
     """Remove control bytes so untrusted strings cannot corrupt terminal output.
 

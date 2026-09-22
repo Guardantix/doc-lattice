@@ -1,8 +1,9 @@
 """Shared no-follow filesystem selection with consumer-neutral refusal records.
 
 Grammar validation remains in ``link_selectors``. The walk retains every spelling and its
-selectors, and never resolves file aliases, enrolls nodes, or reads contents. Consumers render
-the refusal records in their own error taxonomy.
+selectors, and never resolves file aliases, enrolls nodes, or reads contents. Consumers raise the
+refusal records in their own error taxonomy, supplying the key and purpose that
+``selection_refusal_message`` writes into the shared template and attaching their own notes.
 """
 
 import os
@@ -15,9 +16,11 @@ from .link_selectors import (
     RECURSIVE_SEGMENT,
     SELECTOR_SEPARATOR,
     segment_matches,
+    selector_defect_message,
     selector_matches_path,
     validate_link_selector,
 )
+from .path_utils import format_path_for_display
 
 
 @dataclass(frozen=True, slots=True)
@@ -85,6 +88,54 @@ def refusal_from_error(error: ValueError) -> SelectionRefusal:
     if len(error.args) != 1 or not isinstance(error.args[0], SelectionRefusal):
         raise error
     return error.args[0]
+
+
+def selection_refusal_message(
+    refusal: SelectionRefusal, *, key: str, purpose: str, exclude_key: str | None = None
+) -> str:
+    """Write one refusal as the diagnostic its consumer will raise.
+
+    The template is shared because every consumer reports the same seven refusals about the same
+    walk, and a reader who meets one message should not have to recognize another spelling of it
+    as the same refusal. What stays with the consumer is what actually differs: the error type it
+    raises, the notes it attaches, and the two values written in here. Parameterizing the prose
+    does not reinstate the coupling AD-51 removed from ``SelectionPolicy``, since nothing here
+    reaches the walk and no value defaults.
+
+    Args:
+        refusal: The refusal the walk recorded or raised.
+        key: The configuration key the refused declaration was written under.
+        purpose: The subject of the two "refuses to run" sentences, such as ``the links command``.
+        exclude_key: The pruning key to name when an unmatched selector survived pruning. None
+            for a consumer that prunes nothing, whose refusals are never marked pruned anyway.
+
+    Returns:
+        The full diagnostic, ready to carry whatever error type the caller raises.
+    """
+    displayed = format_path_for_display(refusal.spelling)
+    if refusal.kind == "root-unresolved":
+        message = f"{key} project root {displayed} could not be resolved: {refusal.detail}"
+    elif refusal.kind == "no-selectors":
+        message = (
+            f"{key} names no selector for the project root {displayed}; "
+            f"{purpose} refuses to run without a selector"
+        )
+    elif refusal.kind == "invalid-selector":
+        message = selector_defect_message(key, refusal.spelling, ValueError(refusal.detail or ""))
+    elif refusal.kind == "no-match":
+        root = format_path_for_display(refusal.detail or "")
+        surviving = f" that {exclude_key} did not prune" if refusal.pruned and exclude_key else ""
+        message = (
+            f"{key} entry {displayed} matches no file under the project root {root}{surviving}; "
+            f"{purpose} refuses to run over a selector that selects nothing"
+        )
+    elif refusal.kind == "scan-failed":
+        message = f"{key} selection could not scan {displayed}: {refusal.detail}"
+    elif refusal.kind == "inspect-failed":
+        message = f"{key} selection could not inspect {displayed}: {refusal.detail}"
+    else:
+        message = f"{key} selection refuses to traverse symlinked directory {displayed}"
+    return message
 
 
 @dataclass(frozen=True, slots=True)

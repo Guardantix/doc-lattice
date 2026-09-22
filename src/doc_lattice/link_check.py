@@ -88,7 +88,13 @@ from .markdown_compat import (
     full_heading_inventory,
     rendered_heading_walk,
 )
-from .path_selection import SelectionPolicy, SelectionRefusal, refusal_from_error, select_paths
+from .path_selection import (
+    SelectionPolicy,
+    SelectionRefusal,
+    refusal_from_error,
+    select_paths,
+    selection_refusal_message,
+)
 from .path_utils import format_path_for_display
 
 # A symlinked directory is declined rather than refused, as AD-45 records.
@@ -96,31 +102,15 @@ _SELECTION_POLICY = SelectionPolicy()
 
 
 def _selection_error(refusal: SelectionRefusal) -> ConfigError:
-    """Render a shared selection refusal in the links command's existing taxonomy."""
-    key = LINK_SOURCES_KEY
-    displayed = format_path_for_display(refusal.spelling)
-    if refusal.kind == "root-unresolved":
-        message = f"{key} project root {displayed} could not be resolved: {refusal.detail}"
-    elif refusal.kind == "no-selectors":
-        message = (
-            f"{key} names no selector for the project root {displayed}; "
-            "the links command refuses to run without a selector"
-        )
-    elif refusal.kind == "invalid-selector":
-        message = selector_defect_message(key, refusal.spelling, ValueError(refusal.detail or ""))
-    elif refusal.kind == "no-match":
-        root = format_path_for_display(refusal.detail or "")
-        message = (
-            f"{key} entry {displayed} matches no file under the project root {root}; "
-            "the links command refuses to run over a selector that selects nothing"
-        )
-    elif refusal.kind == "scan-failed":
-        message = f"{key} selection could not scan {displayed}: {refusal.detail}"
-    elif refusal.kind == "inspect-failed":
-        message = f"{key} selection could not inspect {displayed}: {refusal.detail}"
-    else:
-        message = f"{key} selection refuses to traverse symlinked directory {displayed}"
-    return ConfigError(message)
+    """Render a shared selection refusal in the links command's existing taxonomy.
+
+    This gate prunes nothing, so it names no exclusion key: an unmatched selector here never
+    survived pruning. No note is attached either, which is the behavior AD-45 records; widening
+    this gate's diagnostics is a contract change of its own.
+    """
+    return ConfigError(
+        selection_refusal_message(refusal, key=LINK_SOURCES_KEY, purpose="the links command")
+    )
 
 
 _PARSER = MarkdownIt("commonmark")

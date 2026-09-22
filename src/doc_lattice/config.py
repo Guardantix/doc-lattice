@@ -26,6 +26,8 @@ from .error_types import ConfigError
 from .link_selectors import (
     LEGACY_MARKER_SOURCES_KEY,
     LINK_SOURCES_KEY,
+    RECURSIVE_SEGMENT,
+    SELECTOR_SEPARATOR,
     selector_defect_message,
     selector_prunes_path,
     validate_link_selector,
@@ -143,29 +145,29 @@ class CoverageExclusion(BaseModel):
     def _validate_selector(cls, value: str) -> str:
         """Refuse malformed and contents-shaped coverage exclusions."""
         _validate_selectors(SIDECAR_COVERAGE_EXCLUDE_KEY, [value])
-        if value == "**" or value.endswith("/**"):
-            segments = value.split("/")
-            while segments and segments[-1] == "**":
-                segments.pop()
-            if segments:
-                replacement = format_path_for_display("/".join(segments))
-                remedy = (
-                    "it matches only contents beneath its prefix; "
-                    f"to prune the matching entry with {SIDECAR_COVERAGE_EXCLUDE_KEY}, "
-                    f"consider {replacement} instead and review whether the broader "
-                    "exclusion is intended"
-                )
-            else:
-                remedy = (
-                    "it names no specific subtree to prune; "
-                    "remove this exclusion or name specific subtrees instead"
-                )
-            msg = (
-                f"{SIDECAR_COVERAGE_EXCLUDE_KEY} entry {format_path_for_display(value)} "
-                f"ends in recursive '**'; {remedy}"
+        segments = value.split(SELECTOR_SEPARATOR)
+        if segments[-1] != RECURSIVE_SEGMENT:
+            return value
+        while segments and segments[-1] == RECURSIVE_SEGMENT:
+            segments.pop()
+        if segments:
+            replacement = format_path_for_display(SELECTOR_SEPARATOR.join(segments))
+            remedy = (
+                "it matches only contents beneath its prefix; "
+                f"to prune the matching entry with {SIDECAR_COVERAGE_EXCLUDE_KEY}, "
+                f"consider {replacement} instead and review whether the broader "
+                "exclusion is intended"
             )
-            raise ValueError(msg)
-        return value
+        else:
+            remedy = (
+                "it names no specific subtree to prune; "
+                "remove this exclusion or name specific subtrees instead"
+            )
+        msg = (
+            f"{SIDECAR_COVERAGE_EXCLUDE_KEY} entry {format_path_for_display(value)} "
+            f"ends in recursive {RECURSIVE_SEGMENT!r}; {remedy}"
+        )
+        raise ValueError(msg)
 
 
 class SidecarCoverage(BaseModel):
