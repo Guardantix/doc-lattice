@@ -3159,17 +3159,24 @@ that list would hide the omissions coverage exists to report.
   validates syntax only, so explicit journal recovery bypasses coverage and automatic recovery
   completes before coverage can refuse the new load.
 
-**Future external reconcile keys updates by node, writes once per manifest, and finds records by
-identity (GTX-757).** The
-planner today keys an update by downstream document path and ref, so substituting a manifest
-path for the Markdown path would merge two nodes that share a manifest and an upstream ref.
+**External reconcile keys updates by node, writes once per manifest, and finds records by
+identity (GTX-872, GTX-757).** The planner keyed an update by downstream document path and ref
+until GTX-872, so substituting a manifest path for the Markdown path would have merged two nodes
+that share a manifest and an upstream ref. GTX-872 shipped the plan keys and the destination
+grouping; the write path waits on GTX-757's manifest rewriter.
+
+Shipped in GTX-872:
 
 - A logical update is keyed by node id and ref, and carries the node's origin: its Markdown path
   and, for an external node, its manifest and record.
 - Updates are grouped by resolved write destination, which is the Markdown file for an inline
   node and the manifest for an external one. Each destination gets one verified rewrite, which
   is also what the transaction boundary's duplicate-destination refusal requires. An external
-  node's Markdown is never a destination.
+  node's Markdown is never a destination. Grouping an external node's update is what shipped;
+  writing it is still refused.
+
+Remaining in GTX-757:
+
 - The fresh write-time read locates each record by its `meta.id` and checks that its `path`
   still has the declared spelling and resolved target the plan used. A record that is missing,
   duplicated, or repointed is a conflict that refuses the batch, and list position is never
@@ -3181,12 +3188,15 @@ path for the Markdown path would merge two nodes that share a manifest and an up
   rollback, and recovery unchanged. Manifest destinations take AD-8's two independent
   containment checks, before the fresh read and at the transaction boundary.
 - Human and JSON reporting stay per node and name both locations. The output shape belongs to
-  RECONCILE.md and GTX-757. Until GTX-757 ships, a reconcile selection that would update an
-  external node refuses with an actionable message (GTX-766), and the Markdown rewriter refuses
-  a destination carrying more than one node rather than flattening the group to one update per
-  ref, which would keep only the last node's `seen`. That second refusal is a caller contract
-  behind the first, so it is a `ValueError` with no error code: nothing a user runs can reach
-  it while external updates are refused, and GTX-757 retires it by consuming those groups.
+  RECONCILE.md and GTX-757.
+
+Two refusals hold the gap until GTX-757 ships. A reconcile selection that would update an
+external node refuses with an actionable message (GTX-766). Behind it, the Markdown rewriter
+refuses a destination carrying more than one node rather than flattening the group to one update
+per ref, which would keep only the last node's `seen`. That second one is a caller contract, so
+it is a `ValueError` claiming no error code: nothing a user runs reaches it while external
+updates are refused, and a code would owe README a row for a diagnostic nobody can receive.
+GTX-757 retires both by consuming those groups.
 
 **The advisory review's four contracts.** GTX-752's advisory review proposed four: node identity
 separate from the rewritten file, coverage independent of discovery, foreign envelope ownership
