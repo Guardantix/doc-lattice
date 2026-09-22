@@ -33,10 +33,140 @@ PYPROJECT_PATH = Path(__file__).parent.parent / "pyproject.toml"
 # it is spelled. `tests/test_script_conventions.py` holds the same manifest over `scripts/`.
 _CLOCK_SOURCES = {"datetime_utils.py": 1}
 
+# The complete imports each pure manifest orchestration module may reach. The allowlist is keyed
+# by source path because opening a boundary is an explicit edit, not something a filename earns.
+# In particular, only the pure snapshot surface of sidecar_manifest.py is admitted here.
+_PURE_MANIFEST_IMPORTS = {
+    "manifest_reconcile.py": {
+        "collections.abc": frozenset({"Mapping"}),
+        "dataclasses": frozenset({"dataclass"}),
+        "pathlib": frozenset({"Path"}),
+        "model": frozenset({"ExternalIdentity"}),
+        "reconcile": frozenset({"ReconcileDestinationPlan", "ReconcileKey", "ReconcilePlan"}),
+        "sidecar_manifest": frozenset({"ManifestRecordSnapshot", "parse_manifest_snapshot"}),
+        "sidecar_rewrite": frozenset({"rewrite_manifest_bytes"}),
+    }
+}
+_PURE_MANIFEST_CALLS = {
+    "manifest_reconcile.py": frozenset(
+        {
+            ("attribute", "append"),
+            ("attribute", "items"),
+            ("attribute", "setdefault"),
+            ("attribute", "values"),
+            ("name", "ManifestChange"),
+            ("name", "ManifestRewriteResult"),
+            ("name", "ValueError"),
+            ("name", "_changed_pairs"),
+            ("name", "_is_manifest_group"),
+            ("name", "_manifest_arguments"),
+            ("name", "any"),
+            ("name", "dataclass"),
+            ("name", "enumerate"),
+            ("name", "parse_manifest_snapshot"),
+            ("name", "rewrite_manifest_bytes"),
+            ("name", "tuple"),
+            ("name", "zip"),
+        }
+    )
+}
+
 
 def _source_files() -> list[Path]:
     """Every source module, recursively, excluding bytecode caches."""
     return [p for p in SRC_DIR.rglob("*.py") if "__pycache__" not in p.parts]
+
+
+@cache
+def _source_text(relative_path: str) -> str:
+    """Read one production module once for source-shape convention tests."""
+    return (SRC_DIR / relative_path).read_text(encoding="utf-8")
+
+
+def _manifest_purity_violations(
+    source: str,
+    allowed_imports: dict[str, frozenset[str]],
+    allowed_calls: frozenset[tuple[str, str]],
+) -> list[str]:
+    """Return filesystem boundaries reached directly by one declared pure module."""
+    tree = ast.parse(source)
+    violations: list[str] = []
+    imports: dict[str, set[str]] = {}
+    calls: set[tuple[str, str]] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                imports.setdefault(alias.name, set()).add("*")
+        elif isinstance(node, ast.ImportFrom):
+            module = node.module or ""
+            imports.setdefault(module, set()).update(alias.name for alias in node.names)
+        elif isinstance(node, ast.Call):
+            if isinstance(node.func, ast.Name):
+                calls.add(("name", node.func.id))
+            elif isinstance(node.func, ast.Attribute):
+                receiver = node.func.value
+                pure_literal_replace = (
+                    node.func.attr == "replace"
+                    and isinstance(receiver, ast.Constant)
+                    and isinstance(receiver.value, str | bytes)
+                )
+                if not pure_literal_replace:
+                    calls.add(("attribute", node.func.attr))
+            else:
+                violations.append(f"line {node.lineno}: calls an unclassified expression")
+    normalized = {module: frozenset(names) for module, names in imports.items()}
+    if normalized != allowed_imports:
+        violations.append(f"imports are {normalized!r}, expected {allowed_imports!r}")
+    if unexpected := sorted(calls - allowed_calls):
+        violations.append(f"calls outside the pure allowlist: {unexpected!r}")
+    return violations
+
+
+def test_manifest_reconcile_layer_reaches_no_filesystem_boundary():
+    """The orchestration module consumes observations and never gathers them itself."""
+    for relative_path, allowed_imports in _PURE_MANIFEST_IMPORTS.items():
+        source = _source_text(relative_path)
+        violations = _manifest_purity_violations(
+            source, allowed_imports, _PURE_MANIFEST_CALLS[relative_path]
+        )
+        assert not violations, f"{relative_path}: {violations}"
+
+
+@pytest.mark.parametrize(
+    "addition",
+    [
+        "\nimport os\n",
+        "\nfrom .persistence import file_sha256\n",
+        "\nfrom .path_utils import safe_resolve\n",
+        "\nimport socket\n",
+        "\ndef walk():\n    return list(Path('.').glob('*'))\n",
+        "\ndef walk():\n    return list(Path('.').rglob('*'))\n",
+        "\ndef read(path):\n    return path.read_bytes()\n",
+        "\ndef read(path):\n    return open(path)\n",
+        "\nfrom .sidecar_manifest import observe_manifest_records\n",
+    ],
+)
+def test_manifest_purity_detector_catches_boundary_reach(addition: str):
+    """Positive controls keep each forbidden import and call shape observable."""
+    source = _source_text("manifest_reconcile.py") + addition
+    assert _manifest_purity_violations(
+        source,
+        _PURE_MANIFEST_IMPORTS["manifest_reconcile.py"],
+        _PURE_MANIFEST_CALLS["manifest_reconcile.py"],
+    )
+
+
+def test_manifest_purity_detector_allows_pure_bytes_replacement():
+    """A pure method sharing a Path method name is not mistaken for filesystem access."""
+    source = (
+        _source_text("manifest_reconcile.py")
+        + "\ndef swap():\n    return b'a'.replace(b'a', b'b')\n"
+    )
+    assert not _manifest_purity_violations(
+        source,
+        _PURE_MANIFEST_IMPORTS["manifest_reconcile.py"],
+        _PURE_MANIFEST_CALLS["manifest_reconcile.py"],
+    )
 
 
 def _is_broad_except(handler: ast.ExceptHandler) -> bool:

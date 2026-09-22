@@ -15,7 +15,7 @@ Every path resolves against the project root, never against the manifest or the 
 directory, so moving a manifest never re-points its records (AD-51).
 """
 
-from collections.abc import Mapping, Sequence
+from collections.abc import Collection, Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import Any
@@ -23,7 +23,7 @@ from typing import Any
 from pydantic import ValidationError
 
 from .error_types import ManifestError, RegistrationConflictError
-from .model import NodeMeta, format_record_location
+from .model import ExternalIdentity, NodeMeta, format_record_location
 from .path_utils import format_path_for_display, safe_resolve
 from .text_utils import describe_first_control_char
 from .validation_render import format_validation_error
@@ -213,6 +213,57 @@ def parse_manifest_snapshot(source_bytes: bytes, source: str) -> tuple[ManifestR
         mapping, declared_path, where = _record_path(record, source, position)
         records.append(ManifestRecordSnapshot(declared_path, _record_meta(mapping, where)))
     return tuple(records)
+
+
+def observe_manifest_records(
+    source_bytes: bytes,
+    source: ManifestSource,
+    project_root: Path,
+    selected_ids: Collection[str],
+) -> dict[str, ExternalIdentity]:
+    """Resolve fresh path identities for selected records in captured manifest bytes.
+
+    The complete manifest is schema-validated before any path is resolved, but only selected
+    records touch the filesystem. An unrelated record whose target disappeared after load does
+    not prevent a selected record from being observed.
+
+    Args:
+        source_bytes: Exact bytes captured from the manifest.
+        source: The manifest's freshly resolved declared and physical paths.
+        project_root: The root selected record paths resolve against.
+        selected_ids: Node ids whose fresh identities the caller needs.
+
+    Returns:
+        Fresh external identities keyed by selected node id.
+
+    Raises:
+        ManifestError: If the manifest schema is invalid, a selected id is missing or repeated,
+            or a selected target cannot be resolved to a contained regular file.
+    """
+    records = parse_manifest_snapshot(source_bytes, source.declared)
+    positions: dict[str, list[int]] = {}
+    for position, record in enumerate(records):
+        if record.meta.id in selected_ids:
+            positions.setdefault(record.meta.id, []).append(position)
+
+    observed: dict[str, ExternalIdentity] = {}
+    for node_id in selected_ids:
+        matches = positions.get(node_id, [])
+        if not matches:
+            raise ManifestError(f"selected manifest record {node_id!r} is missing")
+        if len(matches) != 1:
+            raise ManifestError(f"selected manifest record {node_id!r} is duplicated")
+        position = matches[0]
+        record = records[position]
+        where = format_record_location(source.declared, position, record.declared_path)
+        target = _resolve_regular_file(
+            record.declared_path,
+            project_root,
+            subject=where,
+            remedy="restore it, or remove the record",
+        )
+        observed[node_id] = ExternalIdentity(record.declared_path, target, source.resolved)
+    return observed
 
 
 def _manifest_records(source_bytes: bytes, shown: str) -> list[Any]:
