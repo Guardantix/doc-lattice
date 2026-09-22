@@ -15,7 +15,8 @@ Every path resolves against the project root, never against the manifest or the 
 directory, so moving a manifest never re-points its records (AD-51).
 """
 
-from collections.abc import Collection, Mapping, Sequence
+from collections.abc import Mapping, Sequence
+from collections.abc import Set as AbstractSet
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import Any
@@ -215,11 +216,46 @@ def parse_manifest_snapshot(source_bytes: bytes, source: str) -> tuple[ManifestR
     return tuple(records)
 
 
+def selected_record_positions(
+    records: Sequence[ManifestRecordSnapshot], selected_ids: AbstractSet[str]
+) -> dict[str, int]:
+    """Locate each selected id at exactly one record position.
+
+    Position is never identity: a selected id that the manifest repeats is refused rather than
+    resolved by order, and a missing one is refused rather than skipped.
+
+    Args:
+        records: The manifest's parsed records in sequence order.
+        selected_ids: Node ids the caller acts on. A set rather than any collection, so a bare
+            string cannot be iterated as its characters.
+
+    Returns:
+        Each selected id's record position, in lexical id order, so an unordered set produces
+        a deterministic result and a deterministic diagnostic.
+
+    Raises:
+        ManifestError: If a selected id is missing or repeated, naming the lexically first one.
+    """
+    positions: dict[str, list[int]] = {}
+    for position, record in enumerate(records):
+        if record.meta.id in selected_ids:
+            positions.setdefault(record.meta.id, []).append(position)
+    selected: dict[str, int] = {}
+    for node_id in sorted(selected_ids):
+        matches = positions.get(node_id, [])
+        if not matches:
+            raise ManifestError(f"selected manifest record {node_id!r} is missing")
+        if len(matches) != 1:
+            raise ManifestError(f"selected manifest record {node_id!r} is duplicated")
+        selected[node_id] = matches[0]
+    return selected
+
+
 def observe_manifest_records(
     source_bytes: bytes,
     source: ManifestSource,
     project_root: Path,
-    selected_ids: Collection[str],
+    selected_ids: AbstractSet[str],
 ) -> dict[str, ExternalIdentity]:
     """Resolve fresh path identities for selected records in captured manifest bytes.
 
@@ -232,7 +268,7 @@ def observe_manifest_records(
         source: The manifest's freshly resolved declared and physical paths.
         project_root: The root selected record paths resolve against.
         selected_ids: Node ids whose fresh identities the caller needs. Failures are reported
-            in lexical node-id order so unordered collections produce deterministic diagnostics.
+            in lexical node-id order so an unordered set produces deterministic diagnostics.
 
     Returns:
         Fresh external identities keyed by selected node id.
@@ -242,19 +278,8 @@ def observe_manifest_records(
             or a selected target cannot be resolved to a contained regular file.
     """
     records = parse_manifest_snapshot(source_bytes, source.declared)
-    positions: dict[str, list[int]] = {}
-    for position, record in enumerate(records):
-        if record.meta.id in selected_ids:
-            positions.setdefault(record.meta.id, []).append(position)
-
     observed: dict[str, ExternalIdentity] = {}
-    for node_id in sorted(selected_ids):
-        matches = positions.get(node_id, [])
-        if not matches:
-            raise ManifestError(f"selected manifest record {node_id!r} is missing")
-        if len(matches) != 1:
-            raise ManifestError(f"selected manifest record {node_id!r} is duplicated")
-        position = matches[0]
+    for node_id, position in selected_record_positions(records, selected_ids).items():
         record = records[position]
         where = format_record_location(source.declared, position, record.declared_path)
         target = _resolve_regular_file(

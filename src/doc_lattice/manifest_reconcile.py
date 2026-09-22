@@ -96,7 +96,8 @@ def plan_manifest_rewrites(
 
     Raises:
         ManifestError: If manifest bytes, identities, or rewrites fail validation.
-        ValueError: If a manifest group does not carry coherent external origin evidence.
+        ValueError: If a manifest group does not carry coherent external origin evidence, or
+            if its destination has no captured bytes or fresh observation.
     """
     inline: ReconcileDestinationPlan = {}
     rewrites: list[ManifestRewriteResult] = []
@@ -105,6 +106,8 @@ def plan_manifest_rewrites(
             inline[destination] = logical_updates
             continue
         source, expected, updates = _manifest_arguments(destination, logical_updates)
+        if destination not in fresh_bytes or destination not in observations:
+            raise ValueError("manifest reconcile group lacks a fresh capture or observation")
         before = fresh_bytes[destination]
         verified = rewrite_manifest_bytes(
             before,

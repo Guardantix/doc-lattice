@@ -311,7 +311,7 @@ def test_observe_selected_records_reports_failures_in_node_id_order(tmp_path: Pa
 
     with pytest.raises(ManifestError) as excinfo:
         sidecar_manifest.observe_manifest_records(
-            captured, source, root, ("z-missing", "a-missing")
+            captured, source, root, frozenset({"z-missing", "a-missing"})
         )
 
     assert "a-missing" in str(excinfo.value)

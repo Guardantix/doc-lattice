@@ -33,41 +33,42 @@ PYPROJECT_PATH = Path(__file__).parent.parent / "pyproject.toml"
 # it is spelled. `tests/test_script_conventions.py` holds the same manifest over `scripts/`.
 _CLOCK_SOURCES = {"datetime_utils.py": 1}
 
-# The complete imports each pure manifest orchestration module may reach. The allowlist is keyed
-# by source path because opening a boundary is an explicit edit, not something a filename earns.
-# In particular, only the pure snapshot surface of sidecar_manifest.py is admitted here.
-_PURE_MANIFEST_IMPORTS = {
-    "manifest_reconcile.py": {
-        "collections.abc": frozenset({"Mapping"}),
-        "dataclasses": frozenset({"dataclass"}),
-        "pathlib": frozenset({"Path"}),
-        "model": frozenset({"ExternalIdentity"}),
-        "reconcile": frozenset({"ReconcileDestinationPlan", "ReconcileKey", "ReconcilePlan"}),
-        "sidecar_manifest": frozenset({"ManifestRecordSnapshot", "parse_manifest_snapshot"}),
-        "sidecar_rewrite": frozenset({"rewrite_manifest_bytes"}),
-    }
-}
-_PURE_MANIFEST_CALLS = {
-    "manifest_reconcile.py": frozenset(
+# The complete imports and call names each pure manifest orchestration module may reach, as one
+# entry per module so the two halves cannot drift apart. The allowlist is keyed by source path
+# because opening a boundary is an explicit edit, not something a filename earns. In particular,
+# only the pure snapshot surface of sidecar_manifest.py is admitted here.
+_PURE_MANIFEST_MODULES: dict[str, tuple[dict[str, frozenset[str]], frozenset[tuple[str, str]]]] = {
+    "manifest_reconcile.py": (
         {
-            ("attribute", "append"),
-            ("attribute", "items"),
-            ("attribute", "setdefault"),
-            ("attribute", "values"),
-            ("name", "ManifestChange"),
-            ("name", "ManifestRewriteResult"),
-            ("name", "ValueError"),
-            ("name", "_changed_pairs"),
-            ("name", "_is_manifest_group"),
-            ("name", "_manifest_arguments"),
-            ("name", "any"),
-            ("name", "dataclass"),
-            ("name", "enumerate"),
-            ("name", "parse_manifest_snapshot"),
-            ("name", "rewrite_manifest_bytes"),
-            ("name", "tuple"),
-            ("name", "zip"),
-        }
+            "collections.abc": frozenset({"Mapping"}),
+            "dataclasses": frozenset({"dataclass"}),
+            "pathlib": frozenset({"Path"}),
+            "model": frozenset({"ExternalIdentity"}),
+            "reconcile": frozenset({"ReconcileDestinationPlan", "ReconcileKey", "ReconcilePlan"}),
+            "sidecar_manifest": frozenset({"ManifestRecordSnapshot", "parse_manifest_snapshot"}),
+            "sidecar_rewrite": frozenset({"rewrite_manifest_bytes"}),
+        },
+        frozenset(
+            {
+                ("attribute", "append"),
+                ("attribute", "items"),
+                ("attribute", "setdefault"),
+                ("attribute", "values"),
+                ("name", "ManifestChange"),
+                ("name", "ManifestRewriteResult"),
+                ("name", "ValueError"),
+                ("name", "_changed_pairs"),
+                ("name", "_is_manifest_group"),
+                ("name", "_manifest_arguments"),
+                ("name", "any"),
+                ("name", "dataclass"),
+                ("name", "enumerate"),
+                ("name", "parse_manifest_snapshot"),
+                ("name", "rewrite_manifest_bytes"),
+                ("name", "tuple"),
+                ("name", "zip"),
+            }
+        ),
     )
 }
 
@@ -124,11 +125,9 @@ def _manifest_purity_violations(
 
 def test_manifest_reconcile_layer_reaches_no_filesystem_boundary():
     """The orchestration module consumes observations and never gathers them itself."""
-    for relative_path, allowed_imports in _PURE_MANIFEST_IMPORTS.items():
+    for relative_path, (allowed_imports, allowed_calls) in _PURE_MANIFEST_MODULES.items():
         source = _source_text(relative_path)
-        violations = _manifest_purity_violations(
-            source, allowed_imports, _PURE_MANIFEST_CALLS[relative_path]
-        )
+        violations = _manifest_purity_violations(source, allowed_imports, allowed_calls)
         assert not violations, f"{relative_path}: {violations}"
 
 
@@ -149,11 +148,7 @@ def test_manifest_reconcile_layer_reaches_no_filesystem_boundary():
 def test_manifest_purity_detector_catches_boundary_reach(addition: str):
     """Positive controls keep each forbidden import and call shape observable."""
     source = _source_text("manifest_reconcile.py") + addition
-    assert _manifest_purity_violations(
-        source,
-        _PURE_MANIFEST_IMPORTS["manifest_reconcile.py"],
-        _PURE_MANIFEST_CALLS["manifest_reconcile.py"],
-    )
+    assert _manifest_purity_violations(source, *_PURE_MANIFEST_MODULES["manifest_reconcile.py"])
 
 
 def test_manifest_purity_detector_allows_pure_bytes_replacement():
@@ -162,11 +157,7 @@ def test_manifest_purity_detector_allows_pure_bytes_replacement():
         _source_text("manifest_reconcile.py")
         + "\ndef swap():\n    return b'a'.replace(b'a', b'b')\n"
     )
-    assert not _manifest_purity_violations(
-        source,
-        _PURE_MANIFEST_IMPORTS["manifest_reconcile.py"],
-        _PURE_MANIFEST_CALLS["manifest_reconcile.py"],
-    )
+    assert not _manifest_purity_violations(source, *_PURE_MANIFEST_MODULES["manifest_reconcile.py"])
 
 
 def _is_broad_except(handler: ast.ExceptHandler) -> bool:

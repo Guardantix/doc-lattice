@@ -138,6 +138,95 @@ def test_last_repeated_ref_alone_decides_the_result(seen: tuple[str, str], chang
     ] == [("a", "up", 0)]
 
 
+def _mismatched_destination_update() -> ReconcileUpdate:
+    identity = _identity("a", Path("/project/other.yml"))
+    return ReconcileUpdate(
+        "current",
+        DocumentOrigin(
+            identity.resolved_target, ExternalDeclaration("other.yml", 0, "docs/a.md"), identity
+        ),
+    )
+
+
+def _conflicting_declaration_update() -> ReconcileUpdate:
+    identity = _identity("b")
+    return ReconcileUpdate(
+        "current",
+        DocumentOrigin(
+            identity.resolved_target, ExternalDeclaration("./nodes.yml", 1, "docs/b.md"), identity
+        ),
+    )
+
+
+def _conflicting_identity_update() -> ReconcileUpdate:
+    return ReconcileUpdate(
+        "current",
+        DocumentOrigin(
+            Path("/project/docs/a.md"),
+            ExternalDeclaration("nodes.yml", 0, "docs/a.md"),
+            ExternalIdentity("docs/a.md", Path("/project/docs/elsewhere.md"), _DESTINATION),
+        ),
+    )
+
+
+@pytest.mark.parametrize(
+    ("group", "match"),
+    [
+        pytest.param(
+            {
+                ("a", "up"): _external_update("a", 0, "current"),
+                ("inline", "up"): ReconcileUpdate("current", DocumentOrigin(_DESTINATION)),
+            },
+            "require external identity evidence",
+            id="inline-member",
+        ),
+        pytest.param(
+            {("a", "up"): _mismatched_destination_update()},
+            "does not match its resolved destination",
+            id="foreign-destination",
+        ),
+        pytest.param(
+            {
+                ("a", "up"): _external_update("a", 0, "current"),
+                ("b", "up"): _conflicting_declaration_update(),
+            },
+            "conflicting manifest declarations",
+            id="two-spellings",
+        ),
+        pytest.param(
+            {
+                ("a", "one"): _external_update("a", 0, "current"),
+                ("a", "two"): _conflicting_identity_update(),
+            },
+            "carries conflicting identities",
+            id="two-identities",
+        ),
+    ],
+)
+def test_incoherent_manifest_group_is_a_caller_contract_refusal(
+    group: dict[tuple[str, str], ReconcileUpdate], match: str
+):
+    before = _manifest(("a", (("up", "current"),)))
+
+    with pytest.raises(ValueError, match=match):
+        plan_manifest_rewrites(
+            {_DESTINATION: group},
+            fresh_bytes={_DESTINATION: before},
+            observations={_DESTINATION: {"a": _identity("a")}},
+        )
+
+
+@pytest.mark.parametrize("missing", ["fresh_bytes", "observations"])
+def test_manifest_group_without_a_capture_is_refused_before_rewriting(missing: str):
+    before = _manifest(("a", (("up", "old"),)))
+    plan = {_DESTINATION: {("a", "up"): _external_update("a", 0, "current")}}
+    fresh_bytes = {} if missing == "fresh_bytes" else {_DESTINATION: before}
+    observations = {} if missing == "observations" else {_DESTINATION: {"a": _identity("a")}}
+
+    with pytest.raises(ValueError, match="lacks a fresh capture or observation"):
+        plan_manifest_rewrites(plan, fresh_bytes=fresh_bytes, observations=observations)
+
+
 def test_repointed_fresh_observation_refuses_the_manifest_result():
     before = _manifest(("a", (("up", "old"),)))
     plan = {_DESTINATION: {("a", "up"): _external_update("a", 0, "current")}}
