@@ -15,7 +15,7 @@ Every path resolves against the project root, never against the manifest or the 
 directory, so moving a manifest never re-points its records (AD-51).
 """
 
-from collections.abc import Mapping, Sequence
+from collections.abc import Iterator, Mapping, Sequence
 from collections.abc import Set as AbstractSet
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath, PureWindowsPath
@@ -216,39 +216,41 @@ def parse_manifest_snapshot(source_bytes: bytes, source: str) -> tuple[ManifestR
     return tuple(records)
 
 
-def selected_record_positions(
+def iter_selected_record_positions(
     records: Sequence[ManifestRecordSnapshot], selected_ids: AbstractSet[str]
-) -> dict[str, int]:
-    """Locate each selected id at exactly one record position.
+) -> Iterator[tuple[str, int]]:
+    """Yield each selected id with its unique record position, in lexical id order.
 
     Position is never identity: a selected id that the manifest repeats is refused rather than
-    resolved by order, and a missing one is refused rather than skipped.
+    resolved by order, and a missing one is refused rather than skipped. Each id is validated
+    as it is yielded rather than up front, so a caller that checks further evidence per id in
+    the same loop reports whichever failure belongs to the lexically first id, whatever its
+    kind. Validating every id first would name a later missing id ahead of an earlier id whose
+    caller-side check fails.
 
     Args:
         records: The manifest's parsed records in sequence order.
         selected_ids: Node ids the caller acts on. A set rather than any collection, so a bare
             string cannot be iterated as its characters.
 
-    Returns:
-        Each selected id's record position, in lexical id order, so an unordered set produces
-        a deterministic result and a deterministic diagnostic.
+    Yields:
+        Each selected id and its record position, in lexical id order, so an unordered set
+        produces a deterministic result and a deterministic diagnostic.
 
     Raises:
-        ManifestError: If a selected id is missing or repeated, naming the lexically first one.
+        ManifestError: If a selected id is missing or repeated.
     """
     positions: dict[str, list[int]] = {}
     for position, record in enumerate(records):
         if record.meta.id in selected_ids:
             positions.setdefault(record.meta.id, []).append(position)
-    selected: dict[str, int] = {}
     for node_id in sorted(selected_ids):
         matches = positions.get(node_id, [])
         if not matches:
             raise ManifestError(f"selected manifest record {node_id!r} is missing")
         if len(matches) != 1:
             raise ManifestError(f"selected manifest record {node_id!r} is duplicated")
-        selected[node_id] = matches[0]
-    return selected
+        yield node_id, matches[0]
 
 
 def observe_manifest_records(
@@ -267,8 +269,9 @@ def observe_manifest_records(
         source_bytes: Exact bytes captured from the manifest.
         source: The manifest's freshly resolved declared and physical paths.
         project_root: The root selected record paths resolve against.
-        selected_ids: Node ids whose fresh identities the caller needs. Failures are reported
-            in lexical node-id order so an unordered set produces deterministic diagnostics.
+        selected_ids: Node ids whose fresh identities the caller needs. Failures of every kind
+            are reported in lexical node-id order, so an unordered set produces deterministic
+            diagnostics and an earlier unresolvable target outranks a later missing id.
 
     Returns:
         Fresh external identities keyed by selected node id.
@@ -279,7 +282,7 @@ def observe_manifest_records(
     """
     records = parse_manifest_snapshot(source_bytes, source.declared)
     observed: dict[str, ExternalIdentity] = {}
-    for node_id, position in selected_record_positions(records, selected_ids).items():
+    for node_id, position in iter_selected_record_positions(records, selected_ids):
         record = records[position]
         where = format_record_location(source.declared, position, record.declared_path)
         target = _resolve_regular_file(

@@ -211,6 +211,14 @@ def test_missing_identity_evidence_refuses(missing: str):
         _rewrite(before, {("a", "up"): "new"}, expected=expected, observed=observed)
 
 
+def test_refusals_are_ordered_by_node_id_across_failure_kinds():
+    """An earlier id lacking evidence is named before a later id the manifest lacks."""
+    before = b"nodes:\n  - path: docs/a.md\n    meta: {id: a, derives_from: [{ref: up}]}\n"
+    updates = {("a", "up"): "new", ("z", "up"): "new"}
+    with pytest.raises(ManifestError, match="'a' lacks identity evidence"):
+        _rewrite(before, updates, expected={}, observed={})
+
+
 @pytest.mark.parametrize("corruption", ["unselected", "order"])
 def test_whole_after_image_rejects_an_unselected_change_or_reorder(
     monkeypatch: pytest.MonkeyPatch, corruption: str

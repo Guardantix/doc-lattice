@@ -16,8 +16,8 @@ from .model import ExternalIdentity
 from .path_utils import format_path_for_display
 from .sidecar_manifest import (
     ManifestRecordSnapshot,
+    iter_selected_record_positions,
     parse_manifest_snapshot,
-    selected_record_positions,
 )
 from .text_utils import uniform_line_ending
 
@@ -76,9 +76,14 @@ def _selected_positions(
     observed: Mapping[str, ExternalIdentity],
     updates: Mapping[tuple[str, str], str],
 ) -> dict[str, int]:
-    """Locate each selected id uniquely and bind it to load-time and fresh path evidence."""
-    selected = selected_record_positions(records, {node_id for node_id, _ in updates})
-    for node_id, position in selected.items():
+    """Locate each selected id uniquely and bind it to load-time and fresh path evidence.
+
+    Every refusal is reported in lexical node-id order, whatever its kind, because each id is
+    located and checked in one pass.
+    """
+    selected: dict[str, int] = {}
+    selected_ids = {node_id for node_id, _ in updates}
+    for node_id, position in iter_selected_record_positions(records, selected_ids):
         load_identity = expected.get(node_id)
         fresh_identity = observed.get(node_id)
         if load_identity is None or fresh_identity is None:
@@ -91,6 +96,7 @@ def _selected_positions(
             or load_identity.resolved_manifest != fresh_identity.resolved_manifest
         ):
             raise ManifestError(f"selected manifest record {node_id!r} was repointed")
+        selected[node_id] = position
     return selected
 
 

@@ -318,6 +318,22 @@ def test_observe_selected_records_reports_failures_in_node_id_order(tmp_path: Pa
     assert "z-missing" not in str(excinfo.value)
 
 
+def test_observe_selected_records_orders_an_unresolvable_target_before_a_later_missing_id(
+    tmp_path: Path,
+):
+    """Lexical order holds across failure kinds, not only among missing ids."""
+    root = _project(tmp_path)
+    source = ManifestSource(_MANIFEST, (root / _MANIFEST).resolve())
+    captured = b"nodes:\n  - path: skills/gone.md\n    meta: {id: a-gone}\n"
+
+    with pytest.raises(ManifestError, match=r"skills/gone.md.*does not exist") as excinfo:
+        sidecar_manifest.observe_manifest_records(
+            captured, source, root, frozenset({"z-missing", "a-gone"})
+        )
+
+    assert "z-missing" not in str(excinfo.value)
+
+
 def test_observe_selected_records_refuses_a_duplicated_selected_id(tmp_path: Path):
     root = _project(tmp_path)
     source = ManifestSource(_MANIFEST, (root / _MANIFEST).resolve())
