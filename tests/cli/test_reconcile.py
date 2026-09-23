@@ -21,7 +21,10 @@ from doc_lattice.cli import app
 from doc_lattice.cli.commands.reconcile import _recovery_json_payload
 from doc_lattice.constants import RECONCILE_JOURNAL_NAME, RECONCILE_JOURNAL_VERSION
 from doc_lattice.error_types import ReconcilePersistenceError
+from doc_lattice.manifest_reconcile import ManifestChange, ManifestRewriteResult
+from doc_lattice.model import DocumentOrigin
 from doc_lattice.path_utils import format_path_for_display
+from doc_lattice.reconcile import ReconcileUpdate
 from doc_lattice.reconcile_transaction import (
     JournalEntry,
     JournalProvenance,
@@ -42,6 +45,28 @@ _SRC = Path(__file__).resolve().parents[2] / "src"
 # destination's name, so a hostile document filename propagates into the transaction's own
 # artifact paths and back out through recovery reporting.
 _HOSTILE_DOC_NAME = "pwn\x1b[31m\x1b[Aevil.md"
+
+
+def _origin_suffix(node_id: str, markdown: Path, index: int, declared: str) -> str:
+    """The human suffix locating an external downstream's record in the ``nodes.yml`` manifest."""
+    return (
+        f"; origins: {node_id!r}: {format_path_for_display(markdown)} "
+        f"(record nodes[{index}] (path {declared!r}) in manifest 'nodes.yml')"
+    )
+
+
+def _origins_entry(node_id: str, markdown: Path, index: int, declared: str) -> dict:
+    """The JSON ``origins`` mapping locating that same record."""
+    return {
+        "origins": {
+            node_id: {
+                "markdown_path": str(markdown),
+                "manifest_path": "nodes.yml",
+                "record_index": index,
+                "declared_path": declared,
+            }
+        }
+    }
 
 
 def _sidecar_reconcile_project(root: Path, *, external_seen="old", upstream_only=False):
@@ -109,19 +134,29 @@ def test_external_update_reconciles_through_its_manifest_in_a_mixed_batch(  # no
     assert result.exit_code == 0, (result.stdout, result.stderr, result.exception)
     rule = sha256(b"# Rule\nupstream").hexdigest()[:32]
     external = sha256(b"# Skill\nbody").hexdigest()[:32]
+    # Only the changed downstream is located. a-inline depends on the external z-external, and
+    # its records still carry no origins: an upstream's manifest is never the one written.
+    skill = project / "skills/skill.md"
+    location = ("z-external", skill, 0, "./skills/skill.md")
     if fmt == "json":
         assert json.loads(result.stdout) == {
             "dry_run": dry_run,
             "reconciled": [
                 {"path": str(project / "docs/down.md"), "ref": "up#rule", "new_seen": rule},
                 {"path": str(project / "docs/down.md"), "ref": "z-external", "new_seen": external},
-                {"path": str(project / "skills/skill.md"), "ref": "up#rule", "new_seen": rule},
+                {
+                    "path": str(skill),
+                    "ref": "up#rule",
+                    "new_seen": rule,
+                    **_origins_entry(*location),
+                },
             ],
         }
     else:
         verb = "would reconcile" if dry_run else "reconciled"
         assert result.stdout == (
-            f"{verb} 'down.md': up#rule\n{verb} 'down.md': z-external\n{verb} 'skill.md': up#rule\n"
+            f"{verb} 'down.md': up#rule\n{verb} 'down.md': z-external\n"
+            f"{verb} 'skill.md': up#rule{_origin_suffix(*location)}\n"
         )
     after = _tree_snapshot(project)
     if dry_run:
@@ -417,6 +452,12 @@ def _skills_project(
     (root / "nodes.yml").write_bytes(_skills_manifest(seen, order))
 
 
+def _skill_location(project: Path, node_id: str, index: int) -> tuple[str, Path, int, str]:
+    """One ``_skills_project`` node at a manifest position, as the origin helpers take it."""
+    declared = f"skills/{node_id.removeprefix('skill-')}.md"
+    return node_id, project / declared, index, declared
+
+
 def _actual_seen(source_id: str, target_ref: str = _FRESHNESS) -> str:
     """The hash ``check`` reports for one edge, read from the current working directory."""
     checked = runner.invoke(app, ["check", "--format", "json"])
@@ -472,7 +513,8 @@ def test_reconcile_clears_a_stale_external_skill_without_touching_its_markdown(
     result = runner.invoke(app, ["reconcile", "skill-a"])
 
     assert result.exit_code == 0, (result.stdout, result.stderr, result.exception)
-    assert result.stdout == f"reconciled 'a.md': {_FRESHNESS}\n"
+    suffix = _origin_suffix(*_skill_location(project, "skill-a", 0))
+    assert result.stdout == f"reconciled 'a.md': {_FRESHNESS}{suffix}\n"
     assert runner.invoke(app, ["check"]).exit_code == 0
     assert (project / "skills/a.md").read_bytes() == skill_before
     # Byte local: only the seen scalar changed, so the comments and layout survive verbatim.
@@ -481,21 +523,27 @@ def test_reconcile_clears_a_stale_external_skill_without_touching_its_markdown(
 
 @pytest.mark.parametrize("dry_run", [False, True], ids=["write", "dry-run"])
 @pytest.mark.parametrize("fmt", ["human", "json"])
-@pytest.mark.parametrize("raced", [False, True], ids=["both-change", "one-current"])
+@pytest.mark.parametrize(
+    "race", [None, "reorder", "acknowledge"], ids=["both-change", "reordered", "one-current"]
+)
 def test_shared_manifest_reports_exactly_the_nodes_its_one_rewrite_changed(
-    tmp_path, monkeypatch, dry_run, fmt, raced
+    tmp_path, monkeypatch, dry_run, fmt, race
 ):
     # Two selected nodes share a manifest and a ref. Racing, another writer reorders the records
-    # and acknowledges skill-a between load and fresh read, so only skill-b changes; otherwise
-    # both change, and each is named by its own Markdown rather than by the first node's.
+    # between load and fresh read, and may acknowledge skill-a as well, so only skill-b changes.
+    # Each changed node is named by its own Markdown rather than by the first node's, and is
+    # located at the record index the rewrite found, never the load-time one.
     project = tmp_path / "repo"
     _skills_project(project, {"skill-a": "old", "skill-b": "old"})
     monkeypatch.chdir(project)
     actual = _actual_seen("skill-a")
     manifest = project / "nodes.yml"
-    order = ("skill-b", "skill-a") if raced else ("skill-a", "skill-b")
-    captured = _skills_manifest({"skill-a": actual if raced else "old", "skill-b": "old"}, order)
-    if raced:
+    order = ("skill-a", "skill-b") if race is None else ("skill-b", "skill-a")
+    acknowledged = race == "acknowledge"
+    captured = _skills_manifest(
+        {"skill-a": actual if acknowledged else "old", "skill-b": "old"}, order
+    )
+    if race is not None:
         _race_before_capture(monkeypatch, lambda: manifest.write_bytes(captured))
     produced = _record_manifest_rewrites(monkeypatch)
     committed = _record_committed_destinations(monkeypatch)
@@ -504,23 +552,25 @@ def test_shared_manifest_reports_exactly_the_nodes_its_one_rewrite_changed(
     result = runner.invoke(app, argv)
 
     assert result.exit_code == 0, (result.stdout, result.stderr, result.exception)
-    letters = "b" if raced else "ab"
+    # In fresh record order, which is the order human output reports a manifest's nodes in.
+    changed = [
+        _skill_location(project, node_id, index)
+        for index, node_id in enumerate(order)
+        if not (acknowledged and node_id == "skill-a")
+    ]
     if fmt == "json":
+        records = [
+            {"path": str(loc[1]), "ref": _FRESHNESS, "new_seen": actual, **_origins_entry(*loc)}
+            for loc in changed
+        ]
         assert json.loads(result.stdout) == {
             "dry_run": dry_run,
-            "reconciled": [
-                {
-                    "path": str(project / f"skills/{letter}.md"),
-                    "ref": _FRESHNESS,
-                    "new_seen": actual,
-                }
-                for letter in letters
-            ],
+            "reconciled": sorted(records, key=lambda record: record["path"]),
         }
     else:
         verb = "would reconcile" if dry_run else "reconciled"
         assert result.stdout == "".join(
-            f"{verb} '{letter}.md': {_FRESHNESS}\n" for letter in letters
+            f"{verb} '{loc[1].name}': {_FRESHNESS}{_origin_suffix(*loc)}\n" for loc in changed
         )
     assert produced == [manifest.resolve()]
     if dry_run:
@@ -531,6 +581,63 @@ def test_shared_manifest_reports_exactly_the_nodes_its_one_rewrite_changed(
         assert manifest.read_bytes() == _skills_manifest(
             {"skill-a": actual, "skill-b": actual}, order
         )
+
+
+@pytest.mark.parametrize("dry_run", [False, True], ids=["write", "dry-run"])
+@pytest.mark.parametrize("fmt", ["human", "json"])
+def test_external_documents_sharing_a_basename_keep_one_whole_line_each(
+    tmp_path, monkeypatch, dry_run, fmt
+):
+    # Both documents display as 'SKILL.md', so only the origin suffix tells their lines apart; one
+    # sits under a bracket-bearing directory that must reach the terminal as text, not markup,
+    # and a 20-column console must still leave each record on a single line.
+    project = tmp_path / "repo"
+    (project / "docs").mkdir(parents=True)
+    (project / ".doc-lattice.yml").write_text("lattice_format: 2\nsidecar_manifests: [nodes.yml]\n")
+    (project / "docs/decision.md").write_text(_DECISION.format(age="one day"))
+    declared = {"skill-one": "skills/one/SKILL.md", "skill-two": "skills/[two]/SKILL.md"}
+    for path in declared.values():
+        (project / path).parent.mkdir(parents=True)
+        (project / path).write_text("---\nname: skill\n---\n# Skill\n")
+    (project / "nodes.yml").write_text(
+        json.dumps(
+            {
+                "nodes": [
+                    {
+                        "path": path,
+                        "meta": {"id": node_id, "derives_from": [{"ref": _FRESHNESS}]},
+                    }
+                    for node_id, path in declared.items()
+                ]
+            }
+        )
+    )
+    monkeypatch.chdir(project)
+    actual = _actual_seen("skill-one")
+    monkeypatch.setenv("COLUMNS", "20")
+    argv = ["reconcile", "--all", "--format", fmt, *(["--dry-run"] if dry_run else [])]
+
+    result = runner.invoke(app, argv)
+
+    assert result.exit_code == 0, (result.stdout, result.stderr, result.exception)
+    located = [
+        (node_id, project / path, index, path)
+        for index, (node_id, path) in enumerate(declared.items())
+    ]
+    if fmt == "json":
+        records = [
+            {"path": str(loc[1]), "ref": _FRESHNESS, "new_seen": actual, **_origins_entry(*loc)}
+            for loc in located
+        ]
+        assert json.loads(result.stdout) == {
+            "dry_run": dry_run,
+            "reconciled": sorted(records, key=lambda record: record["path"]),
+        }
+        return
+    verb = "would reconcile" if dry_run else "reconciled"
+    assert result.stdout == "".join(
+        f"{verb} 'SKILL.md': {_FRESHNESS}{_origin_suffix(*loc)}\n" for loc in located
+    )
 
 
 @pytest.mark.parametrize("dry_run", [False, True], ids=["write", "dry-run"])
@@ -691,10 +798,12 @@ def test_manifest_edit_before_the_fresh_read_is_located_by_identity(
     result = runner.invoke(app, argv)
 
     if refusal is None:
-        # Position is never identity, so a harmless reorder still finds skill-a's record.
+        # Position is never identity, so a harmless reorder still finds skill-a's record, and
+        # the output locates it where the reorder moved it.
         assert result.exit_code == 0, (result.stdout, result.stderr, result.exception)
         verb = "would reconcile" if dry_run else "reconciled"
-        assert result.stdout == f"{verb} 'a.md': {_FRESHNESS}\n"
+        suffix = _origin_suffix(*_skill_location(project, "skill-a", 1))
+        assert result.stdout == f"{verb} 'a.md': {_FRESHNESS}{suffix}\n"
         expected = raced
         if not dry_run:
             expected = _skills_manifest({**both, "skill-a": actual}, ("skill-b", "skill-a"))
@@ -2051,6 +2160,58 @@ def test_reconcile_human_output_sorts_refs_independent_of_declaration_order(
     )
 
 
+# Inline-only fixture whose node-id order and path order disagree, so the literal pins which
+# one each format sorts by, and whose bracket-bearing name pins the human escaping.
+_INLINE_COMPAT_DOCS = {
+    "up.md": "---\nid: up\n---\n# A {#a}\nalpha\n# B {#b}\nbeta\n",
+    "z-down.md": (
+        "---\nid: a-down\nderives_from:\n  - ref: up#b\n    seen: old\n  - ref: up#a\n---\n# Z\n"
+    ),
+    "[x]-down.md": "---\nid: zz-bracket\nderives_from:\n  - ref: up\n    seen: old\n---\n# X\n",
+}
+# The content hashes 7.3.0 reported for the fixture's three refs.
+_COMPAT_UP = "ef831cf93c5d9b1013aae3921c506f4e"  # pragma: allowlist secret
+_COMPAT_UP_A = "5d1b246525f1b02d8f6a8dc450a56aec"  # pragma: allowlist secret
+_COMPAT_UP_B = "923aed0395877642fccd18d5ec0c1dc8"  # pragma: allowlist secret
+
+
+@pytest.mark.parametrize("dry_run", [False, True], ids=["write", "dry-run"])
+@pytest.mark.parametrize("fmt", ["human", "json"])
+def test_inline_only_output_is_byte_identical_to_7_3_0(tmp_path: Path, monkeypatch, fmt, dry_run):
+    # The expected bytes are doc-lattice 7.3.0's own stdout on this fixture, captured literally:
+    # a test that parses the payload cannot notice a change in spacing, key order, or ordering.
+    docs = tmp_path / "docs"
+    docs.mkdir()
+    for name, text in _INLINE_COMPAT_DOCS.items():
+        (docs / name).write_text(text)
+    monkeypatch.chdir(tmp_path)
+    argv = ["reconcile", "--all", "--format", fmt, *(["--dry-run"] if dry_run else [])]
+
+    result = runner.invoke(app, argv)
+
+    assert result.exit_code == 0, (result.stdout, result.stderr, result.exception)
+    if fmt == "human":
+        verb = "would reconcile" if dry_run else "reconciled"
+        expected = f"{verb} 'z-down.md': up#a\n{verb} 'z-down.md': up#b\n{verb} '[x]-down.md': up\n"
+        all_clear = "nothing to reconcile\n"
+    else:
+        x_down, z_down = (json.dumps(str(docs / name)) for name in ("[x]-down.md", "z-down.md"))
+        expected = (
+            f'{{"dry_run": {json.dumps(dry_run)}, "reconciled": ['
+            f'{{"path": {x_down}, "ref": "up", "new_seen": "{_COMPAT_UP}"}}, '
+            f'{{"path": {z_down}, "ref": "up#a", "new_seen": "{_COMPAT_UP_A}"}}, '
+            f'{{"path": {z_down}, "ref": "up#b", "new_seen": "{_COMPAT_UP_B}"}}'
+            "]}\n"
+        )
+        all_clear = f'{{"dry_run": {json.dumps(dry_run)}, "reconciled": []}}\n'
+    assert result.stdout == expected
+    if dry_run:
+        assert runner.invoke(app, ["reconcile", "--all"]).exit_code == 0
+    cleared = runner.invoke(app, argv)
+    assert cleared.exit_code == 0
+    assert cleared.stdout == all_clear
+
+
 def test_reconcile_keeps_every_record_on_one_line_at_any_width(lattice_dir: Path, monkeypatch):
     # Same one-record-per-line contract the impact, check, lint, and stale-shipped renderers
     # already carry: a document name or target ref that survives a pipe today must stay intact
@@ -2260,6 +2421,15 @@ def test_cli_forces_require_verified_only_for_reconcile(
     env = {"XDG_CACHE_HOME": str(tmp_path / "xdg"), "NO_COLOR": "1"}
     _run(args, lattice_dir, env)
     assert (seen["require_verified"], seen["persist_cache"]) == expected
+
+
+def test_located_changes_refuses_a_changed_pair_without_an_external_declaration():
+    # plan_manifest_rewrites already refuses such a group, so this is a caller contract.
+    result = ManifestRewriteResult(Path("nodes.yml"), b"", b"", (ManifestChange("a", "up", 0),))
+    group = {("a", "up"): ReconcileUpdate("new", DocumentOrigin(Path("a.md")))}
+
+    with pytest.raises(ValueError, match="requires an external declaration"):
+        reconcile_command._located_changes(result, group)
 
 
 # --- Journal selector construction (GTX-126) --------------------------------------------------

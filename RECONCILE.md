@@ -46,7 +46,8 @@ loading the lattice.
 
 Combine a safe dry-run with `--format json` for a machine-readable plan:
 `{"dry_run": true, "reconciled": [{"path": ..., "ref": ..., "new_seen": ...}]}`, sorted by path
-then ref. A real run with `--format json` emits the same shape with `"dry_run": false`, after the
+then ref. A record for an external downstream also carries an `origins` mapping, as
+[External downstreams](#external-downstreams) describes. A real run with `--format json` emits the same shape with `"dry_run": false`, after the
 durable commit, artifact cleanup, and lock release complete. Failed real batches emit no human
 `reconciled` lines and no JSON success payload. A source conflict names the changed destination and
 says whether rollback completed; an I/O or durability failure names the failed operation and says
@@ -117,6 +118,29 @@ to `--dry-run` as well. Output names each changed node by its own Markdown path,
 node and ref, and names only the nodes whose edges actually changed: a node another writer
 acknowledged before the fresh read is not reported, even when it shares its manifest and ref with
 one that is.
+
+Each record for an external downstream also locates the manifest record it acknowledged. The
+human line is the inline one with the origin suffix findings use appended, naming the node id, its
+Markdown path, the zero-based record position, its declared path, and the manifest:
+
+```text
+reconciled 'a.md': decision#freshness; origins: 'skill-a': '/repo/skills/a.md' (record nodes[1] (path 'skills/a.md') in manifest 'nodes.yml')
+```
+
+The JSON record keeps `path` as the Markdown location and adds the `origins` mapping findings
+carry, keyed by the node id:
+
+```json
+{"path": "/repo/skills/a.md", "ref": "decision#freshness", "new_seen": "...", "origins": {"skill-a": {"markdown_path": "/repo/skills/a.md", "manifest_path": "nodes.yml", "record_index": 1, "declared_path": "skills/a.md"}}}
+```
+
+The changed downstream is the only participant located. An upstream's origin is never reported,
+even when the upstream is external: the output locates the acknowledgement being written, and an
+upstream's manifest is not rewritten. So a record for an inline downstream carries no suffix and no
+`origins` key, including one that depends on an external upstream, and inline-only output is
+unchanged. The position is the one the fresh read located the record at, never the load-time one,
+so a record another writer moved before the fresh read is reported where it now is. Both formats
+and `--dry-run` share that located origin, and nothing rereads the manifest after the commit.
 
 ## Automatic recovery
 

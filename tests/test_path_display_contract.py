@@ -73,7 +73,14 @@ from doc_lattice.error_types import (
 )
 from doc_lattice.frontmatter_parser import parse_meta, split_frontmatter_parts
 from doc_lattice.loader import build_lattice
-from doc_lattice.model import DocumentOrigin, Node, NodeMeta, ParsedDoc, RawEdge
+from doc_lattice.model import (
+    DocumentOrigin,
+    ExternalDeclaration,
+    Node,
+    NodeMeta,
+    ParsedDoc,
+    RawEdge,
+)
 from doc_lattice.path_utils import format_path_for_display
 from doc_lattice.reconcile_transaction import (
     JournalEntry,
@@ -300,9 +307,22 @@ class TestDirectConsoleWriteSinks:
         path = tmp_path / HOSTILE
         output = StringIO()
         runtime = _runtime(output, StringIO(), tmp_path)
-        _print_reconcile_lines(runtime, path, frozenset({"a#x"}), dry_run=False)
+        _print_reconcile_lines(runtime, path, frozenset({"a#x"}), origins={}, dry_run=False)
         # The adapter prints the basename, so that is the path this sink is asserted against.
         _assert_displayed(output.getvalue(), Path(path.name))
+
+    def test_reconcile_success_line_origin_suffix(self, tmp_path: Path):
+        # An external downstream's suffix names its full Markdown path, its declared path, and
+        # its manifest, all three of them repo-controlled.
+        path = tmp_path / HOSTILE
+        output = StringIO()
+        runtime = _runtime(output, StringIO(), tmp_path)
+        origin = DocumentOrigin(path, ExternalDeclaration(HOSTILE, 0, HOSTILE))
+        _print_reconcile_lines(
+            runtime, path, frozenset({"a#x"}), origins={"node": origin}, dry_run=False
+        )
+        _assert_displayed(output.getvalue(), path)
+        _assert_displayed(output.getvalue(), HOSTILE)
 
     def test_unattachable_annotation_warning(self, tmp_path: Path):
         outside = tmp_path / "outside" / HOSTILE

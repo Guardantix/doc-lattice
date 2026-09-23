@@ -37,7 +37,10 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   refuses, and a mixed-line-ending manifest allows a valid no-op but refuses an actual rewrite.
   An `AMBIGUOUS` edge now refuses the run whichever order selection reaches it in, and output
   names only the nodes a shared manifest's rewrite actually changed, each by its own Markdown
-  path. [RECONCILE.md](RECONCILE.md#external-downstreams) owns the contract, and
+  path. Each of those records also locates the changed node's manifest record at the position the
+  rewrite found it: the human line appends the origin suffix findings use, and the JSON record adds
+  an `origins` mapping keyed by the node id, in real runs and under `--dry-run` alike. An upstream
+  is never located, and inline-only output is byte-identical to 7.3.0. [RECONCILE.md](RECONCILE.md#external-downstreams) owns the contract, and
   [AD-30](ARCHITECTURE.md#ad-30-only-gate-verified-bytes-may-reach-a-reconcile-destination)
   records the manifest producer the provenance guard admits.
 
