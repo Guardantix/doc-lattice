@@ -125,7 +125,7 @@ def enforce_coverage(
     for entry in selected:
         candidate = project_root / entry.path
         try:
-            target = safe_resolve(candidate, project_root)
+            target = safe_resolve(candidate, resolved_root=selection.resolved_root)
             mode = target.stat().st_mode
         except (ValueError, OSError) as exc:
             problems.append(

@@ -64,6 +64,19 @@ def test_selection_retains_aliases_and_sorted_unique_selectors(tmp_path):
     assert select_link_sources(tmp_path, ["*.md"]) == [tmp_path / "a.md"]
 
 
+def test_selection_returns_resolved_root_for_symlinked_project(tmp_path):
+    project = tmp_path / "project"
+    project.mkdir()
+    (project / "covered.md").write_text("# Covered\n")
+    alias = tmp_path / "alias"
+    alias.symlink_to(project, target_is_directory=True)
+
+    result = select_paths(alias, ["*.md"], policy=_COVERAGE)
+
+    assert result.resolved_root == project
+    assert result.paths == (SelectedPath("covered.md", ("*.md",)),)
+
+
 @pytest.mark.parametrize("selectors", [["*.md", "missing.md"], ["missing.md", "*.md"]])
 def test_a_matching_selector_cannot_hide_an_empty_one(tmp_path, selectors):
     (tmp_path / "covered.md").write_text("# Covered\n")

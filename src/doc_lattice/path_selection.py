@@ -142,10 +142,11 @@ def selection_refusal_message(
 
 @dataclass(frozen=True, slots=True)
 class SelectionResult:
-    """Selected paths and collectable traversal or unmatched-selector refusals."""
+    """Selected paths, refusals, and the canonical root used for the walk."""
 
     paths: tuple[SelectedPath, ...]
     refusals: tuple[SelectionRefusal, ...]
+    resolved_root: Path
 
 
 @dataclass(frozen=True, slots=True)
@@ -201,7 +202,8 @@ def select_paths(
             selected.
 
     Returns:
-        Matched spellings and collected refusals in project-relative order.
+        Matched spellings and collected refusals in project-relative order, with the resolved
+        root used for selection.
 
     Raises:
         ValueError: Carrying a ``SelectionRefusal`` when a selector is invalid, an uncollected
@@ -244,6 +246,7 @@ def select_paths(
                 key=lambda refusal: (refusal.spelling, refusal.kind, refusal.selector or ""),
             )
         ),
+        root,
     )
 
 

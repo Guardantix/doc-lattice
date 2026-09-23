@@ -62,6 +62,52 @@ def test_safe_resolve_default_root_rejects_escape(tmp_path, monkeypatch):
         safe_resolve("../escape.txt")
 
 
+@pytest.mark.parametrize(
+    "case",
+    [
+        "within",
+        "root",
+        "missing",
+        "parent_escape",
+        "absolute_escape",
+        "symlink_escape",
+        "relative_within",
+        "relative_escape",
+    ],
+)
+def test_pre_resolved_root_matches_plain_form(tmp_path, monkeypatch, case):
+    root = tmp_path / "project"
+    root.mkdir()
+    inside = root / "inside.md"
+    inside.write_text("# Inside\n")
+    outside = tmp_path / "outside.md"
+    outside.write_text("# Outside\n")
+    link = root / "escape.md"
+    link.symlink_to(outside)
+    monkeypatch.chdir(tmp_path)
+    candidate = {
+        "within": inside,
+        "root": root,
+        "missing": root / "missing.md",
+        "parent_escape": root / ".." / "outside.md",
+        "absolute_escape": outside,
+        "symlink_escape": link,
+        "relative_within": Path("project/inside.md"),
+        "relative_escape": Path("outside.md"),
+    }[case]
+
+    if case in {"within", "root", "missing", "relative_within"}:
+        expected = candidate.resolve()
+        assert safe_resolve(candidate, root=root) == expected
+        assert safe_resolve(candidate, resolved_root=root.resolve()) == expected
+    else:
+        with pytest.raises(ValueError, match="outside") as plain:
+            safe_resolve(candidate, root=root)
+        with pytest.raises(ValueError, match="outside") as pre_resolved:
+            safe_resolve(candidate, resolved_root=root.resolve())
+        assert str(pre_resolved.value) == str(plain.value)
+
+
 class TestFormatPathForDisplay:
     """The display spelling is exactly ``repr(str(path))`` on the active interpreter."""
 
