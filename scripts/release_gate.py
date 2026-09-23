@@ -51,8 +51,8 @@ _VERSION_PATH = "src/doc_lattice/__init__.py"
 _VERSION_ASSIGNMENT = re.compile(r'^__version__ = "([^"]+)"$', re.MULTILINE)
 _ATTEMPT_PATH = ".release-attempt"
 _ATTEMPT_TOKEN = re.compile(r"(?P<version>\d+\.\d+\.\d+)[ \t]+(?P<attempt>[A-Za-z0-9._-]+)")
-_CHANGELOG_PATH = "CHANGELOG.md"
-_UNRELEASED_HEADING = "Unreleased"
+CHANGELOG_PATH = "CHANGELOG.md"
+UNRELEASED_HEADING = "Unreleased"
 
 
 class GateError(RuntimeError):
@@ -71,15 +71,46 @@ def _resolve_commit(ref: str) -> str:
     return _git("rev-parse", "--verify", f"{ref}^{{commit}}").stdout.strip()
 
 
-def _source_at(ref: str, path: str) -> str | None:
+def source_at(ref: str, path: str) -> str | None:
+    """Return one repository path's text at a Git ref.
+
+    Args:
+        ref: The commit-ish to read from.
+        path: The repository-relative path to read.
+
+    Returns:
+        The file's text, or None when the ref does not carry that path.
+
+    Raises:
+        GateError: If Git fails, including when the ref does not resolve.
+    """
     listing = _git("ls-tree", "--name-only", ref, "--", path)
     if not listing.stdout.strip():
         return None
     return _git("show", f"{ref}:{path}").stdout
 
 
-def _version_at(ref: str, label: str, *, may_be_missing: bool = False) -> str | None:
-    source = _source_at(ref, _VERSION_PATH)
+def version_at(ref: str, label: str, *, may_be_missing: bool = False) -> str | None:
+    """Return the package version a Git ref declares.
+
+    This is the one reading of the version declaration that decides whether a push is a release,
+    and ``check_unreleased_at_bump.py`` decides whether a pull request is a bump with it, so the
+    two cannot disagree about what a version change is.
+
+    Args:
+        ref: The commit-ish to read from.
+        label: How to name the ref in an error message.
+        may_be_missing: Return None instead of failing when the ref carries no version file,
+            which is the package introduction.
+
+    Returns:
+        The declared version, or None when the file is absent and that is permitted.
+
+    Raises:
+        GateError: If the version file is absent and not permitted to be, if it does not
+            declare exactly one version, or if Git fails.
+    """
+    source = source_at(ref, _VERSION_PATH)
     if source is None:
         if may_be_missing:
             return None
@@ -102,10 +133,15 @@ def _pending_unreleased(ref: str) -> bool:
     # so the reading that refuses a re-arm and the reading that produces the notes cannot drift:
     # they are the same function, and this refusal exists precisely because of what that one
     # would have omitted.
-    changelog = _source_at(ref, _CHANGELOG_PATH)
+    #
+    # The ordinary path is held to the same section before merge, by
+    # `check_unreleased_at_bump.py` on the bump pull request, and more strictly: it also refuses
+    # a missing heading, which this predicate lets through. AD-52 records both halves of that
+    # asymmetry and why the re-arm half is left as it is.
+    changelog = source_at(ref, CHANGELOG_PATH)
     if changelog is None:
         return False
-    return bool(changelog_section(changelog, _UNRELEASED_HEADING))
+    return bool(changelog_section(changelog, UNRELEASED_HEADING))
 
 
 def _re_arm_attempt(current_sha: str, before_sha: str, version: str) -> str | None:
@@ -113,8 +149,8 @@ def _re_arm_attempt(current_sha: str, before_sha: str, version: str) -> str | No
     # tokens, so "changed" means "edited in this push" and no historical content is ever
     # parsed. A whitespace-only edit therefore re-arms, which is harmless: the editor meant to
     # re-arm, and the version check below still has to agree before anything is released.
-    current = _source_at(current_sha, _ATTEMPT_PATH)
-    if current is None or current == _source_at(before_sha, _ATTEMPT_PATH):
+    current = source_at(current_sha, _ATTEMPT_PATH)
+    if current is None or current == source_at(before_sha, _ATTEMPT_PATH):
         return None
     # `fullmatch` over the stripped text is the whole "one non-blank line" rule: neither
     # character class in `_ATTEMPT_TOKEN` matches a newline, so a second line cannot pass.
@@ -125,7 +161,7 @@ def _re_arm_attempt(current_sha: str, before_sha: str, version: str) -> str | No
         raise GateError(f"re-arm token names version {match['version']!r}, not {version}")
     if _pending_unreleased(current_sha):
         raise GateError(
-            f"re-arm token names {version} but {_CHANGELOG_PATH} still has unreleased entries; "
+            f"re-arm token names {version} but {CHANGELOG_PATH} still has unreleased entries; "
             f"work landed since the bump would ship inside the tag undocumented. Fold those "
             f"entries into the '## [{version}]' section, or cut a new version instead of "
             f"re-arming."
@@ -154,7 +190,7 @@ def main() -> int:
         github_output = _required_environment("GITHUB_OUTPUT")
 
         current_sha = _resolve_commit(github_sha)
-        current_version = _version_at(current_sha, "current source")
+        current_version = version_at(current_sha, "current source")
         if current_version != version:
             raise GateError(f"current source declares version {current_version!r}, not {version}")
 
@@ -164,7 +200,7 @@ def main() -> int:
         )
         if tag_check.returncode == 0:
             tagged_sha = tag_check.stdout.strip()
-            tagged_version = _version_at(tag_ref, "tagged source")
+            tagged_version = version_at(tag_ref, "tagged source")
             if tagged_version != version:
                 raise GateError(f"tag {tag} points at version {tagged_version!r}, not {version}")
             if tagged_sha == current_sha:
@@ -182,7 +218,7 @@ def main() -> int:
             raise GateError(f"could not inspect tag {tag}: {detail}")
 
         before_sha = _resolve_commit(_required_environment("GITHUB_BEFORE"))
-        before_version = _version_at(before_sha, "pre-push source", may_be_missing=True)
+        before_version = version_at(before_sha, "pre-push source", may_be_missing=True)
         if before_version != version:
             previous = before_version if before_version is not None else "no version"
             print(
