@@ -2798,9 +2798,9 @@ def test_reconcile_keeps_shared_manifest_shared_ref_updates_distinct():
 
 def test_plan_rewrites_refuses_a_destination_two_nodes_share():
     # The group the test above builds is exactly what this rewriter cannot flatten: one ref,
-    # two nodes, so {ref: new_seen} would silently keep only the last node's hash. Destination
-    # resolution refuses the external update first, so this is the caller contract that keeps
-    # the re-key intact for GTX-757's manifest rewriter rather than a diagnostic a user sees.
+    # two nodes, so {ref: new_seen} would silently keep only the last node's hash. The manifest
+    # orchestration takes every manifest group first, so this is the caller contract that keeps
+    # the re-key intact for the manifest rewriter rather than a diagnostic a user sees.
     plan = {
         Path("meta/nodes.yml"): {
             ("external-a", "up"): reconcile_module.ReconcileUpdate(
@@ -2819,6 +2819,25 @@ def test_plan_rewrites_refuses_a_destination_two_nodes_share():
         plan_rewrites(plan, never_read)
 
     assert "'external-a', 'external-b'" in str(exc.value)
+
+
+def test_plan_rewrites_refuses_a_single_external_node_group():
+    # One node passes the node count, but its seen lives in its manifest: writing the group as
+    # Markdown would splice frontmatter into a manifest, or into a file another tool owns.
+    origin = DocumentOrigin(
+        Path("skills/a.md"), ExternalDeclaration("meta/nodes.yml", 0, "./skills/a.md")
+    )
+    plan = {
+        Path("meta/nodes.yml"): {
+            ("external-a", "up"): reconcile_module.ReconcileUpdate("hash-a", origin)
+        }
+    }
+
+    def never_read(_path: Path) -> bytes:
+        raise AssertionError("the refusal must precede the fresh read")
+
+    with pytest.raises(ValueError, match="carries an external node's update"):
+        plan_rewrites(plan, never_read)
 
 
 def test_plan_rewrites_allows_one_node_holding_several_refs_on_one_destination():
@@ -2847,9 +2866,11 @@ def test_plan_rewrites_allows_one_node_holding_several_refs_on_one_destination()
 
 
 @pytest.mark.parametrize("external_first", [False, True], ids=["ambiguity-first", "external-first"])
-def test_reconcile_preserves_refusal_selection_order_across_destination_resolution(
+def test_reconcile_refuses_ambiguity_whichever_order_selection_reaches_it(
     external_first: bool,
 ):
+    # A selected external update is written now, so an earlier one no longer defers the
+    # ambiguity refusal: suppressing it would let the batch succeed without the ambiguous edge.
     external_id = "a-external" if external_first else "z-external"
     inline_id = "z-inline" if external_first else "a-inline"
     lattice = build_lattice(
@@ -2873,13 +2894,10 @@ def test_reconcile_preserves_refusal_selection_order_across_destination_resoluti
         ]
     )
 
-    if not external_first:
-        with pytest.raises(ValidationError, match="ambiguous"):
-            reconcile(lattice, "", ref=None, reconcile_all=True)
-        return
+    with pytest.raises(ValidationError, match="ambiguous") as excinfo:
+        reconcile(lattice, "", ref=None, reconcile_all=True)
 
-    plan = reconcile(lattice, "", ref=None, reconcile_all=True)
-    assert set(plan) == {(external_id, "stable")}
+    assert f"cannot reconcile {inline_id!r} -> 'ambiguous#notes'" in str(excinfo.value)
 
 
 @pytest.mark.parametrize("seen", [None, "old"])

@@ -26,13 +26,20 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   entries are discarded and rebuilt as version 8. [AD-12](ARCHITECTURE.md#ad-12-the-load-cache-is-a-disposable-opt-in-accelerator)
   records the per-file facts contract; registration is rebuilt separately on each load.
 
-- `reconcile` now refuses, with `VALIDATION_ERROR`, any selected STALE or UNRECONCILED edge whose
-  downstream is externally declared. The guard runs after selection, BROKEN and collision
-  handling, and the unchanged-`seen` skip, but before planning or staging, so a mixed batch writes
-  no new batch updates and emits no success output. It applies to `--dry-run`; inline downstreams
-  may still reconcile external upstreams. [README.md](README.md#manual-external-acknowledgement)
-  owns the manual acknowledgement workflow for external downstreams until GTX-757 ships a
-  manifest rewriter.
+- `reconcile` now acknowledges a selected STALE or UNRECONCILED edge on an externally declared
+  downstream by rewriting that edge's `seen` in its manifest record, and never writes the node's
+  Markdown. Several selected nodes in one manifest produce one verified, byte-local rewrite, and a
+  batch mixing inline documents and manifests is one transaction with the existing conflict,
+  rollback, and recovery guarantees. Each manifest is resolved and read fresh at write time, and
+  its selected records are found by id: a manifest no longer a regular file, and a selected
+  record that is missing, duplicated, or repointed, including through a retargeted symlink,
+  refuse with `MANIFEST_ERROR` before staging. Unlike inline documents, a removed selected ref
+  refuses, and a mixed-line-ending manifest allows a valid no-op but refuses an actual rewrite.
+  An `AMBIGUOUS` edge now refuses the run whichever order selection reaches it in, and output
+  names only the nodes a shared manifest's rewrite actually changed, each by its own Markdown
+  path. [RECONCILE.md](RECONCILE.md#external-downstreams) owns the contract, and
+  [AD-30](ARCHITECTURE.md#ad-30-only-gate-verified-bytes-may-reach-a-reconcile-destination)
+  records the manifest producer the provenance guard admits.
 
 ### Added
 
@@ -68,8 +75,9 @@ Before adding `sidecar_manifests` or `sidecar_coverage`, upgrade every pre-commi
 pin that loads the repository to a release that supports it. Older releases reject the new key
 before loading the lattice. Keep `lattice_format: 2`; sidecar enrollment and coverage do not
 change the lattice format or existing hashes. Coverage adds no cache-schema change. Do not run a blanket `doc-lattice reconcile --all` for this
-upgrade. Review and acknowledge external downstream drift through the manual workflow in
-[README.md](README.md#manual-external-acknowledgement) only when it is present.
+upgrade. When external downstream drift is present, review each upstream change first, then
+reconcile the reviewed node, which rewrites only its manifest record as
+[RECONCILE.md](RECONCILE.md#external-downstreams) describes.
 
 ## [7.3.0] - 2026-09-13
 

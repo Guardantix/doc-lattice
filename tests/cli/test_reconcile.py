@@ -6,6 +6,7 @@ import shutil
 import stat
 import subprocess
 import sys
+from collections.abc import Mapping
 from contextlib import contextmanager
 from datetime import UTC, datetime
 from hashlib import sha256
@@ -19,10 +20,8 @@ import doc_lattice.reconcile_transaction as transaction
 from doc_lattice.cli import app
 from doc_lattice.cli.commands.reconcile import _recovery_json_payload
 from doc_lattice.constants import RECONCILE_JOURNAL_NAME, RECONCILE_JOURNAL_VERSION
-from doc_lattice.error_types import ReconcilePersistenceError, ValidationError
-from doc_lattice.model import DocumentOrigin, ExternalDeclaration
+from doc_lattice.error_types import ReconcilePersistenceError
 from doc_lattice.path_utils import format_path_for_display
-from doc_lattice.reconcile import ReconcileUpdate, group_reconcile_updates
 from doc_lattice.reconcile_transaction import (
     JournalEntry,
     JournalProvenance,
@@ -83,33 +82,11 @@ def _sidecar_reconcile_project(root: Path, *, external_seen="old", upstream_only
     )
 
 
-def test_destination_resolution_owns_the_interim_external_refusal(tmp_path: Path):
-    origin = DocumentOrigin(
-        Path("skills/down.md"),
-        ExternalDeclaration("meta/nodes.yml", 2, "./skills/down.md"),
-    )
-    destinations = group_reconcile_updates(
-        {("external", "up"): ReconcileUpdate("new-seen", origin)}
-    )
-
-    with pytest.raises(ValidationError) as exc_info:
-        reconcile_command._resolve_reconcile_write_paths(destinations, tmp_path)
-
-    assert str(exc_info.value) == (
-        "cannot reconcile 'external' -> 'up' at 'skills/down.md' "
-        "(record nodes[2] (path './skills/down.md') in manifest 'meta/nodes.yml'): "
-        "updating an external node's seen is not supported in this release, and this refusal "
-        "names one edge at a time; review the upstream, then update each drifting edge's seen "
-        "in its manifest record by hand using that edge's actual value from "
-        "'doc-lattice check --format json' with cache_trust_stat disabled"
-    )
-
-
 @pytest.mark.parametrize("dry_run", [False, True], ids=["write", "dry-run"])
 @pytest.mark.parametrize("fmt", ["human", "json"])
 @pytest.mark.parametrize("seen", [None, "old"], ids=["unreconciled", "stale"])
 @pytest.mark.parametrize("warm", [False, True], ids=["cold", "warm"])
-def test_external_update_refuses_mixed_batch_before_rewrites(  # noqa: PLR0913
+def test_external_update_reconciles_through_its_manifest_in_a_mixed_batch(  # noqa: PLR0913
     tmp_path, monkeypatch, dry_run, fmt, seen, warm
 ):
     project = tmp_path / "repo"
@@ -122,36 +99,64 @@ def test_external_update_refuses_mixed_batch_before_rewrites(  # noqa: PLR0913
         assert (cache / "doc-lattice/sidecar-reconcile/load-cache.json").exists()
     before = _tree_snapshot(project)
     cache_before = _tree_snapshot(cache)
-
-    def refuse_rewrite_phase(*_args, **_kwargs):
-        pytest.fail("external refusal reached rewrite planning or transaction staging")
-
-    monkeypatch.setattr(reconcile_command, "plan_rewrites", refuse_rewrite_phase)
-    monkeypatch.setattr(reconcile_command, "commit_rewrites", refuse_rewrite_phase)
+    committed = _record_committed_destinations(monkeypatch)
     argv = ["reconcile", "--all", "--format", fmt]
     if dry_run:
         argv.append("--dry-run")
 
     result = runner.invoke(app, argv)
 
-    assert result.exit_code == 2, (result.stdout, result.stderr, result.exception)
-    assert result.stdout == ""
-    for context in (
-        "VALIDATION_ERROR",
-        "z-external",
-        "up#rule",
-        "skills/skill.md",
-        "nodes.yml",
-        "nodes[0]",
-        "seen",
-        "review",
-        "by hand",
-    ):
-        assert context in result.stderr
-    assert _tree_snapshot(project) == before
+    assert result.exit_code == 0, (result.stdout, result.stderr, result.exception)
+    rule = sha256(b"# Rule\nupstream").hexdigest()[:32]
+    external = sha256(b"# Skill\nbody").hexdigest()[:32]
+    if fmt == "json":
+        assert json.loads(result.stdout) == {
+            "dry_run": dry_run,
+            "reconciled": [
+                {"path": str(project / "docs/down.md"), "ref": "up#rule", "new_seen": rule},
+                {"path": str(project / "docs/down.md"), "ref": "z-external", "new_seen": external},
+                {"path": str(project / "skills/skill.md"), "ref": "up#rule", "new_seen": rule},
+            ],
+        }
+    else:
+        verb = "would reconcile" if dry_run else "reconciled"
+        assert result.stdout == (
+            f"{verb} 'down.md': up#rule\n{verb} 'down.md': z-external\n{verb} 'skill.md': up#rule\n"
+        )
+    after = _tree_snapshot(project)
     if dry_run:
+        assert after == before
+        assert committed == []
         assert _tree_snapshot(cache) == cache_before
-        assert cache.exists() == warm
+        return
+    # One transaction carries both destinations, and the external node's Markdown is never one.
+    assert committed == [[(project / "docs/down.md").resolve(), (project / "nodes.yml").resolve()]]
+    assert after.pop("docs/down.md") != before.pop("docs/down.md")
+    assert after.pop("nodes.yml") != before.pop("nodes.yml")
+    assert after == before
+    assert runner.invoke(app, ["check"]).exit_code == 0
+
+
+def _record_committed_destinations(monkeypatch) -> list[list[Path]]:
+    """Record each committed batch's destinations while committing it for real."""
+    committed: list[list[Path]] = []
+    real_commit = reconcile_command.commit_rewrites
+
+    def record_then_commit(project_root, rewrites, *, selector, lock):
+        committed.append([rewrite.path for rewrite in rewrites])
+        return real_commit(project_root, rewrites, selector=selector, lock=lock)
+
+    monkeypatch.setattr(reconcile_command, "commit_rewrites", record_then_commit)
+    return committed
+
+
+def _refuse_staging(monkeypatch) -> None:
+    """Fail the test if a refused run reaches the transaction."""
+
+    def refuse(*_args, **_kwargs):
+        pytest.fail("a refused run reached transaction staging")
+
+    monkeypatch.setattr(reconcile_command, "commit_rewrites", refuse)
 
 
 @pytest.mark.parametrize("dry_run", [False, True], ids=["write", "dry-run"])
@@ -267,7 +272,7 @@ def test_sidecar_manifest_error_does_not_block_recovery(
         assert result.stderr.index("rolled_back") < result.stderr.index("MANIFEST_ERROR")
 
 
-def test_recovery_precedes_external_update_refusal(tmp_path, monkeypatch):
+def test_recovery_precedes_an_external_update(tmp_path, monkeypatch):
     _sidecar_reconcile_project(tmp_path)
     monkeypatch.chdir(tmp_path)
     monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path / "cache"))
@@ -276,19 +281,23 @@ def test_recovery_precedes_external_update_refusal(tmp_path, monkeypatch):
     interrupted = b"transaction after image\n"
     artifacts = _write_cli_transaction(tmp_path, destination, original, interrupted)
     destination.write_bytes(interrupted)
+    skill_before = (tmp_path / "skills/skill.md").read_bytes()
     manifest_before = (tmp_path / "nodes.yml").read_bytes()
 
     result = runner.invoke(app, ["reconcile", "--all", "--format", "json"])
 
-    assert result.exit_code == 2
-    assert result.stdout == ""
+    assert result.exit_code == 0, (result.stdout, result.stderr, result.exception)
     assert "recovered reconcile transaction: rolled_back" in result.stderr
-    assert "VALIDATION_ERROR" in result.stderr
-    assert "z-external" in result.stderr
-    assert result.stderr.index("rolled_back") < result.stderr.index("VALIDATION_ERROR")
-    assert destination.read_bytes() == original
+    # The new plan read the recovered Markdown, so its update lands on the original bytes.
+    assert {
+        (Path(entry["path"]).name, entry["ref"])
+        for entry in json.loads(result.stdout)["reconciled"]
+    } == {("down.md", "up#rule"), ("down.md", "z-external"), ("skill.md", "up#rule")}
     assert all(not path.exists() for path in artifacts)
-    assert (tmp_path / "nodes.yml").read_bytes() == manifest_before
+    assert b"transaction after image" not in destination.read_bytes()
+    assert (tmp_path / "nodes.yml").read_bytes() != manifest_before
+    assert (tmp_path / "skills/skill.md").read_bytes() == skill_before
+    assert runner.invoke(app, ["check"]).exit_code == 0
 
 
 @pytest.mark.parametrize(
@@ -350,34 +359,532 @@ def test_coverage_refusal_runs_after_automatic_recovery_and_not_explicit_recover
     assert destination.read_bytes() == b"original document\n"
 
 
-def test_check_actual_allows_manual_acknowledgement_of_external_section(tmp_path, monkeypatch):
-    _sidecar_reconcile_project(tmp_path)
-    monkeypatch.chdir(tmp_path)
-    monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path / "cache"))
-    config = tmp_path / ".doc-lattice.yml"
-    config.write_text(
-        config.read_text().replace("cache_trust_stat: true", "cache_trust_stat: false")
-    )
-    assert runner.invoke(app, ["reconcile", "a-inline"]).exit_code == 0
-    skill_before = (tmp_path / "skills/skill.md").read_bytes()
+_DECISION = "---\nid: decision\n---\n# Freshness {{#freshness}}\nreceipts expire after {age}\n"
+_FRESHNESS = "decision#freshness"
 
+
+def _skills_manifest(
+    seen: Mapping[str, str | None], order: tuple[str, ...], *, ending: str = "\n"
+) -> bytes:
+    """A block-style manifest whose records carry comments a byte-local rewrite must keep.
+
+    A node absent from ``seen`` declares no edge, a ``None`` value declares one never
+    reconciled, and a string is the ``seen`` it holds.
+    """
+    lines = ["# Skill bodies another tool publishes.", "nodes:"]
+    for node_id in order:
+        lines.extend(
+            [
+                f"  - path: skills/{node_id.removeprefix('skill-')}.md",
+                "    meta:",
+                f"      id: {node_id}",
+            ]
+        )
+        if node_id not in seen:
+            lines.append("      derives_from: []")
+            continue
+        lines.extend(["      derives_from:", f"        - ref: {_FRESHNESS}"])
+        if seen[node_id] is not None:
+            lines.append(f"          seen: {seen[node_id]}  # reviewed")
+    return (ending.join(lines) + ending).encode()
+
+
+def _skills_project(
+    root: Path,
+    seen: Mapping[str, str | None],
+    order: tuple[str, ...] = ("skill-a", "skill-b"),
+    *,
+    inline_id: str | None = None,
+) -> None:
+    """A governing decision and skill bodies another tool owns, enrolled by one manifest.
+
+    Modeled on GTX-387 and GTX-396: a skill body restating a production rule drifts when the
+    decision it derives from changes, and its own frontmatter belongs to the skill loader.
+    """
+    (root / "docs").mkdir(parents=True)
+    (root / "skills").mkdir()
+    (root / ".doc-lattice.yml").write_text("lattice_format: 2\nsidecar_manifests: [nodes.yml]\n")
+    (root / "docs/decision.md").write_text(_DECISION.format(age="one day"))
+    for letter in "abc":
+        (root / f"skills/{letter}.md").write_text(
+            f"---\nname: skill-{letter}\ndescription: loader metadata\n---\n# Skill {letter}\n"
+        )
+    if inline_id is not None:
+        (root / "docs/down.md").write_text(
+            f"---\nid: {inline_id}\nderives_from:\n  - ref: {_FRESHNESS}\n    seen: old\n---\n"
+            "# Down\n"
+        )
+    (root / "nodes.yml").write_bytes(_skills_manifest(seen, order))
+
+
+def _actual_seen(source_id: str, target_ref: str = _FRESHNESS) -> str:
+    """The hash ``check`` reports for one edge, read from the current working directory."""
     checked = runner.invoke(app, ["check", "--format", "json"])
-
-    assert checked.exit_code == 1
-    edge = next(
-        edge
+    return next(
+        edge["actual"]
         for edge in json.loads(checked.stdout)["edges"]
-        if edge["source_id"] == "z-external" and edge["target_ref"] == "up#rule"
+        if edge["source_id"] == source_id and edge["target_ref"] == target_ref
     )
-    assert edge["state"] == "STALE"
-    assert edge["actual"] == sha256(b"# Rule\nupstream").hexdigest()[:32]
-    manifest = tmp_path / "nodes.yml"
-    records = json.loads(manifest.read_text())
-    records["nodes"][0]["meta"]["derives_from"][0]["seen"] = edge["actual"]
-    manifest.write_text(json.dumps(records))
 
+
+def _race_before_capture(monkeypatch, mutate) -> None:
+    """Run ``mutate`` after the lattice loaded and immediately before the fresh manifest read."""
+    real_capture = reconcile_command.capture_manifest
+
+    def mutate_then_capture(declared: str, project_root: Path):
+        mutate()
+        return real_capture(declared, project_root)
+
+    monkeypatch.setattr(reconcile_command, "capture_manifest", mutate_then_capture)
+
+
+def _record_manifest_rewrites(monkeypatch) -> list[Path]:
+    """Record each manifest rewrite the batch converts, in a real run or under dry-run."""
+    produced: list[Path] = []
+    real_convert = reconcile_command.transaction_rewrite
+
+    def record_then_convert(result):
+        produced.append(result.destination)
+        return real_convert(result)
+
+    monkeypatch.setattr(reconcile_command, "transaction_rewrite", record_then_convert)
+    return produced
+
+
+def test_reconcile_clears_a_stale_external_skill_without_touching_its_markdown(
+    tmp_path, monkeypatch
+):
+    project = tmp_path / "repo"
+    _skills_project(project, {"skill-a": "old"}, ("skill-a",))
+    monkeypatch.chdir(project)
+    manifest = project / "nodes.yml"
+    manifest.write_bytes(_skills_manifest({"skill-a": _actual_seen("skill-a")}, ("skill-a",)))
     assert runner.invoke(app, ["check"]).exit_code == 0
-    assert (tmp_path / "skills/skill.md").read_bytes() == skill_before
+    (project / "docs/decision.md").write_text(_DECISION.format(age="one hour"))
+    checked = runner.invoke(app, ["check", "--format", "json"])
+    assert checked.exit_code == 1
+    stale = next(
+        edge for edge in json.loads(checked.stdout)["edges"] if edge["source_id"] == "skill-a"
+    )
+    assert stale["state"] == "STALE"
+    skill_before = (project / "skills/a.md").read_bytes()
+
+    result = runner.invoke(app, ["reconcile", "skill-a"])
+
+    assert result.exit_code == 0, (result.stdout, result.stderr, result.exception)
+    assert result.stdout == f"reconciled 'a.md': {_FRESHNESS}\n"
+    assert runner.invoke(app, ["check"]).exit_code == 0
+    assert (project / "skills/a.md").read_bytes() == skill_before
+    # Byte local: only the seen scalar changed, so the comments and layout survive verbatim.
+    assert manifest.read_bytes() == _skills_manifest({"skill-a": stale["actual"]}, ("skill-a",))
+
+
+@pytest.mark.parametrize("dry_run", [False, True], ids=["write", "dry-run"])
+@pytest.mark.parametrize("fmt", ["human", "json"])
+@pytest.mark.parametrize("raced", [False, True], ids=["both-change", "one-current"])
+def test_shared_manifest_reports_exactly_the_nodes_its_one_rewrite_changed(
+    tmp_path, monkeypatch, dry_run, fmt, raced
+):
+    # Two selected nodes share a manifest and a ref. Racing, another writer reorders the records
+    # and acknowledges skill-a between load and fresh read, so only skill-b changes; otherwise
+    # both change, and each is named by its own Markdown rather than by the first node's.
+    project = tmp_path / "repo"
+    _skills_project(project, {"skill-a": "old", "skill-b": "old"})
+    monkeypatch.chdir(project)
+    actual = _actual_seen("skill-a")
+    manifest = project / "nodes.yml"
+    order = ("skill-b", "skill-a") if raced else ("skill-a", "skill-b")
+    captured = _skills_manifest({"skill-a": actual if raced else "old", "skill-b": "old"}, order)
+    if raced:
+        _race_before_capture(monkeypatch, lambda: manifest.write_bytes(captured))
+    produced = _record_manifest_rewrites(monkeypatch)
+    committed = _record_committed_destinations(monkeypatch)
+    argv = ["reconcile", "--all", "--format", fmt, *(["--dry-run"] if dry_run else [])]
+
+    result = runner.invoke(app, argv)
+
+    assert result.exit_code == 0, (result.stdout, result.stderr, result.exception)
+    letters = "b" if raced else "ab"
+    if fmt == "json":
+        assert json.loads(result.stdout) == {
+            "dry_run": dry_run,
+            "reconciled": [
+                {
+                    "path": str(project / f"skills/{letter}.md"),
+                    "ref": _FRESHNESS,
+                    "new_seen": actual,
+                }
+                for letter in letters
+            ],
+        }
+    else:
+        verb = "would reconcile" if dry_run else "reconciled"
+        assert result.stdout == "".join(
+            f"{verb} '{letter}.md': {_FRESHNESS}\n" for letter in letters
+        )
+    assert produced == [manifest.resolve()]
+    if dry_run:
+        assert committed == []
+        assert manifest.read_bytes() == captured
+    else:
+        assert committed == [[manifest.resolve()]]
+        assert manifest.read_bytes() == _skills_manifest(
+            {"skill-a": actual, "skill-b": actual}, order
+        )
+
+
+@pytest.mark.parametrize("dry_run", [False, True], ids=["write", "dry-run"])
+@pytest.mark.parametrize("fmt", ["human", "json"])
+@pytest.mark.parametrize("external_first", [False, True], ids=["ambiguity-first", "external-first"])
+def test_ambiguous_edge_refuses_the_run_whichever_order_selection_reaches_it(
+    tmp_path, monkeypatch, dry_run, fmt, external_first
+):
+    project = tmp_path / "repo"
+    # Node ids are visited in sorted order, so the inline id decides which edge comes first.
+    inline_id = "z-inline" if external_first else "a-inline"
+    _skills_project(project, {"skill-a": "old"}, ("skill-a",))
+    (project / "docs/ambiguous.md").write_text("---\nid: ambiguous\n---\n# Notes\n\n# Notes\n")
+    (project / "docs/inline.md").write_text(
+        f"---\nid: {inline_id}\nderives_from:\n  - ref: ambiguous#notes\n---\n# Inline\n"
+    )
+    monkeypatch.chdir(project)
+    before = _tree_snapshot(project)
+
+    def refuse_capture(*_args, **_kwargs):
+        pytest.fail("an ambiguous selection reached the fresh manifest read")
+
+    monkeypatch.setattr(reconcile_command, "capture_manifest", refuse_capture)
+    _refuse_staging(monkeypatch)
+    argv = ["reconcile", "--all", "--format", fmt, *(["--dry-run"] if dry_run else [])]
+
+    result = runner.invoke(app, argv)
+
+    assert result.exit_code == 2
+    assert result.stdout == ""
+    assert "VALIDATION_ERROR" in result.stderr
+    assert f"cannot reconcile '{inline_id}' -> 'ambiguous#notes'" in result.stderr
+    assert _tree_snapshot(project) == before
+
+
+@pytest.mark.parametrize("dry_run", [False, True], ids=["write", "dry-run"])
+@pytest.mark.parametrize("retargeted", ["markdown", "manifest"])
+def test_symlink_retargeted_between_load_and_fresh_read_refuses(
+    tmp_path, monkeypatch, dry_run, retargeted
+):
+    # Neither the record's id nor any path text changes, so only a fresh resolution of the
+    # declared spellings can notice. Reusing the load-time group key would read the old target.
+    project = tmp_path / "repo"
+    _skills_project(project, {"skill-a": "old"}, ("skill-a",))
+    if retargeted == "markdown":
+        link, first, second = (project / f"skills/{name}.md" for name in ("a", "a-one", "a-two"))
+    else:
+        (project / "meta").mkdir()
+        link, first, second = (
+            project / "nodes.yml",
+            *(project / f"meta/{name}.yml" for name in ("one", "two")),
+        )
+    link.rename(first)
+    shutil.copyfile(first, second)
+    link.symlink_to(first)
+    monkeypatch.chdir(project)
+    before = _tree_snapshot(project)
+
+    def retarget():
+        link.unlink()
+        link.symlink_to(second)
+
+    _race_before_capture(monkeypatch, retarget)
+    _refuse_staging(monkeypatch)
+    argv = ["reconcile", "--all", *(["--dry-run"] if dry_run else [])]
+
+    result = runner.invoke(app, argv)
+
+    assert result.exit_code == 2
+    assert result.stdout == ""
+    assert "MANIFEST_ERROR" in result.stderr
+    assert "selected manifest record 'skill-a' was repointed" in result.stderr
+    retarget()
+    assert _tree_snapshot(project) == {
+        **before,
+        link.relative_to(project).as_posix(): ("symlink", os.fsencode(second)),
+    }
+
+
+@pytest.mark.parametrize("dry_run", [False, True], ids=["write", "dry-run"])
+@pytest.mark.parametrize("kind", ["directory", "fifo"])
+def test_manifest_replaced_by_a_special_file_refuses_before_it_is_opened(
+    tmp_path, monkeypatch, dry_run, kind
+):
+    if kind == "fifo" and not hasattr(os, "mkfifo"):
+        pytest.skip("needs POSIX FIFOs")
+    project = tmp_path / "repo"
+    _skills_project(project, {"skill-a": "old"}, ("skill-a",), inline_id="down")
+    monkeypatch.chdir(project)
+    manifest = project / "nodes.yml"
+    inline_before = (project / "docs/down.md").read_bytes()
+
+    def replace_manifest():
+        manifest.unlink()
+        if kind == "directory":
+            manifest.mkdir()
+        else:
+            os.mkfifo(manifest)
+
+    real_read_bytes = Path.read_bytes
+
+    def refuse_special_reads(path: Path) -> bytes:
+        # A FIFO with no writer blocks its reader, so opening one would hang rather than fail.
+        if not stat.S_ISREG(path.stat().st_mode):
+            pytest.fail(f"opened a special file: {path}")
+        return real_read_bytes(path)
+
+    _race_before_capture(monkeypatch, replace_manifest)
+    monkeypatch.setattr(Path, "read_bytes", refuse_special_reads)
+    _refuse_staging(monkeypatch)
+    argv = ["reconcile", "--all", *(["--dry-run"] if dry_run else [])]
+
+    result = runner.invoke(app, argv)
+
+    assert result.exit_code == 2
+    assert result.stdout == ""
+    assert "MANIFEST_ERROR" in result.stderr
+    assert "manifest 'nodes.yml' resolves to" in result.stderr
+    assert "not a regular file" in result.stderr
+    assert (project / "docs/down.md").read_bytes() == inline_before
+    assert not (project / RECONCILE_JOURNAL_NAME).exists()
+
+
+@pytest.mark.parametrize("dry_run", [False, True], ids=["write", "dry-run"])
+@pytest.mark.parametrize(
+    ("race", "refusal"),
+    [
+        ("reorder", None),
+        ("missing", "selected manifest record 'skill-a' is missing"),
+        ("duplicated", "selected manifest record 'skill-a' is duplicated"),
+        ("repointed", "selected manifest record 'skill-a' was repointed"),
+        ("removed-ref", f"selected manifest record 'skill-a' has no ref '{_FRESHNESS}'"),
+    ],
+)
+def test_manifest_edit_before_the_fresh_read_is_located_by_identity(
+    tmp_path, monkeypatch, dry_run, race, refusal
+):
+    project = tmp_path / "repo"
+    _skills_project(project, {"skill-a": "old", "skill-b": "old"})
+    monkeypatch.chdir(project)
+    actual = _actual_seen("skill-a")
+    manifest = project / "nodes.yml"
+    both = {"skill-a": "old", "skill-b": "old"}
+    raced = {
+        "reorder": _skills_manifest(both, ("skill-b", "skill-a")),
+        "missing": _skills_manifest(both, ("skill-b",)),
+        "duplicated": _skills_manifest(both, ("skill-a", "skill-b", "skill-a")),
+        "repointed": _skills_manifest(both, ("skill-a", "skill-b")).replace(
+            b"path: skills/a.md", b"path: skills/c.md"
+        ),
+        "removed-ref": _skills_manifest({"skill-b": "old"}, ("skill-a", "skill-b")),
+    }[race]
+    _race_before_capture(monkeypatch, lambda: manifest.write_bytes(raced))
+    if refusal is not None:
+        _refuse_staging(monkeypatch)
+    argv = ["reconcile", "skill-a", *(["--dry-run"] if dry_run else [])]
+
+    result = runner.invoke(app, argv)
+
+    if refusal is None:
+        # Position is never identity, so a harmless reorder still finds skill-a's record.
+        assert result.exit_code == 0, (result.stdout, result.stderr, result.exception)
+        verb = "would reconcile" if dry_run else "reconciled"
+        assert result.stdout == f"{verb} 'a.md': {_FRESHNESS}\n"
+        expected = raced
+        if not dry_run:
+            expected = _skills_manifest({**both, "skill-a": actual}, ("skill-b", "skill-a"))
+        assert manifest.read_bytes() == expected
+        return
+    assert result.exit_code == 2
+    assert result.stdout == ""
+    assert "MANIFEST_ERROR" in result.stderr
+    assert refusal in result.stderr
+    assert manifest.read_bytes() == raced
+
+
+@pytest.mark.parametrize(
+    "failure", ["manifest-conflict", "inline-conflict", "manifest-replace-failure"]
+)
+def test_mixed_batch_failure_after_the_fresh_read_rolls_back_without_partial_write(
+    tmp_path, monkeypatch, failure
+):
+    project = tmp_path / "repo"
+    _skills_project(project, {"skill-a": "old"}, ("skill-a",), inline_id="down")
+    monkeypatch.chdir(project)
+    before = _tree_snapshot(project)
+    edited = project / ("docs/down.md" if failure == "inline-conflict" else "nodes.yml")
+    editor_bytes = edited.read_bytes() + b"# a concurrent editor\n"
+    if failure == "manifest-replace-failure":
+        real_replace = transaction.replace_staged
+
+        def fail_manifest_replace(staged: Path, destination: Path) -> None:
+            if "doc-lattice-after" in staged.name and destination.name == "nodes.yml":
+                raise OSError("disk full")
+            real_replace(staged, destination)
+
+        monkeypatch.setattr(transaction, "replace_staged", fail_manifest_replace)
+    else:
+        real_commit = transaction.commit_rewrites
+
+        def edit_then_commit(project_root, rewrites, *, selector, lock):
+            # Both destinations are in the one transaction, inline first, then the manifest.
+            assert [rewrite.path.name for rewrite in rewrites] == ["down.md", "nodes.yml"]
+            edited.write_bytes(editor_bytes)
+            return real_commit(project_root, rewrites, selector=selector, lock=lock)
+
+        monkeypatch.setattr(reconcile_command, "commit_rewrites", edit_then_commit)
+
+    result = runner.invoke(app, ["reconcile", "--all", "--format", "json"])
+
+    assert result.exit_code == 2
+    assert result.stdout == ""
+    if failure == "manifest-replace-failure":
+        assert "RECONCILE_PERSISTENCE" in result.stderr
+        assert _tree_snapshot(project) == before
+        return
+    assert "RECONCILE_CONFLICT" in result.stderr
+    assert "changed after validation" in result.stderr
+    # The concurrent edit survives, and nothing the run wrote to the other destination does.
+    expected = {**before, edited.relative_to(project).as_posix(): ("file", editor_bytes)}
+    assert _tree_snapshot(project) == expected
+
+
+@pytest.mark.parametrize("dry_run", [False, True], ids=["write", "dry-run"])
+@pytest.mark.parametrize("fmt", ["human", "json"])
+@pytest.mark.parametrize("refusal", ["removed-ref", "mixed-line-endings"])
+def test_manifest_specific_refusals_precede_staging_and_success_output(
+    tmp_path, monkeypatch, dry_run, fmt, refusal
+):
+    project = tmp_path / "repo"
+    _skills_project(project, {"skill-a": "old"}, ("skill-a",), inline_id="down")
+    monkeypatch.chdir(project)
+    manifest = project / "nodes.yml"
+    if refusal == "mixed-line-endings":
+        # Loading accepts mixed endings; only an actual manifest rewrite refuses them.
+        manifest.write_bytes(manifest.read_bytes().replace(b"\n", b"\r\n", 1))
+        expected = "has mixed line endings; rewrite refused"
+    else:
+        removed = _skills_manifest({}, ("skill-a",))
+        _race_before_capture(monkeypatch, lambda: manifest.write_bytes(removed))
+        expected = f"has no ref '{_FRESHNESS}'"
+    _refuse_staging(monkeypatch)
+    inline_before = (project / "docs/down.md").read_bytes()
+    argv = ["reconcile", "--all", "--format", fmt, *(["--dry-run"] if dry_run else [])]
+
+    result = runner.invoke(app, argv)
+
+    assert result.exit_code == 2
+    assert result.stdout == ""
+    assert "MANIFEST_ERROR" in result.stderr
+    assert expected in result.stderr
+    assert (project / "docs/down.md").read_bytes() == inline_before
+
+
+def test_mixed_line_ending_manifest_allows_a_valid_no_op(tmp_path, monkeypatch):
+    project = tmp_path / "repo"
+    _skills_project(project, {"skill-a": "old"}, ("skill-a",), inline_id="down")
+    monkeypatch.chdir(project)
+    actual = _actual_seen("skill-a")
+    manifest = project / "nodes.yml"
+    current = _skills_manifest({"skill-a": actual}, ("skill-a",)).replace(b"\n", b"\r\n", 1)
+    _race_before_capture(monkeypatch, lambda: manifest.write_bytes(current))
+    committed = _record_committed_destinations(monkeypatch)
+
+    result = runner.invoke(app, ["reconcile", "--all"])
+
+    assert result.exit_code == 0, (result.stdout, result.stderr, result.exception)
+    assert result.stdout == f"reconciled 'down.md': {_FRESHNESS}\n"
+    assert committed == [[(project / "docs/down.md").resolve()]]
+    assert manifest.read_bytes() == current
+
+
+def _manifest_transaction_project(tmp_path: Path, monkeypatch) -> tuple[Path, list[tuple]]:
+    """A project whose interrupted journal names an inline document and a manifest."""
+    project = tmp_path / "repo"
+    _skills_project(project, {"skill-a": "old"}, ("skill-a",), inline_id="down")
+    monkeypatch.chdir(project)
+    images = []
+    for name in ("docs/down.md", "nodes.yml"):
+        destination = project / name
+        before = destination.read_bytes()
+        images.append((destination, before, before.replace(b"seen: old", b"seen: new")))
+    return project, images
+
+
+def test_prepared_recovery_restores_a_manifest_destination_to_its_before_image(
+    tmp_path, monkeypatch
+):
+    project, images = _manifest_transaction_project(tmp_path, monkeypatch)
+    journal, stages = _write_cli_batch_transaction(project, images)
+    for destination, _before, after in images:
+        destination.write_bytes(after)
+
+    result = runner.invoke(app, ["reconcile", "--recover", "--format", "json"])
+
+    assert result.exit_code == 0, (result.stdout, result.stderr, result.exception)
+    payload = json.loads(result.stdout)
+    assert payload["action"] == "rolled_back"
+    assert payload["unresolved"] == []
+    for destination, before, _after in images:
+        assert destination.read_bytes() == before
+    assert not journal.exists()
+    assert all(not stage.exists() for pair in stages.values() for stage in pair)
+
+
+def test_prepared_recovery_preserves_a_malformed_manifest_and_stops_before_loading(
+    tmp_path, monkeypatch
+):
+    project, images = _manifest_transaction_project(tmp_path, monkeypatch)
+    journal, stages = _write_cli_batch_transaction(project, images)
+    (inline, inline_before, inline_after), (manifest, _before, _after) = images
+    inline.write_bytes(inline_after)
+    malformed = b"nodes: [unclosed\n"
+    manifest.write_bytes(malformed)
+
+    result = runner.invoke(app, ["reconcile", "--all"])
+
+    assert result.exit_code == 2
+    assert result.stdout == ""
+    assert "unresolved destination: 'nodes.yml'" in result.stderr
+    # Automatic recovery stopped the run before lattice loading ever parsed the manifest.
+    assert "MANIFEST_ERROR" not in result.stderr
+    assert inline.read_bytes() == inline_before
+    assert manifest.read_bytes() == malformed
+    assert journal.exists()
+    assert all(stage.exists() for stage in stages["nodes.yml"])
+
+
+def test_committed_recovery_keeps_a_later_malformed_manifest_for_loading_to_refuse(
+    tmp_path, monkeypatch
+):
+    # Parser-independent recovery never promises to repair a manifest corrupted after capture.
+    project, images = _manifest_transaction_project(tmp_path, monkeypatch)
+    journal, stages = _write_cli_batch_transaction(project, images, state="committed")
+    (inline, _inline_before, inline_after), (manifest, _before, _after) = images
+    inline.write_bytes(inline_after)
+    malformed = b"nodes: [unclosed\n"
+    manifest.write_bytes(malformed)
+
+    recovered = runner.invoke(app, ["reconcile", "--recover", "--format", "json"])
+
+    assert recovered.exit_code == 0, (recovered.stdout, recovered.stderr, recovered.exception)
+    assert json.loads(recovered.stdout)["action"] == "cleaned_committed"
+    assert inline.read_bytes() == inline_after
+    assert manifest.read_bytes() == malformed
+    assert not journal.exists()
+    assert all(not stage.exists() for pair in stages.values() for stage in pair)
+
+    following = runner.invoke(app, ["reconcile", "--all"])
+
+    assert following.exit_code == 2
+    assert following.stdout == ""
+    assert "MANIFEST_ERROR" in following.stderr
+    assert manifest.read_bytes() == malformed
 
 
 def _tree_snapshot(root: Path) -> dict[str, tuple[str, bytes]]:
@@ -431,20 +938,45 @@ def _write_cli_transaction(  # noqa: PLR0913
     provenance: JournalProvenance = _DEFAULT_CLI_PROVENANCE,
 ) -> tuple[Path, Path, Path]:
     """Write a valid single-entry recovery transaction for CLI integration tests."""
-    entry = _cli_transaction_entry(root, destination, before_bytes, after_bytes)
+    journal, stages = _write_cli_batch_transaction(
+        root, [(destination, before_bytes, after_bytes)], state=state, provenance=provenance
+    )
+    ((before, after),) = stages.values()
+    return journal, before, after
+
+
+def _write_cli_batch_transaction(
+    root: Path,
+    images: list[tuple[Path, bytes, bytes]],
+    *,
+    state: JournalState = "prepared",
+    provenance: JournalProvenance = _DEFAULT_CLI_PROVENANCE,
+) -> tuple[Path, dict[str, tuple[Path, Path]]]:
+    """Write a valid recovery transaction staging each destination's before and after images.
+
+    Returns:
+        The journal, and each entry's staged before and after images keyed by its
+        project-relative destination.
+    """
+    entries = tuple(
+        _cli_transaction_entry(root, destination, before, after)
+        for destination, before, after in images
+    )
     journal = root / RECONCILE_JOURNAL_NAME
-    journal.write_text(
+    journal.write_bytes(
         _serialize_journal(
             JournalV2(
                 version=RECONCILE_JOURNAL_VERSION,
                 state=state,
                 provenance=provenance,
-                entries=(entry,),
+                entries=entries,
             )
-        ).decode("utf-8"),
-        encoding="utf-8",
+        )
     )
-    return journal, root / entry.before_path, root / entry.after_path
+    stages = {
+        entry.destination: (root / entry.before_path, root / entry.after_path) for entry in entries
+    }
+    return journal, stages
 
 
 def _write_legacy_cli_transaction(

@@ -19,6 +19,7 @@ from doc_lattice.constants import (
     VALID_AUTHORITIES,
 )
 from doc_lattice.error_types import ProjectError
+from doc_lattice.manifest_reconcile import ManifestRewriteResult
 from doc_lattice.reconcile import Rewrite
 from doc_lattice.scaffold import PYTHON_PIN
 
@@ -44,7 +45,15 @@ _PURE_MANIFEST_MODULES: dict[str, tuple[dict[str, frozenset[str]], frozenset[tup
             "dataclasses": frozenset({"dataclass"}),
             "pathlib": frozenset({"Path"}),
             "model": frozenset({"ExternalIdentity"}),
-            "reconcile": frozenset({"ReconcileDestinationPlan", "ReconcileKey", "ReconcilePlan"}),
+            "reconcile": frozenset(
+                {
+                    "ReconcileDestinationPlan",
+                    "ReconcileKey",
+                    "ReconcilePlan",
+                    "Rewrite",
+                    "is_manifest_group",
+                }
+            ),
             "sidecar_manifest": frozenset({"ManifestRecordSnapshot", "parse_manifest_snapshot"}),
             "sidecar_rewrite": frozenset({"rewrite_manifest_bytes"}),
         },
@@ -54,15 +63,18 @@ _PURE_MANIFEST_MODULES: dict[str, tuple[dict[str, frozenset[str]], frozenset[tup
                 ("attribute", "items"),
                 ("attribute", "setdefault"),
                 ("attribute", "values"),
+                ("name", "ManifestCaptureRequest"),
                 ("name", "ManifestChange"),
                 ("name", "ManifestRewriteResult"),
+                ("name", "Rewrite"),
                 ("name", "ValueError"),
                 ("name", "_changed_pairs"),
-                ("name", "_is_manifest_group"),
+                ("name", "is_manifest_group"),
                 ("name", "_manifest_arguments"),
                 ("name", "any"),
                 ("name", "dataclass"),
                 ("name", "enumerate"),
+                ("name", "frozenset"),
                 ("name", "parse_manifest_snapshot"),
                 ("name", "rewrite_manifest_bytes"),
                 ("name", "tuple"),
@@ -518,6 +530,15 @@ def test_every_intermediate_error_base_still_has_a_concrete_subclass():
 # artifacts are deliberately staged and republished without passing through the gate, so
 # a generic audit of every stage or publish call would encode the wrong rule.
 #
+# A sidecar manifest is the second producer (GTX-888). Its after image never passes the
+# frontmatter gate, because it is not frontmatter: ``sidecar_rewrite.rewrite_manifest_bytes``
+# verifies the complete manifest instead, against an independent source-span splice and a full
+# semantic reparse. The guard pins that chain the same way, from the converter that mints the
+# manifest ``Rewrite`` back through the sole ``ManifestRewriteResult`` construction to the
+# returns the manifest gates dominate. Admitting a second constructor alone, or trusting a
+# field named ``verified_bytes`` wherever it appears, would weaken the invariant rather than
+# extend it.
+#
 # AD-30 in ARCHITECTURE.md owns this invariant. When these matchers stop fitting, re-derive
 # the invariant from that decision rather than loosening them until the suite passes again.
 # ---------------------------------------------------------------------------
@@ -536,6 +557,25 @@ RECONCILE_MODULE = "reconcile.py"
 TRANSACTION_MODULE = "reconcile_transaction.py"
 AFTER_FIELD = "after"
 AFTER_FIELD_INDEX = list(Rewrite.__dataclass_fields__).index(AFTER_FIELD)
+MANIFEST_MODULE = "manifest_reconcile.py"
+MANIFEST_PRODUCER = "transaction_rewrite"
+MANIFEST_PLANNER = "plan_manifest_rewrites"
+MANIFEST_RESULT = ManifestRewriteResult.__name__
+MANIFEST_VERIFIED_FIELD = "verified_bytes"
+MANIFEST_VERIFIED_INDEX = list(ManifestRewriteResult.__dataclass_fields__).index(
+    MANIFEST_VERIFIED_FIELD
+)
+MANIFEST_REWRITER_MODULE = "sidecar_rewrite.py"
+MANIFEST_REWRITER = "rewrite_manifest_bytes"
+# The rewriter's own input, which it may hand back unchanged as a valid no-op. The planner skips a
+# result equal to its input, and publishing the captured bytes over themselves changes nothing.
+MANIFEST_INPUT = "fresh_bytes"
+MANIFEST_EDIT_PLANNER = "_plan_updates"
+MANIFEST_SPLICE_GATE = "_splice_expected_bytes"
+MANIFEST_REPARSE_GATE = "parse_manifest_snapshot"
+# `_plan_updates` returns the planned edits and the expected semantic records, in that order.
+PLANNED_EDITS_INDEX = 0
+EXPECTED_RECORDS_INDEX = 1
 FORWARD_IMAGE_FIELD = "after_path"
 ROLLBACK_IMAGE_FIELD = "before_path"
 LINE_ENDING_CALLEE = "_line_ending"
@@ -604,7 +644,10 @@ ENVELOPE_FIELDS = frozenset(ENVELOPE_ORDER) - {GATED_SLOT, NEWLINE_SLOT}
 
 def _gate_msg(detail: str) -> str:
     """Wrap one guard diagnostic so every failure names the reparse gate explicitly."""
-    return f"{detail}; every reconcile after image must flow through {GATE}()"
+    return (
+        f"{detail}; every reconcile after image must flow through {GATE}(), or for a sidecar "
+        f"manifest through the verification in {MANIFEST_REWRITER}()"
+    )
 
 
 @dataclass(frozen=True)
@@ -1004,14 +1047,19 @@ def _reassembles_envelope(
     return tuple(order) == ENVELOPE_ORDER
 
 
-def _gated_result_names(bindings: dict[str, list[_Binding]]) -> frozenset[str]:
-    """Names bound exactly once to the text element of an ``apply_reconcile`` call."""
-    names = {
+def _index_bound_names(
+    bindings: dict[str, list[_Binding]], callee: str, index: int
+) -> frozenset[str]:
+    """Names bound exactly once to element ``index`` of a call to ``callee``.
+
+    ``apply_reconcile`` returns its gate-verified text at index 0, and the manifest rewriter's
+    ``_plan_updates`` returns the edits and expected records its gates compare against.
+    """
+    return frozenset(
         name
         for name, bound in bindings.items()
-        if len(bound) == 1 and bound[0].index == 0 and _is_call_to(bound[0].value, GATED_CALLEE)
-    }
-    return frozenset(names)
+        if len(bound) == 1 and bound[0].index == index and _is_call_to(bound[0].value, callee)
+    )
 
 
 def _envelope_root(bindings: dict[str, list[_Binding]]) -> str | None:
@@ -1052,6 +1100,9 @@ def _returns_no_change(node: ast.Return) -> bool:
 def _field_copy_sites(trees: dict[str, ast.Module]) -> list[_Site]:
     """Every ``replace(..., after=...)`` call, which mints a Rewrite without naming one.
 
+    ``verified_bytes`` is read the same way, since copying a ``ManifestRewriteResult`` with a
+    replacement for it mints the manifest producer's input without the manifest gates.
+
     ``dataclasses.replace(rewrite, after=data)`` returns a frozen ``Rewrite`` carrying bytes the
     gate never saw and is not a ``Rewrite(...)`` call site, so the sole-producer pin has to read
     the copy route too. ``str.replace`` takes no keyword arguments, so the line-ending
@@ -1066,35 +1117,55 @@ def _field_copy_sites(trees: dict[str, ast.Module]) -> list[_Site]:
         func = site.call.func
         named = isinstance(func, ast.Name) and func.id == COPY_CALLEE
         qualified = isinstance(func, ast.Attribute) and func.attr == COPY_CALLEE
-        replaces_after = any(keyword.arg in (AFTER_FIELD, None) for keyword in site.call.keywords)
+        replaces_after = any(
+            keyword.arg in (AFTER_FIELD, MANIFEST_VERIFIED_FIELD, None)
+            for keyword in site.call.keywords
+        )
         if (named or qualified) and replaces_after:
             sites.append(site)
     return sites
 
 
 def _rewrite_producer_violations(trees: dict[str, ast.Module]) -> list[str]:
-    """The sole ``Rewrite(...)`` must live in the producer and carry the gated text."""
+    """The two ``Rewrite(...)`` sites must be the producers, each carrying its gated bytes."""
     expected = f"{RECONCILE_MODULE}::{PRODUCER}"
+    manifest_expected = f"{MANIFEST_MODULE}::{MANIFEST_PRODUCER}"
     copies = sorted(site.located for site in _field_copy_sites(trees))
     if copies:
         return [
             _gate_msg(
-                f"{copies} copy a dataclass with a replacement {AFTER_FIELD!r} field, minting a "
-                f"{Rewrite.__name__} outside {expected}"
+                f"{copies} copy a dataclass with a replacement {AFTER_FIELD!r} or "
+                f"{MANIFEST_VERIFIED_FIELD!r} field, minting a {Rewrite.__name__} outside "
+                f"{expected} and {manifest_expected}"
             )
         ]
     sites = _symbol_call_sites(trees, Rewrite.__name__)
     located = sorted(site.located for site in sites)
-    if located != [expected]:
-        return [_gate_msg(f"production Rewrite(...) sites are {located}, expected only {expected}")]
+    if located != sorted([expected, manifest_expected]):
+        return [
+            _gate_msg(
+                f"production Rewrite(...) sites are {located}, expected only {expected} and "
+                f"{manifest_expected}"
+            )
+        ]
+    inline_site = next(site for site in sites if site.located == expected)
+    manifest_site = next(site for site in sites if site.located == manifest_expected)
+    return [
+        *_inline_producer_violations(trees, inline_site),
+        *_manifest_producer_violations(trees, manifest_site),
+    ]
+
+
+def _inline_producer_violations(trees: dict[str, ast.Module], site: _Site) -> list[str]:
+    """The Markdown ``Rewrite.after`` must carry the text the frontmatter gate verified."""
     producer = _function(trees[RECONCILE_MODULE], PRODUCER)
     if producer is None:
         return [_gate_msg(f"{RECONCILE_MODULE} no longer defines {PRODUCER}")]
     bindings = _bindings(producer)
-    trusted = _gated_result_names(bindings)
+    trusted = _index_bound_names(bindings, GATED_CALLEE, 0)
     if not trusted:
         return [_gate_msg(f"{PRODUCER} does not bind the text {GATED_CALLEE}() returned")]
-    after = _argument(sites[0].call, "after", AFTER_FIELD_INDEX)
+    after = _argument(site.call, AFTER_FIELD, AFTER_FIELD_INDEX)
     context = _TraceContext(trusted, bindings, restoration=True)
     if after is None or not _traces_to(after, context):
         return [
@@ -1104,6 +1175,222 @@ def _rewrite_producer_violations(trees: dict[str, ast.Module]) -> list[str]:
             )
         ]
     return []
+
+
+def _parameters(func: ast.FunctionDef) -> list[ast.arg]:
+    """Every named parameter of a function, whatever its kind."""
+    arguments = func.args
+    return [*arguments.posonlyargs, *arguments.args, *arguments.kwonlyargs]
+
+
+def _is_verified_result_field(expr: ast.expr | None, func: ast.FunctionDef) -> bool:
+    """True for ``<param>.verified_bytes`` on an unrebound parameter typed as the result.
+
+    The field name alone proves nothing, since any object can carry one. The receiver has to be
+    the converter's own ``ManifestRewriteResult`` parameter, whose sole construction the result
+    rule pins and traces, so the bytes it holds are the ones the manifest gates verified.
+    """
+    if not (isinstance(expr, ast.Attribute) and expr.attr == MANIFEST_VERIFIED_FIELD):
+        return False
+    if not isinstance(expr.value, ast.Name):
+        return False
+    name = expr.value.id
+    typed = any(
+        parameter.arg == name
+        and isinstance(parameter.annotation, ast.Name)
+        and parameter.annotation.id == MANIFEST_RESULT
+        for parameter in _parameters(func)
+    )
+    return typed and name not in _bindings(func)
+
+
+def _manifest_producer_violations(trees: dict[str, ast.Module], site: _Site) -> list[str]:
+    """The manifest ``Rewrite.after`` must be the verified bytes of the result it converts."""
+    converter = _function(trees[MANIFEST_MODULE], MANIFEST_PRODUCER)
+    if converter is None:
+        return [_gate_msg(f"{MANIFEST_MODULE} no longer defines {MANIFEST_PRODUCER}")]
+    after = _argument(site.call, AFTER_FIELD, AFTER_FIELD_INDEX)
+    if not _is_verified_result_field(after, converter):
+        return [
+            _gate_msg(
+                f"Rewrite.after in {MANIFEST_PRODUCER} is not the {MANIFEST_VERIFIED_FIELD} of "
+                f"its own {MANIFEST_RESULT} parameter"
+            )
+        ]
+    return _manifest_result_violations(trees)
+
+
+def _imports_unshadowed(tree: ast.Module, module: str, symbol: str) -> bool:
+    """True when ``symbol`` comes from ``module`` under its own name and nothing rebinds it.
+
+    A local ``def`` or an assignment of that name would let the planner call something that
+    merely shares the rewriter's name, so either one fails closed.
+    """
+    imported = any(
+        isinstance(node, ast.ImportFrom)
+        and node.module == module
+        and any(alias.name == symbol and alias.asname is None for alias in node.names)
+        for node in ast.walk(tree)
+    )
+    defined = any(
+        isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef | ast.ClassDef)
+        and node.name == symbol
+        for node in ast.walk(tree)
+    )
+    rebound = any(symbol in names for names, _value in _rebindings(tree))
+    return imported and not defined and not rebound
+
+
+def _manifest_result_violations(trees: dict[str, ast.Module]) -> list[str]:
+    """The sole ``ManifestRewriteResult`` must carry the bytes the manifest rewriter returned."""
+    expected = f"{MANIFEST_MODULE}::{MANIFEST_PLANNER}"
+    sites = _symbol_call_sites(trees, MANIFEST_RESULT)
+    located = sorted(site.located for site in sites)
+    if located != [expected]:
+        return [_gate_msg(f"{MANIFEST_RESULT}(...) sites are {located}, expected only {expected}")]
+    planner = _function(trees[MANIFEST_MODULE], MANIFEST_PLANNER)
+    if planner is None:
+        return [_gate_msg(f"{MANIFEST_MODULE} no longer defines {MANIFEST_PLANNER}")]
+    verified = _argument(sites[0].call, MANIFEST_VERIFIED_FIELD, MANIFEST_VERIFIED_INDEX)
+    binding = (
+        _sole_binding(_bindings(planner), verified.id) if isinstance(verified, ast.Name) else None
+    )
+    if binding is None or not _is_call_to(binding.value, MANIFEST_REWRITER):
+        return [
+            _gate_msg(
+                f"{MANIFEST_RESULT}.{MANIFEST_VERIFIED_FIELD} in {MANIFEST_PLANNER} is not a "
+                f"local bound once to what {MANIFEST_REWRITER}() returned"
+            )
+        ]
+    rewriter_module = MANIFEST_REWRITER_MODULE.removesuffix(".py")
+    if not _imports_unshadowed(trees[MANIFEST_MODULE], rewriter_module, MANIFEST_REWRITER):
+        return [
+            _gate_msg(
+                f"{MANIFEST_PLANNER} calls a {MANIFEST_REWRITER} that is not the one "
+                f"{MANIFEST_REWRITER_MODULE} defines"
+            )
+        ]
+    return _manifest_gate_violations(trees)
+
+
+@dataclass(frozen=True)
+class _ManifestGateInputs:
+    """The locals holding the two expectations the manifest gates compare against.
+
+    Both are bound from ``_plan_updates``, the same call that planned the edits the returned
+    bytes were spliced from, so a gate cannot compare against an expectation of its own making.
+    """
+
+    edits: frozenset[str]
+    records: frozenset[str]
+
+
+def _is_splice_gate(test: ast.Compare, verified: str, inputs: _ManifestGateInputs) -> bool:
+    """True for ``verified != _splice_expected_bytes(<source>, <planned edits>, <ending>)``."""
+    left, right = test.left, test.comparators[0]
+    if not (isinstance(left, ast.Name) and left.id == verified):
+        return False
+    if not (isinstance(right, ast.Call) and _is_call_to(right, MANIFEST_SPLICE_GATE)):
+        return False
+    edits = _argument(right, "edits", 1)
+    return isinstance(edits, ast.Name) and edits.id in inputs.edits
+
+
+def _is_reparse_gate(test: ast.Compare, verified: str, inputs: _ManifestGateInputs) -> bool:
+    """True for ``parse_manifest_snapshot(verified, ...) != tuple(<expected records>)``."""
+    left, right = test.left, test.comparators[0]
+    if not (isinstance(left, ast.Call) and _is_call_to(left, MANIFEST_REPARSE_GATE)):
+        return False
+    if not (isinstance(right, ast.Call) and _is_call_to(right, "tuple")):
+        return False
+    reparsed = left.args[0] if left.args else None
+    records = right.args[0] if right.args else None
+    return (
+        isinstance(reparsed, ast.Name)
+        and reparsed.id == verified
+        and isinstance(records, ast.Name)
+        and records.id in inputs.records
+    )
+
+
+def _manifest_gate_kind(
+    statement: ast.stmt, verified: str, inputs: _ManifestGateInputs
+) -> str | None:
+    """Name the manifest gate a top-level statement is, when it checks ``verified``.
+
+    A gate is an ``if`` whose only body is a ``raise`` and whose test compares ``verified``
+    against its independent expectation with ``!=``: the splice of the planned edits, or the
+    expected semantic records a full reparse must reproduce.
+    """
+    raises_on_mismatch = (
+        isinstance(statement, ast.If)
+        and not statement.orelse
+        and len(statement.body) == 1
+        and isinstance(statement.body[0], ast.Raise)
+    )
+    test = statement.test if isinstance(statement, ast.If) else None
+    compares_unequal = (
+        isinstance(test, ast.Compare) and len(test.ops) == 1 and isinstance(test.ops[0], ast.NotEq)
+    )
+    if not (raises_on_mismatch and compares_unequal and isinstance(test, ast.Compare)):
+        return None
+    if _is_splice_gate(test, verified, inputs):
+        return MANIFEST_SPLICE_GATE
+    if _is_reparse_gate(test, verified, inputs):
+        return MANIFEST_REPARSE_GATE
+    return None
+
+
+def _manifest_gate_violations(trees: dict[str, ast.Module]) -> list[str]:
+    """Every changed return of the manifest rewriter must follow both of its gates.
+
+    The manifest gates verify the final bytes themselves rather than text a later step
+    restores, so a changed return must be a local bound exactly once and checked by an
+    unconditional top-level splice gate and an unconditional top-level reparse gate, both
+    after its binding and before the return. The only other return allowed is the rewriter's
+    own unchanged input, the valid no-op.
+    """
+    func = _function(trees[MANIFEST_REWRITER_MODULE], MANIFEST_REWRITER)
+    if func is None:
+        return [_gate_msg(f"{MANIFEST_REWRITER_MODULE} no longer defines {MANIFEST_REWRITER}")]
+    bindings = _bindings(func)
+    if MANIFEST_INPUT in bindings:
+        return [_gate_msg(f"{MANIFEST_REWRITER}() rebinds its input {MANIFEST_INPUT!r}")]
+    inputs = _ManifestGateInputs(
+        _index_bound_names(bindings, MANIFEST_EDIT_PLANNER, PLANNED_EDITS_INDEX),
+        _index_bound_names(bindings, MANIFEST_EDIT_PLANNER, EXPECTED_RECORDS_INDEX),
+    )
+    problems: list[str] = []
+    for node in _walk_local(func):
+        if not isinstance(node, ast.Return):
+            continue
+        value = node.value
+        if isinstance(value, ast.Name) and value.id == MANIFEST_INPUT:
+            continue
+        index = _top_level_index(func, node)
+        binding = _sole_binding(bindings, value.id) if isinstance(value, ast.Name) else None
+        bound_at = _top_level_index(func, binding.value) if binding is not None else None
+        if index is None or bound_at is None or not isinstance(value, ast.Name):
+            problems.append(
+                _gate_msg(
+                    f"{MANIFEST_REWRITER}() returns a possibly changed manifest at line "
+                    f"{node.lineno} that is not a local bound once"
+                )
+            )
+            continue
+        gates = {
+            _manifest_gate_kind(statement, value.id, inputs)
+            for statement in func.body[bound_at + 1 : index]
+        }
+        if not {MANIFEST_SPLICE_GATE, MANIFEST_REPARSE_GATE} <= gates:
+            problems.append(
+                _gate_msg(
+                    f"the manifest {MANIFEST_REWRITER}() returns at line {node.lineno} is not "
+                    f"checked by both an unconditional {MANIFEST_SPLICE_GATE} gate and an "
+                    f"unconditional {MANIFEST_REPARSE_GATE} gate after it is bound"
+                )
+            )
+    return problems
 
 
 def _gated_text_violations(trees: dict[str, ast.Module]) -> list[str]:
@@ -1592,7 +1879,8 @@ def _provenance_violations(sources: dict[str, str]) -> list[str]:
     trees = {module: ast.parse(source) for module, source in sources.items()}
     # Every rule below indexes these two modules directly, so report a move as the guard
     # diagnostic it is instead of letting the suite die on a bare KeyError.
-    missing = sorted({RECONCILE_MODULE, TRANSACTION_MODULE} - trees.keys())
+    guarded = {RECONCILE_MODULE, TRANSACTION_MODULE, MANIFEST_MODULE, MANIFEST_REWRITER_MODULE}
+    missing = sorted(guarded - trees.keys())
     if missing:
         return [_gate_msg(f"the modules this guard reads, {missing}, are no longer where it looks")]
     return [
@@ -1771,6 +2059,49 @@ from .reconcile import Rewrite
 def corrupt(rewrite: Rewrite, data: bytes) -> Rewrite:
     """Return a Rewrite carrying bytes the reparse gate never saw."""
     return dataclasses.replace(rewrite, after=data)
+'''
+
+
+FIELD_NAME_MANIFEST_PRODUCER_MODULE = '''"""A producer trusting the verified field name."""
+
+from .manifest_reconcile import ManifestRewriteResult
+from .reconcile import Rewrite
+
+
+def build(result: ManifestRewriteResult) -> Rewrite:
+    """Mint a manifest Rewrite outside the converter the guard traces."""
+    return Rewrite(result.destination, result.before, result.verified_bytes, frozenset())
+'''
+
+ROGUE_MANIFEST_RESULT_MODULE = '''"""A verified manifest result minted from arbitrary bytes."""
+
+from pathlib import Path
+
+from .manifest_reconcile import ManifestRewriteResult
+
+
+def build(path: Path, before: bytes, data: bytes) -> ManifestRewriteResult:
+    """Claim bytes the manifest gates never saw are verified."""
+    return ManifestRewriteResult(path, before, data, ())
+'''
+
+MANIFEST_RESULT_COPY_MODULE = '''"""A module copying a manifest result with replacement bytes."""
+
+import dataclasses
+
+from .manifest_reconcile import ManifestRewriteResult
+
+
+def corrupt(result: ManifestRewriteResult, data: bytes) -> ManifestRewriteResult:
+    """Return a result carrying bytes the manifest gates never saw."""
+    return dataclasses.replace(result, verified_bytes=data)
+'''
+
+SHADOWED_MANIFEST_REWRITER = '''
+
+def rewrite_manifest_bytes(fresh_bytes: bytes, **_kwargs: object) -> bytes:
+    """Shadow the verified rewriter with one that verifies nothing."""
+    return fresh_bytes + b"unverified"
 '''
 
 
@@ -1990,6 +2321,83 @@ def _positive_controls() -> dict[str, dict[str, str]]:
             TRANSACTION_MODULE,
             FORWARD_SINK_CALL,
             f"{FORWARD_SINK_CALL}\n{SINK_INDENT}writer.file_sha256(entry.destination)",
+        ),
+        **_manifest_positive_controls(sources),
+    }
+
+
+def _manifest_positive_controls(sources: dict[str, str]) -> dict[str, dict[str, str]]:
+    """Each named control bends the manifest chain into one distinct bypass of its gates.
+
+    GTX-888 assigned two shapes to this chain: an ungated manifest ``Rewrite`` construction and
+    a substitution after verification. Each is exercised at every link it could hide in: the
+    converter that mints the ``Rewrite``, the planner that builds the verified result, and the
+    rewriter whose gates verify the bytes. The rest close the ways each link can be defeated
+    without being named: minting a result elsewhere or by field copy, a return ahead of the
+    gates, a gate that cannot fail or that a condition can skip, and a local function
+    shadowing the rewriter the planner calls.
+    """
+    return {
+        "ungated-manifest-rewrite-trusting-the-field-name": {
+            **sources,
+            "rogue_manifest_producer.py": FIELD_NAME_MANIFEST_PRODUCER_MODULE,
+        },
+        "manifest-rewrite-built-from-unverified-bytes": _patched(
+            sources, MANIFEST_MODULE, "        result.verified_bytes,", "        result.before,"
+        ),
+        "manifest-rewrite-built-from-a-rebound-result": _patched(
+            sources,
+            MANIFEST_MODULE,
+            "    return Rewrite(\n        result.destination,",
+            "    result = result\n    return Rewrite(\n        result.destination,",
+        ),
+        "manifest-result-built-from-unverified-bytes": _patched(
+            sources,
+            MANIFEST_MODULE,
+            "ManifestRewriteResult(destination, before, verified, changed)",
+            "ManifestRewriteResult(destination, before, before, changed)",
+        ),
+        "manifest-result-minted-outside-the-planner": {
+            **sources,
+            "rogue_manifest_result.py": ROGUE_MANIFEST_RESULT_MODULE,
+        },
+        "manifest-result-copied-with-replacement-bytes": {
+            **sources,
+            "rogue_manifest_copy.py": MANIFEST_RESULT_COPY_MODULE,
+        },
+        "manifest-bytes-substituted-in-the-planner": _patched(
+            sources,
+            MANIFEST_MODULE,
+            "        if verified == before:",
+            '        verified = verified.replace(b"a", b"b")\n        if verified == before:',
+        ),
+        "manifest-rewriter-shadowed-in-the-planner": _extended(
+            sources, MANIFEST_MODULE, SHADOWED_MANIFEST_REWRITER
+        ),
+        "manifest-bytes-substituted-after-verification": _patched(
+            sources,
+            MANIFEST_REWRITER_MODULE,
+            "    return after\n",
+            '    after = normalized.encode("utf-8")\n    return after\n',
+        ),
+        "manifest-returned-ahead-of-its-gates": _patched(
+            sources,
+            MANIFEST_REWRITER_MODULE,
+            '    after = rewritten.replace("\\n", ending).encode("utf-8")\n',
+            '    after = rewritten.replace("\\n", ending).encode("utf-8")\n    return after\n',
+        ),
+        "manifest-gate-weakened-by-a-condition": _patched(
+            sources,
+            MANIFEST_REWRITER_MODULE,
+            "    if parse_manifest_snapshot(after, source) != tuple(expected_records):\n",
+            "    if planned and parse_manifest_snapshot(after, source) != tuple(expected_records)"
+            ":\n",
+        ),
+        "manifest-gate-compared-against-its-own-output": _patched(
+            sources,
+            MANIFEST_REWRITER_MODULE,
+            "!= tuple(expected_records)",
+            "!= parse_manifest_snapshot(after, source)",
         ),
     }
 

@@ -5,7 +5,13 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from .model import ExternalIdentity
-from .reconcile import ReconcileDestinationPlan, ReconcileKey, ReconcilePlan
+from .reconcile import (
+    ReconcileDestinationPlan,
+    ReconcileKey,
+    ReconcilePlan,
+    Rewrite,
+    is_manifest_group,
+)
 from .sidecar_manifest import ManifestRecordSnapshot, parse_manifest_snapshot
 from .sidecar_rewrite import rewrite_manifest_bytes
 
@@ -29,9 +35,18 @@ class ManifestRewriteResult:
     changed: tuple[ManifestChange, ...]
 
 
-def _is_manifest_group(updates: ReconcilePlan) -> bool:
-    """Return whether any logical update belongs to an external declaration."""
-    return any(update.origin.declaration is not None for update in updates.values())
+@dataclass(frozen=True, slots=True)
+class ManifestCaptureRequest:
+    """What the I/O boundary must capture fresh for one manifest destination.
+
+    Attributes:
+        declared: The manifest's ``sidecar_manifests`` spelling, which the boundary resolves
+            again rather than reusing the load-time path the destination is keyed on.
+        selected_ids: Node ids whose records the boundary observes in the fresh bytes.
+    """
+
+    declared: str
+    selected_ids: frozenset[str]
 
 
 def _manifest_arguments(
@@ -77,6 +92,27 @@ def _changed_pairs(
     return tuple(changed)
 
 
+def manifest_capture_requests(plan: ReconcileDestinationPlan) -> dict[Path, ManifestCaptureRequest]:
+    """Name the fresh capture each manifest destination in ``plan`` needs.
+
+    Args:
+        plan: Logical updates grouped by their write destination.
+
+    Returns:
+        One request per manifest destination, keyed as ``plan`` keys it. Inline groups need no
+        capture and are absent.
+
+    Raises:
+        ValueError: If a manifest group does not carry coherent external origin evidence.
+    """
+    requests: dict[Path, ManifestCaptureRequest] = {}
+    for destination, logical_updates in plan.items():
+        if is_manifest_group(logical_updates):
+            source, expected, _updates = _manifest_arguments(destination, logical_updates)
+            requests[destination] = ManifestCaptureRequest(source, frozenset(expected))
+    return requests
+
+
 def plan_manifest_rewrites(
     plan: ReconcileDestinationPlan,
     *,
@@ -102,7 +138,7 @@ def plan_manifest_rewrites(
     inline: ReconcileDestinationPlan = {}
     rewrites: list[ManifestRewriteResult] = []
     for destination, logical_updates in plan.items():
-        if not _is_manifest_group(logical_updates):
+        if not is_manifest_group(logical_updates):
             inline[destination] = logical_updates
             continue
         source, expected, updates = _manifest_arguments(destination, logical_updates)
@@ -123,3 +159,24 @@ def plan_manifest_rewrites(
         changed = _changed_pairs(before_records, after_records)
         rewrites.append(ManifestRewriteResult(destination, before, verified, changed))
     return inline, tuple(rewrites)
+
+
+def transaction_rewrite(result: ManifestRewriteResult) -> Rewrite:
+    """Convert one verified manifest result into the rewrite the transaction publishes.
+
+    AD-30 admits this as the manifest producer: the after image is the result's
+    ``verified_bytes`` exactly, which ``plan_manifest_rewrites`` binds from
+    ``sidecar_rewrite.rewrite_manifest_bytes`` and nowhere else.
+
+    Args:
+        result: One changed manifest from ``plan_manifest_rewrites``.
+
+    Returns:
+        The exact-byte rewrite of that manifest, whose ``applied`` refs are the changed edges'.
+    """
+    return Rewrite(
+        result.destination,
+        result.before,
+        result.verified_bytes,
+        frozenset(change.ref for change in result.changed),
+    )

@@ -8,11 +8,17 @@ import typer
 from rich.markup import escape
 
 from ...constants import VALID_BASIC_OUTPUT_FORMATS
-from ...error_types import UnreadableDocError, ValidationError
-from ...model import format_document_origin
+from ...error_types import UnreadableDocError
+from ...manifest_reconcile import (
+    manifest_capture_requests,
+    plan_manifest_rewrites,
+    transaction_rewrite,
+)
+from ...model import ExternalIdentity
 from ...path_utils import format_path_for_display, safe_resolve
 from ...reconcile import (
     ReconcileDestinationPlan,
+    ReconcilePlan,
     Rewrite,
     group_reconcile_updates,
     plan_rewrites,
@@ -29,39 +35,30 @@ from ...reconcile_transaction import (
     reconcile_lock,
     recover_transaction,
 )
+from ...sidecar_manifest import capture_manifest, observe_manifest_records
 from ..errors import EXIT_TOOL_ERROR, exit_on_project_error
 from ..options import BasicFormatOpt, ConfigOpt
 from ..output import select_output, write_text
 from ..runtime import CliRuntime, get_runtime
 
+# One transaction rewrite and the logical updates it actually changes, which reporting reads.
+type _PlannedWrite = tuple[Rewrite, ReconcilePlan]
 
-def _reconcile_json_payload(
-    plan: ReconcileDestinationPlan, rewrites: list[Rewrite], *, dry_run: bool
-) -> str:
+
+def _reconcile_json_payload(planned: list[_PlannedWrite], *, dry_run: bool) -> str:
     entries = sorted(
         (
             {
-                "path": str(path),
+                "path": str(update.origin.markdown_path),
                 "ref": target_ref,
-                "new_seen": new_seen,
+                "new_seen": update.new_seen,
             }
-            for rewrite in rewrites
-            for path, target_ref, new_seen in _reported_updates(plan, rewrite)
+            for _rewrite, changed in planned
+            for (_node_id, target_ref), update in changed.items()
         ),
         key=lambda entry: (entry["path"], entry["ref"]),
     )
     return json.dumps({"dry_run": dry_run, "reconciled": entries})
-
-
-def _reported_updates(
-    plan: ReconcileDestinationPlan, rewrite: Rewrite
-) -> list[tuple[Path, str, str]]:
-    """Return applied updates with their preserved reporting identities."""
-    return [
-        (update.origin.markdown_path, target_ref, update.new_seen)
-        for (_node_id, target_ref), update in plan[rewrite.path].items()
-        if target_ref in rewrite.applied
-    ]
 
 
 def _print_reconcile_lines(
@@ -111,18 +108,9 @@ def _journal_selector(
 def _resolve_reconcile_write_paths(
     plan: ReconcileDestinationPlan, project_root: Path
 ) -> ReconcileDestinationPlan:
+    """Contain each inline Markdown destination before its fresh read (AD-8)."""
     resolved_plan: ReconcileDestinationPlan = {}
     for path, updates in plan.items():
-        for (node_id, target_ref), update in updates.items():
-            if update.origin.declaration is not None:
-                raise ValidationError(
-                    f"cannot reconcile {node_id!r} -> {target_ref!r} at "
-                    f"{format_document_origin(update.origin)}: updating an external node's "
-                    "seen is not supported in this release, and this refusal names one edge at a "
-                    "time; review the upstream, then update each drifting edge's seen in its "
-                    "manifest record by hand using that edge's actual value from "
-                    "'doc-lattice check --format json' with cache_trust_stat disabled"
-                )
         try:
             destination = safe_resolve(path, project_root)
         except ValueError as exc:
@@ -132,29 +120,79 @@ def _resolve_reconcile_write_paths(
     return resolved_plan
 
 
+def _capture_manifests(
+    plan: ReconcileDestinationPlan, project_root: Path
+) -> tuple[dict[Path, bytes], dict[Path, dict[str, ExternalIdentity]]]:
+    """Capture each manifest destination once, with fresh observations of its selected records.
+
+    ``capture_manifest`` resolves the declared spelling, never the load-time group key, and is
+    the manifest's containment check before the read; the transaction contains the destination
+    again on its own (AD-8). RECONCILE.md owns the user-facing contract.
+    """
+    fresh_bytes: dict[Path, bytes] = {}
+    observations: dict[Path, dict[str, ExternalIdentity]] = {}
+    for destination, request in manifest_capture_requests(plan).items():
+        source, source_bytes = capture_manifest(request.declared, project_root)
+        fresh_bytes[destination] = source_bytes
+        observations[destination] = observe_manifest_records(
+            source_bytes, source, project_root, request.selected_ids
+        )
+    return fresh_bytes, observations
+
+
+def _plan_writes(plan: ReconcileDestinationPlan, project_root: Path) -> list[_PlannedWrite]:
+    """Plan every verified rewrite in the batch, inline documents and manifests alike.
+
+    Every refusal here precedes staging and success output, since nothing is committed until
+    the whole batch has been planned.
+    """
+    fresh_bytes, observations = _capture_manifests(plan, project_root)
+    inline_plan, manifest_results = plan_manifest_rewrites(
+        plan, fresh_bytes=fresh_bytes, observations=observations
+    )
+    inline_plan = _resolve_reconcile_write_paths(inline_plan, project_root)
+    planned: list[_PlannedWrite] = [
+        (
+            rewrite,
+            {
+                key: update
+                for key, update in inline_plan[rewrite.path].items()
+                if key[1] in rewrite.applied
+            },
+        )
+        for rewrite in plan_rewrites(inline_plan, Path.read_bytes)
+    ]
+    for result in manifest_results:
+        # A manifest reports the node and ref pairs its verified rewrite changed, never its
+        # refs alone: two nodes can share the manifest and a ref while only one of them changed.
+        group = plan[result.destination]
+        changed = {
+            (change.node_id, change.ref): group[change.node_id, change.ref]
+            for change in result.changed
+        }
+        planned.append((transaction_rewrite(result), changed))
+    return planned
+
+
 def _report_reconcile(
     runtime: CliRuntime,
-    plan: ReconcileDestinationPlan,
-    rewrites: list[Rewrite],
+    planned: list[_PlannedWrite],
     *,
     dry_run: bool,
     json_out: bool,
 ) -> None:
     if json_out:
-        write_text(runtime, _reconcile_json_payload(plan, rewrites, dry_run=dry_run))
+        write_text(runtime, _reconcile_json_payload(planned, dry_run=dry_run))
         return
-    for rewrite in rewrites:
-        reported = _reported_updates(plan, rewrite)
-        if reported:
-            # One node per destination, so every update in the group reports the same Markdown
-            # identity; the callee already sorts the refs it is handed.
-            _print_reconcile_lines(
-                runtime,
-                reported[0][0],
-                frozenset(target_ref for _path, target_ref, _new_seen in reported),
-                dry_run=dry_run,
-            )
-    if not rewrites:
+    for _rewrite, changed in planned:
+        # A manifest destination can carry several nodes, so each changed node is reported
+        # under its own Markdown identity; the callee already sorts the refs it is handed.
+        by_identity: dict[Path, set[str]] = {}
+        for (_node_id, target_ref), update in changed.items():
+            by_identity.setdefault(update.origin.markdown_path, set()).add(target_ref)
+        for path, refs in by_identity.items():
+            _print_reconcile_lines(runtime, path, frozenset(refs), dry_run=dry_run)
+    if not planned:
         # The all-clear is a print like any other, so it carries the same one-record contract:
         # 20 characters must not wrap into two lines on a narrower console.
         runtime.stdout.print("nothing to reconcile", soft_wrap=True)
@@ -404,13 +442,13 @@ def register_reconcile(app: typer.Typer) -> None:
                         ref=ref,
                         reconcile_all=reconcile_all,
                     )
-                    plan = group_reconcile_updates(logical_plan)
-                    plan = _resolve_reconcile_write_paths(plan, project.project_root)
-                    rewrites = plan_rewrites(plan, Path.read_bytes)
-                    if not dry_run and rewrites:
+                    planned = _plan_writes(
+                        group_reconcile_updates(logical_plan), project.project_root
+                    )
+                    if not dry_run and planned:
                         commit_rewrites(
                             project.project_root,
-                            rewrites,
+                            [rewrite for rewrite, _changed in planned],
                             selector=_journal_selector(
                                 downstream_id,
                                 reconcile_all=reconcile_all,
@@ -420,8 +458,7 @@ def register_reconcile(app: typer.Typer) -> None:
                         )
             _report_reconcile(
                 runtime,
-                plan,
-                rewrites,
+                planned,
                 dry_run=dry_run,
                 json_out=json_out,
             )

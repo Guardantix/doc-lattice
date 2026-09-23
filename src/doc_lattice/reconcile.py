@@ -124,6 +124,19 @@ type ReconcilePlan = dict[ReconcileKey, ReconcileUpdate]
 type ReconcileDestinationPlan = dict[Path, ReconcilePlan]
 
 
+def is_manifest_group(updates: ReconcilePlan) -> bool:
+    """Return whether a destination group carries an external node's update.
+
+    Args:
+        updates: One destination's logical updates.
+
+    Returns:
+        True when any update belongs to an external declaration, whose ``seen`` lives in its
+        manifest rather than in Markdown.
+    """
+    return any(update.origin.declaration is not None for update in updates.values())
+
+
 @dataclass(frozen=True, slots=True)
 class _SourceEdit:
     start: int
@@ -1566,8 +1579,8 @@ def reconcile(
     edge is skipped (it does not block the node's reconcilable edges); only a single-node
     ``--ref`` aimed directly at a broken edge is refused, and a single-node ``--ref`` that
     matches no edge on the node is reported rather than silently doing nothing.
-    External and inline downstreams are both represented here. Destination resolution owns the
-    interim refusal for an external update until manifest rewriting is supported.
+    External and inline downstreams are both represented here; each update carries the origin
+    that decides whether it is written to Markdown or to a sidecar manifest.
 
     Args:
         lattice: The built lattice (its upstream content is the reconcile snapshot).
@@ -1583,11 +1596,8 @@ def reconcile(
         ValidationError: If ``downstream_id`` is not in the lattice, if ``ref`` is given but
             matches no edge on the node (both only when not ``reconcile_all``), or if an edge
             resolves to a target id that sits in a slug-collision component. The collision
-            refusal is suppressed once an earlier selected edge has recorded an external
-            update, because destination resolution refuses that update and the earlier
-            refusal is the one the selection order owes the caller. A caller that plans
-            without resolving destinations therefore has to refuse an external update itself,
-            or it silently loses the ambiguity the suppressed refusal named.
+            refusal is run-wide: it fires wherever selection reaches the edge, whatever was
+            selected before it.
         BrokenRefError: If ``ref`` targets an edge that has no resolvable target.
     """
     if not reconcile_all and downstream_id not in lattice.nodes_by_id:
@@ -1598,7 +1608,6 @@ def reconcile(
     plan: ReconcilePlan = {}
     cache: dict[TargetId, str] = {}
     ref_matched = False
-    deferred_external_refusal = False
     for node_id in node_ids:
         node = lattice.nodes_by_id[node_id]
         for edge in node.derives_from:
@@ -1624,10 +1633,6 @@ def reconcile(
                 continue
             collision = lattice.collisions.get(edge.target_id)
             if collision is not None:
-                if deferred_external_refusal:
-                    # Destination resolution owns the earlier external refusal. Preserve the
-                    # selection-order contract by not replacing it with a later ambiguity.
-                    continue
                 # Refusing keeps the tool from blessing a dependency the declaration cannot
                 # unambiguously name. Writing `seen` here would lock a hash to an id document
                 # order can hand to a different heading, which resolves without breaking.
@@ -1643,7 +1648,6 @@ def reconcile(
                 continue
             origin = node.origin or DocumentOrigin(node.path)
             plan[(node_id, edge.target_ref)] = ReconcileUpdate(new_seen, origin)
-            deferred_external_refusal |= origin.declaration is not None
     if targeting_specific_ref and not ref_matched:
         raise ValidationError(
             f"node {downstream_id!r} has no edge matching ref {ref!r}; run check to list its edges"
@@ -1761,22 +1765,30 @@ def _line_ending(text: str) -> str:
     return uniform_line_ending(text) or "\n"
 
 
-def _refuse_multi_node_destination(destination: Path, logical_updates: ReconcilePlan) -> None:
-    """Refuse a Markdown rewrite group that carries updates for more than one node.
+def _refuse_non_markdown_destination(destination: Path, logical_updates: ReconcilePlan) -> None:
+    """Refuse a rewrite group that is not one inline node's Markdown file.
 
     Args:
         destination: The file the group would be written to.
         logical_updates: The group's logical updates, keyed by node id and target ref.
 
     Raises:
-        ValueError: If two nodes share the destination.
+        ValueError: If the group carries an external node's update, or two nodes share the
+            destination. Either one is a manifest group, which belongs to the manifest rewriter.
     """
+    shown = format_path_for_display(destination)
+    if is_manifest_group(logical_updates):
+        msg = (
+            f"cannot rewrite {shown} as Markdown: it carries an external node's update, whose "
+            "seen lives in its manifest and belongs to the manifest rewriter"
+        )
+        raise ValueError(msg)
     node_ids = list(dict.fromkeys(node_id for node_id, _target_ref in logical_updates))
     if len(node_ids) == 1:
         return
     shared = ", ".join(repr(node_id) for node_id in node_ids)
     msg = (
-        f"cannot rewrite {format_path_for_display(destination)} as Markdown: it carries "
+        f"cannot rewrite {shown} as Markdown: it carries "
         f"{len(node_ids)} nodes ({shared}), so flattening the group to one update per ref "
         "would keep only the last node's seen; a destination two nodes share is a manifest "
         "and belongs to the manifest rewriter"
@@ -1795,16 +1807,17 @@ def plan_rewrites(
     ``apply_reconcile``. A file written entirely in CRLF or in lone CR is rewritten in that
     same ending, so updating one ``seen`` does not restyle every other line.
 
-    This is the Markdown rewriter, so it refuses a destination carrying more than one node
-    before flattening each group back to ``{ref: new_seen}`` for ``apply_reconcile``. A
-    destination two nodes share is a manifest, which ``group_reconcile_updates`` keeps keyed
-    by node precisely because two nodes can share a manifest and an upstream ref; flattening
-    such a group would keep only the last node's hash. Destination resolution refuses an
-    external update before this point, so that refusal is a caller contract rather than a
-    user diagnostic, and GTX-757's manifest rewriter is what consumes those groups.
+    This is the Markdown rewriter, so it refuses an external node's group, and a destination
+    carrying more than one node, before flattening each group back to ``{ref: new_seen}`` for
+    ``apply_reconcile``. A destination two nodes share is a manifest, which
+    ``group_reconcile_updates`` keeps keyed by node precisely because two nodes can share a
+    manifest and an upstream ref; flattening such a group would keep only the last node's hash.
+    ``manifest_reconcile.plan_manifest_rewrites`` takes every manifest group before this point,
+    so the refusal is a caller contract rather than a user diagnostic.
 
     Args:
-        plan: Logical updates grouped by their write destination, one node per destination.
+        plan: Inline logical updates grouped by their write destination, one node per
+            destination.
         read_bytes: Reader injected by the caller for fresh downstream file bytes.
 
     Returns:
@@ -1812,14 +1825,14 @@ def plan_rewrites(
         updates are already applied are skipped.
 
     Raises:
-        ValueError: If a destination carries updates for more than one node. Only a manifest
-            destination does, and this rewriter cannot write one.
+        ValueError: If a destination carries an external node's update or updates for more
+            than one node. Only a manifest destination does, and this rewriter cannot write one.
         UnreadableDocError: If the injected reader cannot read a downstream file, or
             if the fresh frontmatter cannot be parsed or is malformed.
     """
     rewrites: list[Rewrite] = []
     for destination, logical_updates in plan.items():
-        _refuse_multi_node_destination(destination, logical_updates)
+        _refuse_non_markdown_destination(destination, logical_updates)
         # Exactly one node, and therefore at least one update: an empty group has no node ids
         # and the refusal above has already raised on it.
         source = next(iter(logical_updates.values())).origin.markdown_path
