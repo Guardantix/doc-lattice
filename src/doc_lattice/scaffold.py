@@ -153,32 +153,35 @@ def render_gitignore() -> str:
     )
 
 
-def render_precommit(version: str) -> str:
-    """Render the repo: local pre-commit hooks that run doc-lattice check, lint, and links."""
+def _render_hook(version: str, command: str) -> str:
+    """Render one always-run, argument-free hook entry for a doc-lattice command."""
     return (
-        "  - repo: local\n"
-        "    hooks:\n"
-        "      - id: doc-lattice-check\n"
-        "        name: doc-lattice check\n"
-        f"        entry: {_invocation(version, 'check')}\n"
-        "        language: system\n"
-        "        files: \\.md$\n"
-        "        pass_filenames: false\n"
-        "      - id: doc-lattice-lint\n"
-        "        name: doc-lattice lint\n"
-        f"        entry: {_invocation(version, 'lint')}\n"
-        "        language: system\n"
-        "        files: \\.md$\n"
-        "        pass_filenames: false\n"
-        "      # always_run rather than files: \\.md$, because the break links catches is\n"
-        "      # cross-document: renaming a heading in one file invalidates a link written in\n"
-        "      # another, and the file that changed is not the file that ends up wrong.\n"
-        "      - id: doc-lattice-links\n"
-        "        name: doc-lattice links\n"
-        f"        entry: {_invocation(version, 'links')}\n"
+        f"      - id: doc-lattice-{command}\n"
+        f"        name: doc-lattice {command}\n"
+        f"        entry: {_invocation(version, command)}\n"
         "        language: system\n"
         "        always_run: true\n"
         "        pass_filenames: false\n"
+    )
+
+
+def render_precommit(version: str) -> str:
+    """Render the repo: local pre-commit hooks that run doc-lattice check, lint, and links.
+
+    Every hook shares one trigger policy, so each is rendered by ``_render_hook``; the reasons
+    are carried as comments in the rendered block, where an adopter reads them.
+    """
+    return (
+        "  - repo: local\n"
+        "    hooks:\n"
+        "      # always_run rather than files: \\.md$, because check and lint load the lattice,\n"
+        "      # which .doc-lattice.yml and sidecar manifests change with no .md file staged.\n"
+        f"{_render_hook(version, 'check')}"
+        f"{_render_hook(version, 'lint')}"
+        "      # always_run rather than files: \\.md$, because the break links catches is\n"
+        "      # cross-document: renaming a heading in one file invalidates a link written in\n"
+        "      # another, and the file that changed is not the file that ends up wrong.\n"
+        f"{_render_hook(version, 'links')}"
     )
 
 

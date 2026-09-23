@@ -44,6 +44,12 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   [AD-30](ARCHITECTURE.md#ad-30-only-gate-verified-bytes-may-reach-a-reconcile-destination)
   records the manifest producer the provenance guard admits.
 
+- The pre-commit block `init` prints now runs the `check` and `lint` hooks on every commit, with
+  `always_run: true` in place of `files: \.md$`, as `links` already did. A commit that changed
+  only `.doc-lattice.yml` or a sidecar manifest used to skip both, so its failures reached CI
+  unchecked. `pass_filenames: false`, the commands, the `links` hook, and the generated workflow
+  are unchanged. [README.md](README.md#enabling-the-gates) owns the hook policy and its cost.
+
 ### Added
 
 - Optional `sidecar_coverage` requires selected paths to resolve to nodes actually enrolled in
@@ -91,6 +97,11 @@ change the lattice format or existing hashes. Coverage adds no cache-schema chan
 upgrade. When external downstream drift is present, review each upstream change first, then
 reconcile the reviewed node, which rewrites only its manifest record as
 [RECONCILE.md](RECONCILE.md#external-downstreams) describes.
+
+Every installation, inline-only included, replaces its pre-commit block with the one this release
+prints, as [README.md](README.md#the-pre-commit-snippet-every-install) describes. Changing the
+version pins alone keeps the old `files: \.md$` triggers on `check` and `lint`, so they go on
+skipping metadata-only commits. An active installation needs no reactivation.
 
 ## [7.3.0] - 2026-09-13
 

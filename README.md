@@ -1221,11 +1221,15 @@ baseline depends on. The order is:
 already has a baseline, skips the reconcile step and with it the ordering constraint, so run the
 two commands as soon as you find the gates off.
 
-Confirm activation with any commit. The `links` hook carries `always_run: true`, because the break
-it catches is cross-document and the file that changed is not the file that ends up wrong, so it
-runs on every commit and reports itself as passed or failed either way. The `check` and `lint`
-entries carry `files: \.md$`, so a commit staging no Markdown file reports those two as
-`Skipped`; that is still a working gate, and the `links` line beside them is the proof.
+Confirm activation with any commit. All three hooks carry `always_run: true`, so every commit runs
+all three, including one that stages no Markdown file, and each reports itself as passed or
+failed. `links` runs that way because the break it catches is cross-document, and the file that
+changed is not the file that ends up wrong. `check` and `lint` run that way because they load the
+whole lattice, which `.doc-lattice.yml` and any [sidecar manifest](#sidecar-manifests) change
+without a Markdown file being staged. Manifest paths are yours to choose, so no filename filter
+could name them all. The cost is two lattice loads on commits that would once have skipped them,
+and a lattice failure already in the tree now blocks an unrelated commit until it is fixed.
+`pass_filenames: false` keeps each command's arguments the same whatever is staged.
 
 The hook entries run `uvx --python 3.13 --from doc-lattice==7.3.0`, so the pinned release has to
 resolve on every gated commit, out of uv's cache once it is warm and from PyPI when it is not.
@@ -1276,7 +1280,9 @@ uvx --python 3.13 --from doc-lattice==NEW_VERSION doc-lattice init --print-only
 
 Replace your whole block with the printed one instead of hand-editing the pinned version in its
 three `entry:` lines. The block carries generated structure beyond those three commands, so
-bumping only the pins silently keeps an outdated hook shape.
+bumping only the pins silently keeps an outdated hook shape. The trigger policy is part of that
+structure: a block whose `check` and `lint` entries still carry `files: \.md$` keeps skipping
+them on every commit that stages no Markdown file, whatever release its pins name.
 
 Replacing the block does not need reactivation, because the installed hook reads
 `.pre-commit-config.yaml` on every commit rather than baking it in. An installation that never

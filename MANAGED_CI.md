@@ -323,8 +323,8 @@ uv tool run pre-commit install
 
 Committing that diff is then the first gated commit, and all three hooks running on it is what
 shows the activation took. [README.md](README.md#enabling-the-gates) owns why this pair rather
-than `uvx pre-commit install`, what an established installation does instead, and why any commit
-confirms activation even though the `check` and `lint` hooks may report `Skipped`.
+than `uvx pre-commit install`, what an established installation does instead, and why all three
+hooks run on every commit.
 
 ### 6. Verify by hand
 
