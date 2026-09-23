@@ -3,13 +3,18 @@
 from pathlib import Path
 
 
-def safe_resolve(path: str | Path, root: Path | None = None) -> Path:
+def safe_resolve(
+    path: str | Path, root: Path | None = None, *, resolved_root: Path | None = None
+) -> Path:
     """Resolve a path and verify it stays within a containment root.
 
     Args:
-        path: The path to resolve, absolute or relative.
+        path: The path to resolve, absolute or relative to the working directory.
         root: The containment boundary; defaults to the resolved current working
             directory when omitted.
+        resolved_root: A canonical containment root resolved earlier in the same operation.
+            Supply this instead of ``root`` to reuse that resolution; an arbitrary absolute
+            path is not necessarily resolved.
 
     Returns:
         The fully resolved path (symlinks followed, "." and ".." segments collapsed).
@@ -17,9 +22,12 @@ def safe_resolve(path: str | Path, root: Path | None = None) -> Path:
     Raises:
         ValueError: If the resolved path is not inside root.
     """
-    if root is None:
-        root = Path.cwd()
-    root = root.resolve()
+    if resolved_root is None:
+        root = (Path.cwd() if root is None else root).resolve()
+    elif root is not None:
+        raise TypeError("root and resolved_root are mutually exclusive")
+    else:
+        root = resolved_root
     # Resolve first: .resolve() collapses ".." and follows symlinks, so a path that escapes the
     # root by either route lands outside it and fails the relative_to containment check below.
     resolved = Path(path).resolve()

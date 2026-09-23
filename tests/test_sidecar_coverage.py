@@ -69,6 +69,58 @@ def test_contained_aliases_of_enrolled_targets_are_covered(tmp_path):
     enforce_coverage(tmp_path, _policy(), {target})
 
 
+def test_coverage_resolves_root_once_per_run_and_each_candidate_once(tmp_path, monkeypatch):
+    root = tmp_path / "project"
+    root.mkdir()
+    targets = [root / f"file{index}.md" for index in range(3)]
+    for target in targets:
+        target.write_text("# Covered\n")
+    original_resolve = Path.resolve
+    resolved_paths = []
+
+    def record_resolve(path, *args, **kwargs):
+        resolved_paths.append(path)
+        return original_resolve(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "resolve", record_resolve)
+    for _ in range(2):
+        enforce_coverage(root, _policy(), set(targets))
+
+    assert resolved_paths.count(root) == 2
+    assert all(resolved_paths.count(target) == 2 for target in targets)
+    assert len(resolved_paths) == 2 * (1 + len(targets))
+
+
+def test_symlinked_project_root_keeps_alias_and_refuses_exempt_escape(tmp_path, monkeypatch):
+    project = tmp_path / "project"
+    project.mkdir()
+    alias = tmp_path / "alias"
+    alias.symlink_to(project, target_is_directory=True)
+    target = project / "target.txt"
+    target.write_text("# Covered\n")
+    (project / "contained.md").symlink_to(target)
+    outside = tmp_path / "outside.md"
+    outside.write_text("# Outside\n")
+    (project / "escape.md").symlink_to(outside)
+    original_resolve = Path.resolve
+    root_resolutions = []
+
+    def record_resolve(path, *args, **kwargs):
+        if path == alias:
+            root_resolutions.append(path)
+        return original_resolve(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "resolve", record_resolve)
+    with pytest.raises(CoverageError) as info:
+        enforce_coverage(alias, _policy(exempt=["escape.md"]), {target})
+
+    message = str(info.value)
+    assert "'escape.md': selected by '*.md'; cannot resolve or inspect selected path" in message
+    assert "exemptions cannot waive invalid paths" in message
+    assert "'contained.md': selected by" not in message
+    assert len(root_resolutions) == 1
+
+
 @pytest.mark.parametrize("exempt", ["a.md", "b.md"])
 def test_exemption_cannot_transfer_between_aliases(tmp_path, exempt):
     target = tmp_path / "target.txt"
