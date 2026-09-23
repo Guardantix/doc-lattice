@@ -1,6 +1,7 @@
 """Typer adapter for transactional reconcile orchestration."""
 
 import json
+from dataclasses import replace
 from pathlib import Path
 from typing import Annotated
 
@@ -10,11 +11,12 @@ from rich.markup import escape
 from ...constants import VALID_BASIC_OUTPUT_FORMATS
 from ...error_types import UnreadableDocError
 from ...manifest_reconcile import (
+    ManifestRewriteResult,
     manifest_capture_requests,
     plan_manifest_rewrites,
     transaction_rewrite,
 )
-from ...model import ExternalIdentity
+from ...model import DocumentOrigin, ExternalIdentity, format_origins, origins_json
 from ...path_utils import format_path_for_display, safe_resolve
 from ...reconcile import (
     ReconcileDestinationPlan,
@@ -45,6 +47,11 @@ from ..runtime import CliRuntime, get_runtime
 type _PlannedWrite = tuple[Rewrite, ReconcilePlan]
 
 
+def _downstream_origins(node_id: str, origin: DocumentOrigin) -> dict[str, DocumentOrigin]:
+    """Select the changed downstream's origin when external; RECONCILE.md owns why only it."""
+    return {} if origin.declaration is None else {node_id: origin}
+
+
 def _reconcile_json_payload(planned: list[_PlannedWrite], *, dry_run: bool) -> str:
     entries = sorted(
         (
@@ -52,9 +59,10 @@ def _reconcile_json_payload(planned: list[_PlannedWrite], *, dry_run: bool) -> s
                 "path": str(update.origin.markdown_path),
                 "ref": target_ref,
                 "new_seen": update.new_seen,
+                **origins_json(_downstream_origins(node_id, update.origin)),
             }
             for _rewrite, changed in planned
-            for (_node_id, target_ref), update in changed.items()
+            for (node_id, target_ref), update in changed.items()
         ),
         key=lambda entry: (entry["path"], entry["ref"]),
     )
@@ -66,17 +74,21 @@ def _print_reconcile_lines(
     path: Path,
     applied: frozenset[str],
     *,
+    origins: dict[str, DocumentOrigin],
     dry_run: bool,
 ) -> None:
     verb = "would reconcile" if dry_run else "reconciled"
     # The basename is still repo-controlled, so it is displayed rather than interpolated raw.
     name = escape(format_path_for_display(Path(path.name)))
+    # An external downstream's line also names its manifest record, so two documents sharing
+    # a basename stay distinguishable; an inline one's suffix is empty.
+    suffix = escape(format_origins(origins))
     for target_ref in sorted(applied):
         # soft_wrap: each record is one line at any width, so a long document name or target
         # ref stays intact instead of hard-wrapping mid-token. Same contract the impact,
         # check, lint, and stale-shipped renderers carry, and the one _report_recovery below
         # already opts into for its journal paths.
-        runtime.stdout.print(f"{verb} {name}: {escape(target_ref)}", soft_wrap=True)
+        runtime.stdout.print(f"{verb} {name}: {escape(target_ref)}{suffix}", soft_wrap=True)
 
 
 def _journal_selector(
@@ -140,6 +152,25 @@ def _capture_manifests(
     return fresh_bytes, observations
 
 
+def _located_changes(result: ManifestRewriteResult, group: ReconcilePlan) -> ReconcilePlan:
+    """Select the pairs one verified manifest rewrite changed, each at its fresh record index.
+
+    Pairs rather than refs, since two nodes can share a manifest and a ref while only one
+    changed; and the fresh index rather than ``group``'s load-time one, which a reorder by
+    another writer can leave stale.
+    """
+    changed: ReconcilePlan = {}
+    for change in result.changed:
+        key = (change.node_id, change.ref)
+        update = group[key]
+        declaration = update.origin.declaration
+        if declaration is None:
+            raise ValueError("a changed manifest pair requires an external declaration")
+        located = replace(declaration, record_index=change.record_index)
+        changed[key] = replace(update, origin=replace(update.origin, declaration=located))
+    return changed
+
+
 def _plan_writes(plan: ReconcileDestinationPlan, project_root: Path) -> list[_PlannedWrite]:
     """Plan every verified rewrite in the batch, inline documents and manifests alike.
 
@@ -162,15 +193,10 @@ def _plan_writes(plan: ReconcileDestinationPlan, project_root: Path) -> list[_Pl
         )
         for rewrite in plan_rewrites(inline_plan, Path.read_bytes)
     ]
-    for result in manifest_results:
-        # A manifest reports the node and ref pairs its verified rewrite changed, never its
-        # refs alone: two nodes can share the manifest and a ref while only one of them changed.
-        group = plan[result.destination]
-        changed = {
-            (change.node_id, change.ref): group[change.node_id, change.ref]
-            for change in result.changed
-        }
-        planned.append((transaction_rewrite(result), changed))
+    planned.extend(
+        (transaction_rewrite(result), _located_changes(result, plan[result.destination]))
+        for result in manifest_results
+    )
     return planned
 
 
@@ -187,11 +213,17 @@ def _report_reconcile(
     for _rewrite, changed in planned:
         # A manifest destination can carry several nodes, so each changed node is reported
         # under its own Markdown identity; the callee already sorts the refs it is handed.
-        by_identity: dict[Path, set[str]] = {}
-        for (_node_id, target_ref), update in changed.items():
-            by_identity.setdefault(update.origin.markdown_path, set()).add(target_ref)
-        for path, refs in by_identity.items():
-            _print_reconcile_lines(runtime, path, frozenset(refs), dry_run=dry_run)
+        by_node: dict[tuple[str, DocumentOrigin], set[str]] = {}
+        for (node_id, target_ref), update in changed.items():
+            by_node.setdefault((node_id, update.origin), set()).add(target_ref)
+        for (node_id, origin), refs in by_node.items():
+            _print_reconcile_lines(
+                runtime,
+                origin.markdown_path,
+                frozenset(refs),
+                origins=_downstream_origins(node_id, origin),
+                dry_run=dry_run,
+            )
     if not planned:
         # The all-clear is a print like any other, so it carries the same one-record contract:
         # 20 characters must not wrap into two lines on a narrower console.

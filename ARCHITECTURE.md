@@ -3181,7 +3181,12 @@ have merged two nodes that share a manifest and an upstream ref.
   manifest destination by its recorded fingerprints like any other.
 - Reporting names each changed node by its own Markdown identity, from the node and ref pairs the
   verified rewrite actually changed rather than from its refs, since two nodes can share a
-  manifest and a ref while only one changed. Naming the manifest location beside it is GTX-874.
+  manifest and a ref while only one changed. Beside it, reporting locates the changed downstream
+  alone with the finding origin format, at the record index the fresh read found rather than the
+  load-time one; an upstream is never located, because its manifest is not rewritten and its
+  index would describe the load snapshot. The adapter builds that origin from the result's
+  `ManifestChange.record_index`, and [RECONCILE.md](RECONCILE.md#external-downstreams) owns the
+  output shape.
 
 The GTX-766 interim refusal is retired, and with it the planner's suppression of a later
 ambiguity after an earlier external update, so an `AMBIGUOUS` edge refuses the run wherever
@@ -3229,8 +3234,8 @@ Broken section references retain the known file's origin even when the section d
 **Consequences:** AD-44's decline of a sidecar manifest no longer governs. Its envelope,
 auto-slug, hash, and `lattice_format` decisions are untouched. GTX-756 ships coverage with
 README.md owning its configuration and error contract; it requires no cache-schema change.
-GTX-757 shipped external reconcile through GTX-784, GTX-887, and GTX-888, which amended AD-30
-for the manifest producer and AD-31 for the rewriter's command behavior; AD-3 and AD-12 needed no
-amendment. The current costs are chosen ones. Foreign-frontmatter-only
+GTX-757 shipped external reconcile through GTX-784, GTX-887, GTX-888, and GTX-874, which
+amended AD-30 for the manifest producer and AD-31 for the rewriter's command behavior; AD-3 and
+AD-12 needed no amendment. The current costs are chosen ones. Foreign-frontmatter-only
 edits are invisible to drift, tools that use a reserved key in their own frontmatter cannot be
 enrolled yet, and the enrollment join runs on every load.
