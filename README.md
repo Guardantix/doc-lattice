@@ -1055,7 +1055,7 @@ your documents, then run `doc-lattice reconcile --all` once before
 [enabling the gates](#enabling-the-gates):
 
 ```bash
-uvx --python 3.13 --from doc-lattice==7.3.0 doc-lattice reconcile --all
+uvx --python 3.13 --from doc-lattice==7.4.0 doc-lattice reconcile --all
 ```
 
 Commit the annotated input state and start from an otherwise clean working tree before running
@@ -1087,7 +1087,7 @@ Bootstrap config and the drift and authority-ladder gates for a repo whose docs 
 track:
 
 ```bash
-uvx --python 3.13 --from doc-lattice==7.3.0 doc-lattice init
+uvx --python 3.13 --from doc-lattice==7.4.0 doc-lattice init
 ```
 
 This writes `.doc-lattice.yml` (only if absent) and always prints the reconcile-artifact
@@ -1231,7 +1231,7 @@ could name them all. The cost is two lattice loads on commits that would once ha
 and a lattice failure already in the tree now blocks an unrelated commit until it is fixed.
 `pass_filenames: false` keeps each command's arguments the same whatever is staged.
 
-The hook entries run `uvx --python 3.13 --from doc-lattice==7.3.0`, so the pinned release has to
+The hook entries run `uvx --python 3.13 --from doc-lattice==7.4.0`, so the pinned release has to
 resolve on every gated commit, out of uv's cache once it is warm and from PyPI when it is not.
 These gates are offline in the sense that matters for secrets, meaning they never require or
 receive `LINEAR_API_KEY`. That is not the same as running without a network.
