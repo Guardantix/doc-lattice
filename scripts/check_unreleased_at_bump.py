@@ -36,27 +36,24 @@ migration guard already fetches. There is no pre-commit hook and no base-less mo
 base there is no way to tell a bump from an ordinary change, and a check that guessed would either
 fail every commit between releases or pass the one it exists for.
 
-Exit status
------------
-0 when the change is not a bump, or is a bump with the section present and empty. 1 when a bump
-leaves entries under the heading or removes it, and also when the check could not establish
-whether this is a bump at all: an unreadable ref, or a missing or malformed version declaration.
-The two kinds of failure print different messages; neither is ever read as permission to pass.
+Failure kinds
+-------------
+A bump that leaves the section anything but present and empty, and a run that could not establish
+whether the change is a bump at all, both exit 1 with different messages. An unreadable ref or a
+missing or malformed version declaration is never read as permission to pass.
 """
 
 import argparse
 import sys
 
 from extract_release_notes import changelog_section
-from release_gate import GateError, source_at, version_at
+from release_gate import CHANGELOG_PATH, UNRELEASED_HEADING, GateError, source_at, version_at
 
-_CHANGELOG_PATH = "CHANGELOG.md"
-_UNRELEASED = "Unreleased"
 _CANDIDATE_REF = "HEAD"
 
 
-def bump_messages(base_version: str, head_version: str, changelog_text: str | None) -> list[str]:
-    """Return one message per way a bump leaves ``## [Unreleased]`` other than present and empty.
+def bump_message(base_version: str, head_version: str, changelog_text: str | None) -> str | None:
+    """Return why a bump leaves ``## [Unreleased]`` other than present and empty, if it does.
 
     Args:
         base_version: The version the base ref declares.
@@ -65,26 +62,29 @@ def bump_messages(base_version: str, head_version: str, changelog_text: str | No
             commit carries no changelog, which on a bump is a missing heading like any other.
 
     Returns:
-        An empty list when the versions agree, which is not a bump, or when the bump leaves the
-        heading present and empty. Otherwise a single message naming what to fix.
+        None when the versions agree, which is not a bump, or when the bump leaves the heading
+        present and empty. Otherwise a message naming what to fix.
     """
     if base_version == head_version:
-        return []
-    section = None if changelog_text is None else changelog_section(changelog_text, _UNRELEASED)
+        return None
+    section = (
+        None if changelog_text is None else changelog_section(changelog_text, UNRELEASED_HEADING)
+    )
     if section is None:
-        return [
+        return (
             f"this change bumps the version from {base_version} to {head_version} but "
-            f"{_CHANGELOG_PATH} has no '## [{_UNRELEASED}]' heading; keep the heading, empty, "
-            f"above '## [{head_version}]' so the next cycle's entries have somewhere to land."
-        ]
+            f"{CHANGELOG_PATH} has no '## [{UNRELEASED_HEADING}]' heading; keep the heading, "
+            f"empty, above '## [{head_version}]' so the next cycle's entries have somewhere to "
+            f"land."
+        )
     if section:
-        return [
+        return (
             f"this change bumps the version from {base_version} to {head_version} but "
-            f"{_CHANGELOG_PATH} still has entries under '## [{_UNRELEASED}]'; the release notes "
-            f"come from '## [{head_version}]' alone, so those entries would ship in the tag "
+            f"{CHANGELOG_PATH} still has entries under '## [{UNRELEASED_HEADING}]'; the release "
+            f"notes come from '## [{head_version}]' alone, so those entries would ship in the tag "
             f"undocumented. Move them into '## [{head_version}]' and leave the heading empty."
-        ]
-    return []
+        )
+    return None
 
 
 def _parse_args() -> argparse.Namespace:
@@ -108,7 +108,7 @@ def main() -> int:
     try:
         base_version = version_at(args.base_ref, f"base ref {args.base_ref}")
         head_version = version_at(_CANDIDATE_REF, "candidate commit")
-        changelog_text = source_at(_CANDIDATE_REF, _CHANGELOG_PATH)
+        changelog_text = source_at(_CANDIDATE_REF, CHANGELOG_PATH)
     except GateError as error:
         print(
             f"could not establish whether this change is a version bump: {error}", file=sys.stderr
@@ -117,10 +117,11 @@ def main() -> int:
     # `version_at` only returns None when told the file may be missing, which neither call does.
     assert base_version is not None
     assert head_version is not None
-    messages = bump_messages(base_version, head_version, changelog_text)
-    for message in messages:
-        print(message, file=sys.stderr)
-    return 1 if messages else 0
+    message = bump_message(base_version, head_version, changelog_text)
+    if message is None:
+        return 0
+    print(message, file=sys.stderr)
+    return 1
 
 
 if __name__ == "__main__":

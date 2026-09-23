@@ -2,7 +2,7 @@
 
 The script is loaded rather than imported, and through `tests/script_loader.py`, because it
 imports two sibling scripts and a bare `run_path` would not let it. The policy is driven through
-`bump_messages` over synthetic changelogs; the entry point is driven against real Git
+`bump_message` over synthetic changelogs; the entry point is driven against real Git
 repositories, because what it reads is two commits and not a working tree. Its CI wiring is
 pinned in `tests/test_release_workflow.py`, beside the migration guard that shares its fetch.
 """
@@ -15,7 +15,7 @@ import pytest
 from script_loader import load_script, script_path
 
 _SCRIPT_PATH = script_path("check_unreleased_at_bump.py")
-bump_messages = load_script(_SCRIPT_PATH)["bump_messages"]
+bump_message = load_script(_SCRIPT_PATH)["bump_message"]
 
 _EMPTY = "# Changelog\n\n## [Unreleased]\n\n## [1.1.0] - 2026-01-02\n\n- shipped\n"
 _PENDING = (
@@ -39,19 +39,19 @@ _NO_HEADING = "# Changelog\n\n## [1.1.0] - 2026-01-02\n\n- shipped\n"
 def test_a_change_that_is_not_a_bump_passes_whatever_unreleased_holds(changelog):
     # Entries accumulating under Unreleased between releases is the section's purpose, so the
     # guard has to be silent on every non-bump, including the shapes it refuses on a bump.
-    assert bump_messages("1.1.0", "1.1.0", changelog) == []
+    assert bump_message("1.1.0", "1.1.0", changelog) is None
 
 
 def test_a_bump_that_leaves_the_heading_present_and_empty_passes():
-    assert bump_messages("1.0.0", "1.1.0", _EMPTY) == []
+    assert bump_message("1.0.0", "1.1.0", _EMPTY) is None
 
 
 def test_a_bump_that_leaves_an_entry_under_unreleased_fails_naming_the_new_section():
-    messages = bump_messages("1.0.0", "1.1.0", _PENDING)
+    message = bump_message("1.0.0", "1.1.0", _PENDING)
 
-    assert len(messages) == 1
-    assert "still has entries under '## [Unreleased]'" in messages[0]
-    assert "'## [1.1.0]'" in messages[0]
+    assert message is not None
+    assert "still has entries under '## [Unreleased]'" in message
+    assert "'## [1.1.0]'" in message
 
 
 @pytest.mark.parametrize(
@@ -71,10 +71,10 @@ def test_a_bump_without_the_heading_fails_rather_than_passing_as_empty(changelog
     # The parser answers None for a missing heading and "" for an empty one. The re-arm predicate
     # in `release_gate.py` reads both as "nothing pending"; this guard must not, since the heading
     # is the one the next cycle's entries land under.
-    messages = bump_messages("1.0.0", "1.1.0", changelog)
+    message = bump_message("1.0.0", "1.1.0", changelog)
 
-    assert len(messages) == 1
-    assert "has no '## [Unreleased]' heading" in messages[0]
+    assert message is not None
+    assert "has no '## [Unreleased]' heading" in message
 
 
 def test_a_bare_heading_marker_does_not_end_the_section_early():
@@ -83,7 +83,10 @@ def test_a_bare_heading_marker_does_not_end_the_section_early():
     # A second reading that split on it would call this section empty and pass the bump.
     changelog = "# Changelog\n\n## [Unreleased]\n##\n[x] left behind\n\n## [1.1.0]\n\n- shipped\n"
 
-    assert len(bump_messages("1.0.0", "1.1.0", changelog)) == 1
+    message = bump_message("1.0.0", "1.1.0", changelog)
+
+    assert message is not None
+    assert "still has entries under '## [Unreleased]'" in message
 
 
 # --- The entry point, against real Git repositories ------------------------------------------

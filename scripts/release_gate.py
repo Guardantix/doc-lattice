@@ -51,8 +51,8 @@ _VERSION_PATH = "src/doc_lattice/__init__.py"
 _VERSION_ASSIGNMENT = re.compile(r'^__version__ = "([^"]+)"$', re.MULTILINE)
 _ATTEMPT_PATH = ".release-attempt"
 _ATTEMPT_TOKEN = re.compile(r"(?P<version>\d+\.\d+\.\d+)[ \t]+(?P<attempt>[A-Za-z0-9._-]+)")
-_CHANGELOG_PATH = "CHANGELOG.md"
-_UNRELEASED_HEADING = "Unreleased"
+CHANGELOG_PATH = "CHANGELOG.md"
+UNRELEASED_HEADING = "Unreleased"
 
 
 class GateError(RuntimeError):
@@ -138,10 +138,10 @@ def _pending_unreleased(ref: str) -> bool:
     # `check_unreleased_at_bump.py` on the bump pull request, and more strictly: it also refuses
     # a missing heading, which this predicate lets through. AD-52 records both halves of that
     # asymmetry and why the re-arm half is left as it is.
-    changelog = source_at(ref, _CHANGELOG_PATH)
+    changelog = source_at(ref, CHANGELOG_PATH)
     if changelog is None:
         return False
-    return bool(changelog_section(changelog, _UNRELEASED_HEADING))
+    return bool(changelog_section(changelog, UNRELEASED_HEADING))
 
 
 def _re_arm_attempt(current_sha: str, before_sha: str, version: str) -> str | None:
@@ -161,7 +161,7 @@ def _re_arm_attempt(current_sha: str, before_sha: str, version: str) -> str | No
         raise GateError(f"re-arm token names version {match['version']!r}, not {version}")
     if _pending_unreleased(current_sha):
         raise GateError(
-            f"re-arm token names {version} but {_CHANGELOG_PATH} still has unreleased entries; "
+            f"re-arm token names {version} but {CHANGELOG_PATH} still has unreleased entries; "
             f"work landed since the bump would ship inside the tag undocumented. Fold those "
             f"entries into the '## [{version}]' section, or cut a new version instead of "
             f"re-arming."
