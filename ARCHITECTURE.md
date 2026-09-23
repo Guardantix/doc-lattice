@@ -3070,98 +3070,55 @@ reads manifests fresh. Public admission in GTX-766 does not change the cached fi
 representation introduced by GTX-769: registration is outside the cache and the existing facts
 are reused.
 
-**Coverage is independent of discovery and of registration (GTX-756).** The optional
-`sidecar_coverage` key holds a mapping with only these keys: `select`, a required non-empty list of selector strings,
-`exclude`, an optional list of mappings each carrying exactly `select` and `reason`, and `exempt`,
-an optional list of mappings each carrying exactly `path` and `reason`, none of them
-blank. As for `sidecar_manifests`, a null or empty `sidecar_coverage`, `select`, declared
-`exclude`, or declared `exempt` is refused at config load, and an omitted one means none. The
-selectors are AD-45's:
-`link_selectors` grammar, expanded by the shared `path_selection` no-follow walk from the project
-root. It retains every spelling and all its selecting declarations, before the alias collapse
-`links` applies. Each selector must match a path, and filesystem inspection failures refuse the
-load. Discovery's
-`docs_roots`, ignore globs, missing-file skips, escape warnings, and deduplication play no part,
-because each of those is a way a file can drop out of the list discovery returns, and reusing
-that list would hide the omissions coverage exists to report.
+**Coverage is independent of discovery and of registration (GTX-756).**
+[README's Sidecar coverage section](README.md#sidecar-coverage) owns the configuration and
+user-facing contract. The gate compares a separately selected corpus with the nodes actually
+enrolled in the loaded lattice. Reusing discovery's list would hide precisely the omissions
+coverage exists to report: discovery can skip or collapse paths before coverage sees them. The
+gate uses AD-45's shared no-follow walk but retains spellings before `links` collapses aliases;
+collapsing them would let one spelling hide another obligation.
 
-- A selected file is covered when its resolved target is a node in the loaded lattice: an
-  external registration, or an inline node discovery actually loaded. Validity alone does not
-  cover a file, so a valid inline file outside `docs_roots` or matched by an ignore glob is
-  uncovered, because its edges are not in the graph any command reads. Coverage never enrolls a
-  file. A contained alias of an enrolled target is covered; an untracked or id-less file is
-  uncovered. Coverage works without any manifest declaration.
-- An exemption names one exact path, never a glob, and a non-empty reason, so exempting today's
-  file waives nothing for a future one. Matching is literal against retained project-relative
-  spellings, with no glob expansion, normalization, or resolved-target substitution. An alias
-  exemption cannot transfer to another alias or a newly added earlier-sorting spelling. An
-  exemption that matches no path the walk kept is refused as stale, the AD-49 rule for an entry
-  that matches nothing. Two exemption entries naming the same exact path are refused at config
-  load, naming both positions, because the second declaration grants nothing and would otherwise
-  be silent. This extends AD-51's exemption contract using AD-49's silent-grant reasoning as a
-  precedent; AD-49's own declaration rule remains scoped to `legacy_marker_sources`.
-- The coverage boundary calls `safe_resolve()` and requires a regular file before granting
-  coverage or an exemption. An escaping or dangling symlink and a special file are refused; an
-  exemption cannot waive these checks.
-- Coverage refuses a symlinked directory wherever the selector would otherwise traverse it,
-  without entering it. A covered sibling cannot conceal the refusal. The walk collects every such
-  refusal in project-relative order, and coverage reports them with invalid and uncovered paths
-  in one `COVERAGE_ERROR` (GTX-794). This strengthens coverage
-  specifically; AD-45's `links` behavior stays unchanged. Declining instead was rejected: a
-  document behind such a directory would go unselected and so unreported, which is the omission
-  coverage exists to find. The refusal is therefore paired with `exclude`, because a refusal with
-  no way out of it is one an adopter cannot act on: a single interior symlink, a pnpm store or a
-  virtualenv's linked `lib64`, would end every lattice-loading command at exit 2 with no
-  declaration able to say the subtree is out of scope. `SelectionPolicy` now carries only the
-  traversal choice. Coverage owns the refusal's remedy and the `CoverageError` wording, while
-  `links` owns its unchanged `ConfigError` wording. `Exclusions` carries only pruning selectors;
-  the consumer names its own exclusion key when it reports an invalid or unmatched selector.
-- `exclude` prunes the walk rather than filtering its result (GTX-756). Pruning is what makes it
-  an answer to the refusal at all: the refusal is recorded while classifying an entry, so a
-  declaration that removed spellings afterward would arrive after the walk had already refused.
-  Applying it to each listing as it is scanned, ahead of every classification, makes that ordering
-  structural rather than a rule each branch of the walk has to repeat. One consequence is
-  deliberate and is a weakening: a scan or inspection failure inside a pruned subtree no longer
-  refuses, so an unreadable dependency tree stops failing the gate. That is the same class of
-  unactionable refusal, and pruning answers both with one mechanism rather than two.
-- An `exclude` selector whose final segment is `**` is refused at config load (GTX-795). The
-  contents-shaped spelling with a concrete prefix cannot prune that entry before traversal, so it
-  can still reach the symlink or scan refusal the exclusion was meant to avoid. The diagnostic
-  removes the entire trailing run of `**` segments when suggesting a concrete prefix. An
-  all-recursive selector has no such suggestion. Removing that suffix can broaden a file-glob
-  exclusion, so the author must decide whether the suggested entry-shaped selector is intended.
-  This is a lexical policy on `sidecar_coverage.exclude` alone: file-selecting keys and direct
-  users of the shared matcher retain trailing recursion. A wider rule based on whether a pattern
-  can match a directory entry was rejected because matching is lexical and does not establish
-  entry type. Making pruning a selector imply pruning every directory it descends into was also
-  rejected: `docs/**/*.tmp` must not prune all of `docs`.
-- An exclusion that prunes nothing is accepted, departing from AD-49's rule that a declaration
-  matching nothing is refused. AD-49 targets a declaration that grants something while adding
-  nothing, whose failure mode is silent; an unmatched exclusion fails loud instead, because the
-  refusal it was written to prune comes straight back. The accounting also differs in kind, since
-  nothing beneath a pruned directory is ever enumerated, and requiring a match would make whether
-  a config loads depend on whether a dependency tree happens to be installed. An exemption that a
-  declared exclusion prunes is the contradiction that is refused instead, and at config load
-  rather than at selection: both declarations are lexical, so the disagreement is decidable at the
-  keys that disagree, where a reader can see both. Completeness comes from testing an exemption's
-  own spelling and each ancestor spelling, since pruning a directory removes everything beneath
-  it.
-- `exclude` is offered as a remedy by the refusals that a pruned path never reaches: the
-  traversal refusal, and the invalid-path and nonregular-file refusals. It is deliberately absent
-  from the uncovered-file remedy, which stays register-or-exempt. An uncovered document is the
-  finding the gate exists to produce, and scoping it away is not a repair for it.
-- Coverage runs on every load of a configured project, cache hits included, and an uncovered
-  file is an exit-2 error for every lattice-loading command. The lattice those commands would
-  read is not the one the configuration declares, and exit 1 means a coherent graph that has
-  drifted (AD-1). All uncovered spellings are reported once, in project-relative order, with
-  sorted unique selecting selectors and the register-or-exempt remedy.
-- `orchestrate._assemble` calls coverage immediately after `build_lattice` succeeds, using only
-  the resolved targets actually enrolled in that assembly. Registration, ownership, and loader
-  validation errors therefore take precedence, and exemptions cannot waive them. The gate runs
-  before cache persistence: a failed load returns no lattice and cannot create or change a
-  successful-load cache. Neither selection nor coverage results enter the cache. Config loading
-  validates syntax only, so explicit journal recovery bypasses coverage and automatic recovery
-  completes before coverage can refuse the new load.
+- An exemption names one exact path rather than a glob, so a waiver for today's file grants
+  nothing to a future file or another spelling of the same target. The AD-49 stale-grant reasoning
+  applies to exemptions that match nothing. Duplicate exemptions are refused at config load for
+  the same reason: the second grant would otherwise be silent. AD-49's own declaration rule remains
+  scoped to `legacy_marker_sources`. The coverage boundary uses `safe_resolve()` and regular-file
+  validation before applying a waiver, so an exemption cannot bypass path safety.
+- Coverage takes a stricter symlinked-directory traversal policy than `links` (GTX-794), collecting
+  refusals with the other coverage findings. Declining traversal silently was rejected because a
+  document behind the directory would disappear from the selected corpus. The refusal is paired
+  with `exclude` so an adopter can deliberately prune an out-of-scope subtree rather than be
+  blocked by one interior symlink. `SelectionPolicy` carries only the traversal choice, and
+  `Exclusions` carries only pruning selectors. As [AD-45](#ad-45-the-link-gate-is-its-own-command-over-its-own-source-set-reading-the-engines-inventory)
+  records, `path_selection.selection_refusal_message` shares the refusal template while each
+  consumer supplies its own error context. Coverage assembles its aggregate error.
+- `exclude` prunes during the walk rather than filtering its result: filtering would arrive after
+  classification had already recorded a traversal refusal. This deliberately weakens inspection:
+  scan failures inside a pruned subtree no longer refuse the load. Pruning answers those otherwise
+  unactionable failures through the same mechanism.
+- An `exclude` selector ending in `**` is refused at config load (GTX-795), because that
+  contents-shaped spelling cannot prune its named entry before traversal. The policy is limited
+  to coverage exclusions. A wider ban based on whether a selector might match a directory was
+  rejected because lexical matching cannot establish entry type. Implicitly pruning every
+  directory a selector descends into was also rejected: a file pattern must not discard its
+  entire ancestor tree. Removing the trailing recursion can broaden a file pattern, so the
+  author must choose the intended entry-shaped selector.
+- An unmatched exclusion is accepted despite AD-49: unlike a silent grant, it fails loudly when
+  the refusal it intended to prevent returns, and requiring a match would make configuration
+  validity depend on whether a dependency tree is installed. An exemption pruned by a declared
+  exclusion is refused at config load instead. Both declarations are lexical, so their conflict
+  can be decided at the configuration keys, including when the exclusion prunes an ancestor.
+- The uncovered-file remedy withholds `exclude`: removing an obligation from scope does not
+  repair missing enrollment. Traversal and invalid-path refusals can offer exclusion because
+  pruning can prevent those refusals. An uncovered file is exit 2 rather than exit 1 (AD-1): the
+  loaded lattice does not match the declared corpus, whereas exit 1 means a coherent graph has
+  drifted.
+- `orchestrate._assemble` runs coverage after `build_lattice` and before cache persistence, on
+  every load including cache hits. Registration, ownership, and validation errors take precedence;
+  exemptions cannot waive them. A failed coverage load cannot persist a successful-load cache,
+  and neither selection nor coverage results are cached. Config loading validates syntax only,
+  allowing explicit journal recovery to bypass coverage and automatic recovery to finish before
+  coverage judges the new load.
 
 **External reconcile keys updates by node, writes once per manifest, and finds records by
 identity (GTX-872, GTX-757).** The planner keyed an update by downstream document path and ref
