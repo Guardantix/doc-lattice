@@ -51,7 +51,15 @@ _CONFIG = (
     "sidecar_coverage:\n"
     "  select: ['skills/*.md']\n"
 )
-_IDENTITY = ("-c", "user.name=doc-lattice tests", "-c", "user.email=tests@example.invalid")
+# Supplied through GIT_CONFIG_COUNT so every Git process sees it, pre-commit's own included. Auto
+# maintenance is off because a commit otherwise detaches a background `git maintenance run`, whose
+# transient .git/objects/maintenance.lock can vanish mid-copytree and fail the per-test copy.
+_GIT_CONFIG = {
+    "user.name": "doc-lattice tests",
+    "user.email": "tests@example.invalid",
+    "maintenance.auto": "false",
+    "gc.auto": "0",
+}
 
 
 @cache
@@ -70,7 +78,11 @@ def _environment(root: Path) -> dict[str, str]:
         for key, value in os.environ.items()
         if not key.startswith("GIT_") and key not in {"FORCE_COLOR", "VIRTUAL_ENV"}
     }
+    for index, (key, value) in enumerate(_GIT_CONFIG.items()):
+        env[f"GIT_CONFIG_KEY_{index}"] = key
+        env[f"GIT_CONFIG_VALUE_{index}"] = value
     env.update(
+        GIT_CONFIG_COUNT=str(len(_GIT_CONFIG)),
         GIT_CONFIG_GLOBAL=os.devnull,
         GIT_CONFIG_NOSYSTEM="1",
         PRE_COMMIT_HOME=str(root / "pre-commit-home"),
@@ -119,7 +131,7 @@ def baseline(tmp_path_factory: pytest.TempPathFactory) -> Path:
     assert reconciled.returncode == 0, (reconciled.stdout, reconciled.stderr)
     _git(repo, env, "init", "--quiet")
     _git(repo, env, "add", "--all")
-    _git(repo, env, *_IDENTITY, "commit", "--quiet", "--no-verify", "-m", "baseline")
+    _git(repo, env, "commit", "--quiet", "--no-verify", "-m", "baseline")
     return repo
 
 
