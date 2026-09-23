@@ -14,6 +14,7 @@ import tomllib
 from collections.abc import Iterator
 from pathlib import Path
 
+import pytest
 from ruamel.yaml import YAML
 from typer.testing import CliRunner
 from workflow_helpers import (
@@ -685,6 +686,41 @@ def _status_reaches_the_step(text: str, program: str, subcommand: str) -> bool:
     return reached
 
 
+def _runs_against_the_fetched_base(text: str, script: str) -> bool:
+    """Report whether `script` runs against the fetched base ref, with its status ending the step.
+
+    The shape pinned is the one the pull-request branch of the base-ref step has: a `then` body
+    guarded by a non-empty `BASE_REF`, a fetch of that ref, and then the script with
+    `--base-ref FETCH_HEAD` alone on its line. Alone on its line is what carries its status out
+    under the default `bash -e` shell, since errexit applies inside an `if` body but not to
+    `cmd || true`, a pipeline's left side, or a negated command. A second branch, a nested
+    compound, a `set +e`, or the call running before the fetch all fail closed rather than being
+    reasoned about.
+    """
+    in_branch = fetched = reached = False
+    for line in text.splitlines():
+        words = [argv for _joined_by, argv in _separated_commands(line)]
+        if not words:
+            continue
+        if any(argv[:1] == ["set"] and "+e" in argv for argv in words):
+            return False
+        opener = words[0][0]
+        if opener in _COMPOUND_OPENERS | _COMPOUND_CLOSERS | {"elif", "else"}:
+            in_branch = words == [["if", "[", "-n", "${BASE_REF}", "]"], ["then"]]
+            continue
+        if in_branch and len(words) == 1 and words[0][:2] == ["git", "fetch"]:
+            fetched = fetched or "refs/heads/${BASE_REF}" in words[0]
+        for argv in words:
+            if not _invokes(argv, script):
+                continue
+            if not (in_branch and fetched) or len(words) != 1:
+                return False
+            if _flag_value(argv, "--base-ref") != "FETCH_HEAD":
+                return False
+            reached = True
+    return reached
+
+
 def _refuses_on_match(text: str, pattern_of: str, target: str) -> bool:
     """Report whether the step fails when `pattern_of` is found in the file `target` names.
 
@@ -902,6 +938,100 @@ def test_migration_rule_runs_in_code_quality_on_both_paths():
     assert len(with_base) == 1
     assert with_base[0][with_base[0].index("--base-ref") + 1] == "FETCH_HEAD"
     assert [argv for argv in argvs if "--base-ref" not in argv]
+
+
+_BUMP_GUARD = "scripts/check_unreleased_at_bump.py"
+_BUMP_GUARD_LINE = f"uv run --no-sync python {_BUMP_GUARD} --base-ref FETCH_HEAD"
+
+
+def _bump_guard_step() -> dict:
+    """Return the one code-quality step that runs the bump guard."""
+    steps = [
+        step
+        for step in _WORKFLOW["jobs"]["code-quality"]["steps"]
+        if any(_invokes(argv, _BUMP_GUARD) for argv in _invocations(_commands(step)))
+    ]
+    assert len(steps) == 1, f"expected one step running {_BUMP_GUARD}, found {len(steps)}"
+    return steps[0]
+
+
+def test_bump_guard_runs_in_code_quality_on_the_migration_guards_base_fetch():
+    # GTX-503. The guard has no base-less half, so it runs on pull requests alone, and it shares
+    # the migration guard's fetch rather than adding its own so the two cannot compare against
+    # different bases. `Code quality` is its only authority: there is no pre-commit hook.
+    step = _bump_guard_step()
+    # The default `bash -e` shell is what makes a failing line end the step. A `shell:` override
+    # could drop errexit and leave every line-level assertion below true over a run that failed.
+    assert "shell" not in step
+    assert step["env"] == {"BASE_REF": "${{ github.base_ref }}"}
+    assert _runs_against_the_fetched_base(_commands(step), _BUMP_GUARD)
+    fetches = [
+        argv
+        for each in _WORKFLOW["jobs"]["code-quality"]["steps"]
+        for argv in _invocations(_commands(each))
+        if argv[:2] == ["git", "fetch"]
+    ]
+    assert len(fetches) == 1, "the bump guard must reuse the base-ref fetch, not add a second"
+
+
+def _moved(text: str, before: str) -> str:
+    """Return the step text with the bump guard's line moved to just before `before`."""
+    return text.replace(f"{_BUMP_GUARD_LINE}\n", "").replace(
+        before, f"{_BUMP_GUARD_LINE}\n{before}"
+    )
+
+
+@pytest.mark.parametrize(
+    "mutate",
+    [
+        pytest.param(lambda text: text.replace(_BUMP_GUARD_LINE, "true"), id="invocation-removed"),
+        pytest.param(
+            lambda text: text.replace(_BUMP_GUARD_LINE, f"echo {_BUMP_GUARD_LINE}"),
+            id="only-printed",
+        ),
+        pytest.param(
+            lambda text: text.replace(
+                _BUMP_GUARD_LINE, _BUMP_GUARD_LINE.removesuffix(" FETCH_HEAD")
+            ),
+            id="base-ref-value-dropped",
+        ),
+        pytest.param(
+            lambda text: text.replace(
+                _BUMP_GUARD_LINE, _BUMP_GUARD_LINE.removesuffix(" --base-ref FETCH_HEAD")
+            ),
+            id="base-ref-dropped",
+        ),
+        pytest.param(
+            lambda text: text.replace(
+                _BUMP_GUARD_LINE, f"{_BUMP_GUARD_LINE.removesuffix('FETCH_HEAD')}HEAD"
+            ),
+            id="compared-against-itself",
+        ),
+        pytest.param(
+            lambda text: text.replace(_BUMP_GUARD_LINE, f"{_BUMP_GUARD_LINE} || true"),
+            id="status-swallowed",
+        ),
+        pytest.param(
+            lambda text: text.replace(_BUMP_GUARD_LINE, f"{_BUMP_GUARD_LINE} | tee guard.log"),
+            id="status-piped-away",
+        ),
+        pytest.param(
+            lambda text: text.replace(_BUMP_GUARD_LINE, f"! {_BUMP_GUARD_LINE}"), id="negated"
+        ),
+        pytest.param(lambda text: f"set +e\n{text}", id="errexit-disabled"),
+        pytest.param(lambda text: _moved(text, "fi\n"), id="moved-to-the-base-less-branch"),
+        pytest.param(lambda text: _moved(text, "  git fetch"), id="runs-before-the-fetch"),
+    ],
+)
+def test_bump_guard_wiring_oracle_rejects_each_way_the_step_can_stop_gating(mutate):
+    # The oracle above is only worth its green if it goes red when the wiring rots. Each mutant
+    # keeps the script's name in the step, so an assertion satisfied by the text alone -- the
+    # path appearing somewhere, or a line that merely starts right -- would pass most of them.
+    original = _bump_guard_step()["run"]
+    mutated = mutate(original)
+
+    assert mutated != original, "the mutant did not change the step; the step text moved"
+    assert not _runs_against_the_fetched_base(_commands({"run": mutated}), _BUMP_GUARD)
 
 
 def test_smoke_step_runs_the_packaged_cli_against_the_release_fixture():

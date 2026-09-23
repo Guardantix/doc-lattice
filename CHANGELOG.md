@@ -69,6 +69,16 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   [AD-51](ARCHITECTURE.md#ad-51-a-document-another-tool-owns-is-enrolled-by-a-sidecar-manifest-and-its-metadata-never-enters-the-file)
   records the enrollment and origin contracts.
 
+- A version bump that leaves entries under `## [Unreleased]`, or deletes that heading, now fails
+  before merge. `scripts/check_unreleased_at_bump.py` runs in the `code-quality` job on pull
+  requests, against the base ref the migration guard already fetches. When the declared version
+  differs from the base, it requires the candidate's `## [Unreleased]` section to be present and
+  empty, reading it through the release-notes extractor's own parser. Until now only a re-arm
+  refused pending entries, so an entry left behind at an ordinary bump shipped in the tag while
+  the notes, which come from `## [X.Y.Z]` alone, omitted it.
+  [AD-52](ARCHITECTURE.md#ad-52-an-ordinary-version-bump-leaves-the-unreleased-section-present-and-empty-checked-before-merge)
+  owns the decision.
+
 ### Migration
 
 Before adding `sidecar_manifests` or `sidecar_coverage`, upgrade every pre-commit hook, CI workflow, and installed-tool

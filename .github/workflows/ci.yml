@@ -49,12 +49,18 @@ jobs:
       # On a pull request the guard also compares the committed baseline against the base branch,
       # which is the half that catches a renderer and its baseline updated in the same commit. The
       # base ref is fetched shallowly because `actions/checkout` leaves only the merge commit.
+      #
+      # The same fetch serves the bump guard, which has no base-less half: without a base ref it
+      # cannot tell a version bump from an ordinary change, so it runs on pull requests alone.
+      # One fetch rather than a step of its own, so the two guards cannot compare against
+      # different bases. AD-52 records why the guard exists.
       - env:
           BASE_REF: ${{ github.base_ref }}
         run: |
           if [ -n "${BASE_REF}" ]; then
             git fetch --no-tags --depth=1 origin "refs/heads/${BASE_REF}"
             uv run --no-sync python scripts/check_migration_rule.py --base-ref FETCH_HEAD
+            uv run --no-sync python scripts/check_unreleased_at_bump.py --base-ref FETCH_HEAD
           else
             uv run --no-sync python scripts/check_migration_rule.py
           fi

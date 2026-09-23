@@ -2736,7 +2736,7 @@ excludes itself from the sdist, so it can read `ci.yml` without recreating the p
 ### AD-48: The changelog body is gated before merge by the extractor's own check mode, and the re-arm token is not
 
 **Date:** 2026-09-03
-**Status:** Accepted
+**Status:** Accepted; amended by AD-52
 **Context:** AD-46 made a pre-tag release failure cheap to recover from. It did not make one less
 likely, and two source defects still reached the release job that a pull request could have
 caught. `scripts/check_version_sync.py` compared the top `## [X.Y.Z]` heading against
@@ -2797,8 +2797,9 @@ record: not "no local context", which the base-ref fetch disproves.
 **What bounds it.** The gate reads the version under release from `__version__` rather than from
 the changelog, so it asks whether the version being shipped has notes and not whether the document
 leads with a nonempty section. It says nothing about the notes being *correct*, only present, and
-nothing about `## [Unreleased]` being empty at the bump commit, which no ordinary-path gate checks
+nothing about `## [Unreleased]` being empty at the bump commit, which no ordinary-path gate checked
 and which stays out of scope here because it is not a pre-tag check with a missing counterpart.
+AD-52 later adds that gate as a decision of its own.
 The parser tests cannot tell whether the gate is wired, so the hook and the CI step are pinned
 directly, and so is the release job's continued use of the extraction rather than the check.
 
@@ -3234,3 +3235,59 @@ for the manifest producer and AD-31 for the rewriter's command behavior; AD-3 an
 amendment. The current costs are chosen ones. Foreign-frontmatter-only
 edits are invisible to drift, tools that use a reserved key in their own frontmatter cannot be
 enrolled yet, and the enrollment join runs on every load.
+
+### AD-52: An ordinary version bump leaves the Unreleased section present and empty, checked before merge
+
+**Date:** 2026-09-23
+**Status:** Accepted; amends AD-48
+**Context:** Release notes come from the `## [X.Y.Z]` section alone. An entry left under
+`## [Unreleased]` when the version is bumped is not lost, since it lands in the next release's
+notes, but the release it was written for ships the work inside its tag with notes silent about
+it, and the next release's notes then claim a change that release did not make. Only the re-arm
+path refused pending entries, in `release_gate.py`'s `_pending_unreleased`, and AD-46 aims that
+refusal at the drift re-arm introduces. AD-48 left the ordinary path out of scope because it was
+not a pre-tag check missing a pre-merge counterpart: nothing checked it at any point.
+
+**Decision:** The ordinary release path refuses a bump whose candidate commit leaves
+`## [Unreleased]` anything but present and empty. `scripts/check_unreleased_at_bump.py` runs in
+the `code-quality` job on pull requests, against the base ref the migration guard already
+fetches, and reads the section through `changelog_section`, the notes extractor's own parser. The
+do-nothing arm was the real alternative and is declined: its cost is a release whose published
+notes omit work it shipped, corrected, if at all, by hand after the notes are public, while the
+cost of refusing is moving an entry during the bump that already promotes the section. No
+ordinary bump has a reason to keep entries under Unreleased, because the tag contains that work
+either way.
+
+**What a bump is.** The version `src/doc_lattice/__init__.py` declares differs between the base
+ref and the candidate, both read with `release_gate.version_at`, the reading that decides whether
+a push is a release. A second definition, such as "the pull request promotes a heading", could
+disagree with the gate about which change is the release; sharing the reader cannot. Whether the
+changelog heading agrees with the version stays version sync's question. The candidate is the
+checked-out commit, never the commit that first changed the version: a push may carry the bump
+anywhere and the tag names the final landed commit, as RELEASING.md records, so an entry added
+after a clean bump commit is refused too.
+
+**Why present as well as empty.** This is a new policy, not parity with re-arm. The parser returns
+None for a missing heading and the empty string for an empty one, and `_pending_unreleased` reads
+both as nothing pending. The ordinary guard refuses a missing heading as well, because the heading
+is where the next cycle's entries land and every release in this repository has left it in place;
+a bump that deletes it is a mistake the guard can name at no extra cost. The re-arm predicate is
+left as it is: a re-arm over a deleted heading hides no work in the tag, and tightening it would
+change a release-job check for no observed failure.
+
+**What bounds it.** Sharing the parser aligns the reading that passes a bump with the reading that
+produces its notes; it does not validate the whole changelog. `changelog_section` takes the first
+`## [Unreleased]` heading, so a second one further down is not seen, and rejecting duplicate
+sections would be a separate decision. The guard has no base-less mode and no pre-commit hook,
+since without a base ref nothing distinguishes a bump from an ordinary change. A base ref that
+cannot be read, or a version declaration that is missing or malformed, fails as an error, never as
+an established non-bump. Like every `code-quality` gate it binds a pull request, so an
+administrator push that bypasses branch protection is not checked, and it says nothing about the
+notes being correct, only about where the entries sit.
+
+**Consequences:** A bump pull request that leaves an entry behind, or deletes the heading, fails in
+the same required context as version sync and the changelog-body check, and RELEASING.md's
+checklist names the shape it requires. AD-48's statement that no ordinary-path gate checks the
+section no longer holds. `release_gate.py` exposes `source_at` and `version_at` for the guard to
+import, and its re-arm refusal is unchanged. `tests/test_release_workflow.py` pins the wiring:
+the one shared fetch, `--base-ref FETCH_HEAD`, and the guard's exit status reaching the step.

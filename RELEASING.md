@@ -42,6 +42,14 @@ check its current state.
    the same hook: a heading promoted with nothing under it fails on the pull request, not in
    the release job.
 
+   Leave a fresh `## [Unreleased]` heading above it, present and empty. Release notes come from
+   the `## [X.Y.Z]` section alone, so an entry still under Unreleased would ship in the tag with
+   the notes silent about it. On the pull request, `scripts/check_unreleased_at_bump.py` fails a
+   version bump that leaves an entry there or deletes the heading, including an entry added by a
+   later commit in the same pull request.
+   [AD-52](ARCHITECTURE.md#ad-52-an-ordinary-version-bump-leaves-the-unreleased-section-present-and-empty-checked-before-merge)
+   records why.
+
    Those five are the whole set you edit by hand. `uv.lock` records the same version for the
    local package and picks it up in step 2. `.gx-new-version` is not in either group: it records
    the version of the scaffolding tool that generated the project, it is gitignored, and it is
