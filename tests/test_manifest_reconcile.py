@@ -5,9 +5,14 @@ from pathlib import Path
 import pytest
 
 from doc_lattice.error_types import ManifestError
-from doc_lattice.manifest_reconcile import plan_manifest_rewrites
+from doc_lattice.manifest_reconcile import (
+    ManifestCaptureRequest,
+    manifest_capture_requests,
+    plan_manifest_rewrites,
+    transaction_rewrite,
+)
 from doc_lattice.model import DocumentOrigin, ExternalDeclaration, ExternalIdentity
-from doc_lattice.reconcile import ReconcileUpdate
+from doc_lattice.reconcile import ReconcileUpdate, Rewrite
 
 _DESTINATION = Path("/project/nodes.yml")
 
@@ -238,3 +243,48 @@ def test_repointed_fresh_observation_refuses_the_manifest_result():
             fresh_bytes={_DESTINATION: before},
             observations={_DESTINATION: {"a": repointed}},
         )
+
+
+def test_capture_requests_name_each_manifest_by_its_declared_spelling_and_selected_ids():
+    inline_destination = Path("inline.md")
+    plan = {
+        inline_destination: {
+            ("inline", "up"): ReconcileUpdate("new-inline", DocumentOrigin(inline_destination))
+        },
+        _DESTINATION: {
+            ("a", "up"): _external_update("a", 0, "new"),
+            ("a", "other"): _external_update("a", 0, "new"),
+            ("b", "up"): _external_update("b", 1, "new"),
+        },
+    }
+
+    requests = manifest_capture_requests(plan)
+
+    assert requests == {_DESTINATION: ManifestCaptureRequest("nodes.yml", frozenset({"a", "b"}))}
+
+
+def test_capture_requests_refuse_an_incoherent_manifest_group():
+    plan = {_DESTINATION: {("a", "up"): _mismatched_destination_update()}}
+
+    with pytest.raises(ValueError, match="does not match its resolved destination"):
+        manifest_capture_requests(plan)
+
+
+def test_transaction_rewrite_publishes_exactly_the_verified_bytes():
+    before = _manifest(("a", (("up", "old"), ("down", "old"))), ("b", (("up", "old"),)))
+    plan = {
+        _DESTINATION: {
+            ("a", "up"): _external_update("a", 0, "new"),
+            ("b", "up"): _external_update("b", 1, "new"),
+        }
+    }
+    _inline, results = plan_manifest_rewrites(
+        plan,
+        fresh_bytes={_DESTINATION: before},
+        observations={_DESTINATION: {"a": _identity("a"), "b": _identity("b")}},
+    )
+
+    rewrite = transaction_rewrite(results[0])
+
+    assert rewrite == Rewrite(_DESTINATION, before, results[0].verified_bytes, frozenset({"up"}))
+    assert rewrite.after == before.replace(b"{ref: up, seen: old}", b"{ref: up, seen: new}")

@@ -850,7 +850,7 @@ an exit 2.
 ### AD-30: Only gate-verified bytes may reach a reconcile destination
 
 **Date:** 2026-08-15
-**Status:** Accepted
+**Status:** Accepted; amended by GTX-888
 **Context:** AD-5 makes the commit transaction durable but not self-checking: it stages
 `Rewrite.after` and publishes those exact bytes without ever reparsing them, so
 `reconcile.py::_verify_reconciled_meta` is the last point at which a mis-spliced rewrite can be
@@ -933,6 +933,33 @@ One scoping limit is deliberate rather than closed: `persistence.py` owns the pu
 and is exempt from both the reach rule and the sink audit, so a forward sink added inside that
 module is invisible to the guard. Narrowing it would fire on the module's own correct internal
 use of the helper. Publication ownership stays a review obligation there.
+
+**Manifest producer amendment (GTX-888).** A sidecar manifest is the second producer, and its
+after image cannot pass `_verify_reconciled_meta`, because a manifest is not frontmatter. Its gate
+is the verification inside `sidecar_rewrite.rewrite_manifest_bytes` that AD-31's GTX-784
+amendment records: the complete after image must equal an independent source-span splice of the
+planned edits, and must re-parse to the expected records with only the selected `seen` values
+changed. The invariant therefore reads: every byte published over a reconcile destination
+originates in the value `_verify_reconciled_meta` verified or, for a manifest, in the bytes those
+two manifest gates verified. The same guard pins the manifest chain by function, callee, and
+value provenance. There are exactly two production `Rewrite(...)` sites, `plan_rewrites` and
+`manifest_reconcile.transaction_rewrite`. The converter's after image is the `verified_bytes` of
+its own `ManifestRewriteResult` parameter, unrebound. `plan_manifest_rewrites` is the sole
+`ManifestRewriteResult(...)` site, and its `verified_bytes` is a local bound once to what
+`rewrite_manifest_bytes` returned, imported from `sidecar_rewrite.py` under its own name and
+neither redefined nor rebound. Every changed return of `rewrite_manifest_bytes` is a local bound
+once, followed by both gates as unconditional top-level `if ... != ...: raise` statements before
+the return, and each gate compares against the expectation `_plan_updates` produced rather than
+one of its own making. The only other return is the rewriter's unchanged input, the valid no-op,
+which the planner skips. The field-copy refusal reads `verified_bytes` as it reads `after`, since
+copying a result with replacement bytes mints the converter's input without the gates.
+
+Admitting a second constructor alone, or trusting any value in a field named `verified_bytes`,
+would have weakened the invariant rather than extended it, so neither is how the guard admits
+this producer. Twelve positive controls cover the two shapes GTX-887 assigned here, an ungated
+manifest `Rewrite` and a substitution after verification, at each link they could hide in, plus
+a result minted elsewhere or by field copy, a return ahead of the gates, a gate a condition can
+skip or that compares against its own output, and a local function shadowing the rewriter.
 **Consequences:** A genuinely new producer, staging site, or publication route fails closed and
 forces a conscious audit, instead of silently widening the set of bytes that can reach a
 document. The guard is a tripwire on the current AST shape, not a general dataflow analysis:
@@ -1144,8 +1171,10 @@ untouched source spans retain their exact bytes; the complete after-image is che
 source-span splicing as well as a full semantic reparse. Uniform LF, CRLF, and lone CR are each
 preserved. For mixed line endings, a valid no-op returns the original bytes, while any actual
 rewrite refuses. AD-31 Layer 4's document-wide LF normalization remains an inline-document
-allowance only. This pure capability changes no command behavior; external reconcile still
-refuses a needed update until its separate wiring issue connects the rewriter to the transaction.
+allowance only. GTX-888 connects the rewriter to the transaction, so its limits are now command
+behavior that differs from the inline writer's: a selected ref removed from its record refuses
+where the inline writer skips it, and an actual rewrite of a mixed-line-ending manifest refuses
+where the inline writer normalizes the document to LF. RECONCILE.md states both for users.
 
 ### AD-32: The managed GitHub CI product retires to a documented recipe
 
@@ -2960,9 +2989,9 @@ piece chooses its own. It changes no code.
 **Decision:** An opt-in configuration key names YAML manifests whose records associate a
 project-relative Markdown path with ordinary node metadata. The Markdown file is the node's
 content and section source and is never written. The manifest is the node's metadata source.
-Manifest I/O belongs only to lattice loading; the interim reconcile contract refuses a selected
-external downstream that needs its `seen` acknowledgement rather than rewriting its manifest.
-GTX-757 is future work for a manifest rewriter.
+Manifest I/O belongs to lattice loading and to reconcile's write-time capture, both in
+`sidecar_manifest.py`: reconcile acknowledges a selected external downstream by rewriting its
+`seen` in its manifest record, and never writes the Markdown (GTX-888).
 
 **What this does not prove.** Declared edges are a gate requiring human review of the dependency
 a person declared. They are not a proof that the downstream prose is semantically correct, and
@@ -3123,43 +3152,44 @@ collapsing them would let one spelling hide another obligation.
   coverage judges the new load.
 
 **External reconcile keys updates by node, writes once per manifest, and finds records by
-identity (GTX-872, GTX-757).** The planner keyed an update by downstream document path and ref
-until GTX-872, so substituting a manifest path for the Markdown path would have merged two nodes
-that share a manifest and an upstream ref. GTX-872 shipped the plan keys and the destination
-grouping; the write path waits on GTX-757's manifest rewriter.
-
-Shipped in GTX-872:
+identity (GTX-872, GTX-784, GTX-887, GTX-888).** The planner keyed an update by downstream
+document path and ref until GTX-872, so substituting a manifest path for the Markdown path would
+have merged two nodes that share a manifest and an upstream ref.
 
 - A logical update is keyed by node id and ref, and carries the node's origin: its Markdown path
-  and, for an external node, its manifest and record.
+  and, for an external node, its manifest and record (GTX-872).
 - Updates are grouped by resolved write destination, which is the Markdown file for an inline
   node and the manifest for an external one. Each destination gets one verified rewrite, which
   is also what the transaction boundary's duplicate-destination refusal requires. An external
-  node's Markdown is never a destination. Grouping an external node's update is what shipped;
-  writing it is still refused.
-
-Remaining in GTX-757:
-
-- The fresh write-time read locates each record by its `meta.id` and checks that its `path`
-  still has the declared spelling and resolved target the plan used. A record that is missing,
-  duplicated, or repointed is a conflict that refuses the batch, and list position is never
-  evidence of identity.
-- Verification covers the whole manifest. The rewritten manifest must re-parse to the fresh read
-  with only the selected `seen` values changed, record order included, and its bytes must be
-  the ones AD-30's gate verified, with source formatting preserved in AD-26's byte-exact manner.
+  node's Markdown is never a destination.
+- The fresh write-time read resolves the manifest's declared spelling again rather than reusing
+  the load-time path its group is keyed on, so a retargeted manifest symlink is observed rather
+  than read through. It re-applies the regular-file rule above before anything opens the file,
+  so a manifest replaced by a directory or a FIFO since the load is refused with
+  `MANIFEST_ERROR` instead of blocking a run that holds the reconcile lock. That preserves the
+  load-time rule and does not close a replacement racing the check.
+- The bytes are captured once. Each selected record is located by its `meta.id` and checked
+  against the declared spelling, resolved target, and resolved manifest the plan used, observed
+  fresh from those bytes. A record that is missing, duplicated, or repointed refuses the batch,
+  and list position is never evidence of identity, so a harmless reorder still reconciles.
+- Verification covers the whole manifest, as AD-31's GTX-784 amendment records, and AD-30's
+  manifest producer pins that the published bytes are the ones it verified.
 - A mixed batch of inline and external nodes is one transaction, with AD-5's durability,
   rollback, and recovery unchanged. Manifest destinations take AD-8's two independent
-  containment checks, before the fresh read and at the transaction boundary.
-- Human and JSON reporting stay per node and name both locations. The output shape belongs to
-  RECONCILE.md and GTX-757.
+  containment checks: the fresh resolution before the read, and the transaction boundary's own.
+  Recovery stays ahead of lattice loading and never parses a manifest, so it classifies a
+  manifest destination by its recorded fingerprints like any other.
+- Reporting names each changed node by its own Markdown identity, from the node and ref pairs the
+  verified rewrite actually changed rather than from its refs, since two nodes can share a
+  manifest and a ref while only one changed. Naming the manifest location beside it is GTX-874.
 
-Two refusals hold the gap until GTX-757 ships. A reconcile selection that would update an
-external node refuses with an actionable message (GTX-766). Behind it, the Markdown rewriter
-refuses a destination carrying more than one node rather than flattening the group to one update
-per ref, which would keep only the last node's `seen`. That second one is a caller contract, so
-it is a `ValueError` claiming no error code: nothing a user runs reaches it while external
-updates are refused, and a code would owe README a row for a diagnostic nobody can receive.
-GTX-757 retires both by consuming those groups.
+The GTX-766 interim refusal is retired, and with it the planner's suppression of a later
+ambiguity after an earlier external update, so an `AMBIGUOUS` edge refuses the run wherever
+selection reaches it. The Markdown rewriter still refuses a group carrying an external node, or
+more than one node, rather than flattening it to one update per ref, which would keep only the
+last node's `seen`. That is a caller contract, so it is a `ValueError` claiming no error code:
+the manifest orchestration takes every manifest group first, and a code would owe README a row
+for a diagnostic nobody can receive.
 
 **The advisory review's four contracts.** GTX-752's advisory review proposed four: node identity
 separate from the rewritten file, coverage independent of discovery, foreign envelope ownership
@@ -3199,7 +3229,8 @@ Broken section references retain the known file's origin even when the section d
 **Consequences:** AD-44's decline of a sidecar manifest no longer governs. Its envelope,
 auto-slug, hash, and `lattice_format` decisions are untouched. GTX-756 ships coverage with
 README.md owning its configuration and error contract; it requires no cache-schema change.
-GTX-757 remains future work and updates README.md, RECONCILE.md, and CHANGELOG.md when it ships,
-with any AD-3, AD-12, or AD-31 amendment it requires. The current costs are chosen ones. Foreign-frontmatter-only
+GTX-757 shipped external reconcile through GTX-784, GTX-887, and GTX-888, which amended AD-30
+for the manifest producer and AD-31 for the rewriter's command behavior; AD-3 and AD-12 needed no
+amendment. The current costs are chosen ones. Foreign-frontmatter-only
 edits are invisible to drift, tools that use a reserved key in their own frontmatter cannot be
 enrolled yet, and the enrollment join runs on every load.

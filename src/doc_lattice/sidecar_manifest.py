@@ -5,7 +5,8 @@ doc-lattice keeps for it outside the file. This module reads every manifest the 
 declares, validates it against the AD-51 schema, and returns typed registrations carrying both
 sides of their provenance: the spelling each record and each manifest was declared with, and the
 target it resolves to. Everything is refused as an exit-2 ``ProjectError`` naming the most
-specific location known, never dropped.
+specific location known, never dropped. Reconcile's write-time capture reads a manifest again
+through the same resolution and regular-file rule, and observes its selected records fresh.
 
 What it checks is exactly what needs no loaded lattice. Loading registered files as nodes, and
 the ownership rules that need them (an id declared both inline and externally, duplicate ids, a
@@ -132,14 +133,7 @@ def build_registration_index(manifests: Sequence[str], project_root: Path) -> Re
     seen: dict[Path, int] = {}
     by_target: dict[Path, Registration] = {}
     for index, declared in enumerate(manifests):
-        # The file-type check runs before anything opens the manifest, so a FIFO or other
-        # special file is refused rather than read, which could block the run.
-        resolved = _resolve_regular_file(
-            declared,
-            project_root,
-            subject=f"manifest {format_path_for_display(declared)}",
-            remedy="restore it, or remove it from sidecar_manifests to unregister its records",
-        )
+        resolved = _resolve_manifest(declared, project_root)
         earlier_index = seen.get(resolved)
         if earlier_index is not None:
             msg = (
@@ -165,15 +159,57 @@ def build_registration_index(manifests: Sequence[str], project_root: Path) -> Re
     return RegistrationIndex(manifests=tuple(sources), by_target=by_target)
 
 
+def capture_manifest(declared: str, project_root: Path) -> tuple[ManifestSource, bytes]:
+    """Freshly resolve, validate, and read one declared manifest for a reconcile write.
+
+    The declared spelling is resolved again rather than trusting the path lattice loading
+    resolved, so a manifest symlink retargeted since the load reaches the caller as a changed
+    resolved manifest instead of being read through the stale one. The regular-file rule
+    loading applies runs again before anything opens the file, so a manifest replaced by a
+    directory or a FIFO since the load is refused rather than read. That preserves the load-time
+    rule; it does not close a replacement racing the check (AD-51).
+
+    Args:
+        declared: The ``sidecar_manifests`` entry exactly as written.
+        project_root: The project root the manifest resolves against and must stay inside.
+
+    Returns:
+        The freshly resolved manifest and the exact bytes captured from it, once.
+
+    Raises:
+        ManifestError: If the manifest escapes the project root, no longer exists, is not a
+            regular file, or cannot be read.
+    """
+    source = ManifestSource(declared=declared, resolved=_resolve_manifest(declared, project_root))
+    return source, _read_manifest_bytes(source)
+
+
+def _resolve_manifest(declared: str, project_root: Path) -> Path:
+    """Resolve one declared manifest to a contained regular file before anything opens it.
+
+    The file-type check runs first, so a FIFO or other special file is refused rather than
+    read, which could block the run.
+    """
+    return _resolve_regular_file(
+        declared,
+        project_root,
+        subject=f"manifest {format_path_for_display(declared)}",
+        remedy="restore it, or remove it from sidecar_manifests to unregister its records",
+    )
+
+
+def _read_manifest_bytes(source: ManifestSource) -> bytes:
+    """Capture one resolved manifest's exact bytes at the I/O boundary."""
+    try:
+        return source.resolved.read_bytes()
+    except OSError as exc:
+        msg = f"cannot read manifest {format_path_for_display(source.declared)}: {exc}"
+        raise ManifestError(msg) from exc
+
+
 def _read_manifest(source: ManifestSource, project_root: Path) -> list[Registration]:
     """Capture one manifest's bytes at the I/O boundary before validating them."""
-    shown = format_path_for_display(source.declared)
-    try:
-        source_bytes = source.resolved.read_bytes()
-    except OSError as exc:
-        msg = f"cannot read manifest {shown}: {exc}"
-        raise ManifestError(msg) from exc
-    return parse_manifest_bytes(source_bytes, source, project_root)
+    return parse_manifest_bytes(_read_manifest_bytes(source), source, project_root)
 
 
 def parse_manifest_bytes(

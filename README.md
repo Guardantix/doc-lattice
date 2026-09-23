@@ -524,11 +524,9 @@ conflict, and rolls the batch back if anything fails before the commit. Its temp
 a project-root journal plus staged before and after images, covered by the `.gitignore` block that
 `doc-lattice init` prints.
 
-Reconcile never rewrites an enrolled external downstream.
-[RECONCILE.md](https://github.com/Guardantix/doc-lattice/blob/main/RECONCILE.md#selectors) owns
-when a selection that reaches one is refused instead; acknowledge that drift with the
-[manual external acknowledgement workflow](#manual-external-acknowledgement) after reviewing the
-upstream change.
+An enrolled external downstream is reconciled in its manifest record, never in its Markdown.
+[RECONCILE.md](https://github.com/Guardantix/doc-lattice/blob/main/RECONCILE.md#external-downstreams)
+owns how its manifest is reread and rewritten, and the refusals that differ from inline documents.
 
 Human output is one record per line: each per-file record
 (`reconciled 'pc-design.md': art-direction#accent`, or the same line led by `would reconcile`
@@ -539,23 +537,6 @@ console.
 
 See [RECONCILE.md](https://github.com/Guardantix/doc-lattice/blob/main/RECONCILE.md) for
 selector details, dry-run and JSON output, the durability contract, and recovery.
-
-#### Manual external acknowledgement
-
-Reconcile never writes an external downstream's manifest record in this release. After reviewing
-the upstream change, acknowledge a selected external edge by editing its matching manifest record:
-
-1. If `cache_trust_stat: true` is enabled, disable it before the workflow. The acknowledgement
-   must be based on the bytes `check` reads now, not an intentionally stale stat-cache hit.
-2. Run `doc-lattice check --format json` and find the `STALE` or `UNRECONCILED` finding by its
-   `source_id` and `target_ref`.
-3. Copy that finding's `actual` value into `seen` on the matching `derives_from` entry in the
-   manifest record's `meta`. Match the edge by its exact ref, not by record position alone.
-4. Run `doc-lattice check` again. The edge should report `OK` after the reviewed acknowledgement.
-
-`actual` is doc-lattice's target hash, not a file checksum. For a section ref it hashes the
-canonical section and its ancestor-heading context; for a file ref it hashes the canonical body.
-Do not substitute a source-control, manifest, or whole-file checksum for it.
 
 ## Frontmatter reference
 
@@ -920,7 +901,8 @@ nodes:
           seen: 647cc64481bee8d8541ef7d1733b5204
 ```
 
-Manifests are read only while a command loads the lattice. They reject YAML anchors, aliases, and
+Manifests are read while a command loads the lattice, and `reconcile` reads one again when it
+writes an external node's `seen` there, as [`reconcile`](#reconcile) describes. They reject YAML anchors, aliases, and
 merge keys anywhere, so write every value explicitly. The manifest and each registered Markdown
 file must resolve to a regular file inside the project root.
 

@@ -275,6 +275,88 @@ def test_parse_manifest_bytes_uses_captured_bytes_without_rereading(tmp_path: Pa
     assert registrations[0].target == (root / "skills/a.md").resolve()
 
 
+def test_capture_manifest_resolves_the_declared_spelling_and_reads_it_once(tmp_path: Path):
+    root = _project(tmp_path)
+    _write(root, "meta/real.yml", f"nodes:\n{_VALID_RECORD}")
+    (root / _MANIFEST).symlink_to("real.yml")
+
+    source, captured = sidecar_manifest.capture_manifest(_MANIFEST, root)
+
+    assert source == ManifestSource(_MANIFEST, (root / "meta/real.yml").resolve())
+    assert captured == f"nodes:\n{_VALID_RECORD}".encode()
+
+
+def test_capture_manifest_follows_a_retargeted_symlink_to_its_new_target(tmp_path: Path):
+    # The fresh capture must not reuse a load-time resolution, or a retargeted manifest symlink
+    # would be read through the target the lattice loaded rather than observed as changed.
+    root = _project(tmp_path)
+    _write(root, "meta/one.yml", f"nodes:\n{_VALID_RECORD}")
+    _write(root, "meta/two.yml", f"nodes:\n{_VALID_RECORD}")
+    link = root / _MANIFEST
+    link.symlink_to("one.yml")
+    loaded = build_registration_index([_MANIFEST], root).manifests[0].resolved
+    link.unlink()
+    link.symlink_to("two.yml")
+
+    source, _captured = sidecar_manifest.capture_manifest(_MANIFEST, root)
+
+    assert loaded == (root / "meta/one.yml").resolve()
+    assert source.resolved == (root / "meta/two.yml").resolve()
+
+
+@pytest.mark.parametrize("kind", ["directory", "fifo"])
+def test_capture_manifest_refuses_a_special_file_before_it_is_opened(tmp_path: Path, kind: str):
+    # Opening a FIFO with no writer blocks, so reaching the read would hang this test.
+    if kind == "fifo" and not hasattr(os, "mkfifo"):
+        pytest.skip("needs POSIX FIFOs")
+    root = _project(tmp_path)
+    (root / "meta").mkdir()
+    if kind == "directory":
+        (root / _MANIFEST).mkdir()
+    else:
+        os.mkfifo(root / _MANIFEST)
+
+    with pytest.raises(ManifestError, match="not a regular file") as excinfo:
+        sidecar_manifest.capture_manifest(_MANIFEST, root)
+
+    assert excinfo.value.code == "MANIFEST_ERROR"
+    assert format_path_for_display(_MANIFEST) in str(excinfo.value)
+
+
+@pytest.mark.parametrize(
+    ("declared", "detail"),
+    [("meta/gone.yml", "does not exist"), ("../outside.yml", "outside the project root")],
+    ids=["missing", "escaping"],
+)
+def test_capture_manifest_refuses_an_unresolvable_manifest(
+    tmp_path: Path, declared: str, detail: str
+):
+    root = _project(tmp_path)
+    _write(tmp_path, "outside.yml", f"nodes:\n{_VALID_RECORD}")
+
+    with pytest.raises(ManifestError, match=detail) as excinfo:
+        sidecar_manifest.capture_manifest(declared, root)
+
+    assert format_path_for_display(declared) in str(excinfo.value)
+
+
+def test_capture_manifest_reports_a_read_failure_as_a_manifest_error(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    root = _project(tmp_path)
+    _write(root, _MANIFEST, f"nodes:\n{_VALID_RECORD}")
+
+    def refuse(_path: Path) -> bytes:
+        raise PermissionError("permission denied")
+
+    monkeypatch.setattr(Path, "read_bytes", refuse)
+
+    with pytest.raises(ManifestError, match="cannot read manifest") as excinfo:
+        sidecar_manifest.capture_manifest(_MANIFEST, root)
+
+    assert "permission denied" in str(excinfo.value)
+
+
 def test_observe_selected_records_resolves_only_the_selected_targets(tmp_path: Path):
     root = _project(tmp_path)
     source = ManifestSource(_MANIFEST, (root / _MANIFEST).resolve())

@@ -2,7 +2,8 @@
 
 `reconcile` is the only command that writes to your docs, and it only ever rewrites `seen` values
 and the aliases that read them. This document covers the selector forms, the read-only dry-run
-preview and its JSON plan, the write and durability mechanics of a real run, automatic and manual
+preview and its JSON plan, the write and durability mechanics of a real run, how an external
+downstream's manifest is rewritten, automatic and manual
 recovery, and the transaction artifacts reconcile leaves behind.
 
 ## Selectors
@@ -22,32 +23,17 @@ Normal reconcile needs either a downstream id or `--all` (running it with neithe
   without loading the lattice or planning a new batch. It cannot be combined with a downstream id,
   `--all`, `--ref`, or `--dry-run`; those combinations exit 2. `--format json` is supported.
 
-An `AMBIGUOUS` edge is one of two exceptions to every "skipped" above; a drifting external
-downstream, described next, is the other. Reconcile refuses the whole run rather than skipping it,
-because writing `seen` there would lock a hash to an id that document order can hand to a different
-heading. The refusal is run-scoped and precedes the already-OK check, so a single ambiguous edge
+An `AMBIGUOUS` edge is the exception to every "skipped" above. Reconcile refuses the whole run
+rather than skipping it, wherever selection reaches it, because writing `seen` there would lock a
+hash to an id that document order can hand to a different heading. The refusal is run-scoped and precedes the already-OK check, so a single ambiguous edge
 anywhere in the selection exits 2 and writes nothing, even when that edge already held its planned
 hash and even under `--dry-run`. Run `doc-lattice check` to list every `AMBIGUOUS` edge at once,
 disambiguate each one (reword a colliding heading, or give the target an explicit `{#anchor}`
 marker), then re-run. See the drift-state table in [README.md](README.md) for what `AMBIGUOUS`
 means.
 
-External downstream metadata remains manifest-owned in this release. For each selected edge, after
-selector matching, BROKEN and collision handling, and the unchanged-`seen` skip, the logical
-planner records STALE or UNRECONCILED edges keyed by downstream node and ref, including those that
-belong to externally declared downstreams. Destination resolution then refuses an external update
-with `VALIDATION_ERROR` before any fresh-read rewrite is planned or staged. Downstream nodes are
-visited in id order and each node's edges in declared order, so when a selection holds both an
-`AMBIGUOUS` edge and a drifting external one, the refusal still names whichever is reached first:
-an earlier ambiguity refuses immediately, while an earlier external update remains the selected
-refusal when destinations are resolved. Either way nothing is written. Each refusal names one
-edge, so run `doc-lattice check` to list them all. A mixed batch writes no inline `seen` values
-either. It exits 2 with no success output in either human or JSON format, and applies to
-`--dry-run` as well. An inline downstream may still reconcile an external upstream, and an external
-downstream with no remaining drift does not block other selected inline updates. An external-only
-selection with no update is a normal successful no-op. Follow the [manual external acknowledgement
-workflow](README.md#manual-external-acknowledgement) after reviewing an external downstream's
-upstream change.
+The selectors treat an externally declared downstream exactly as an inline one. What differs is
+where its `seen` is written, which [External downstreams](#external-downstreams) describes.
 
 ## Dry-run previews
 
@@ -99,6 +85,39 @@ transaction. The durability guarantee assumes a local filesystem with reliable a
 atomic-rename, and directory-sync semantics. Network filesystems such as NFS may weaken or emulate
 `flock`, so reconcile on them is outside this durability contract.
 
+## External downstreams
+
+A node enrolled by a [sidecar manifest](README.md#sidecar-manifests) keeps its metadata in its
+manifest record, so reconcile acknowledges that node's drift there. A selected STALE or
+UNRECONCILED edge on an external downstream rewrites the edge's `seen` in the manifest, and the
+node's Markdown is never written. A batch mixing inline documents and manifests is one transaction
+under every guarantee above, and several selected nodes stored in one manifest produce one
+verified rewrite of it.
+
+At write time reconcile resolves each manifest's `sidecar_manifests` spelling again, rather than
+reusing the file the load resolved, and reads it once. A manifest that no longer exists, now
+escapes the project root, or is no longer a regular file, replaced by a directory or a FIFO for
+example, refuses with `MANIFEST_ERROR` before it is opened. Each selected record is then found by
+its `id`, never by its position, and must still name the declared path, resolved Markdown file,
+and resolved manifest the run loaded. A harmless reorder of the records still reconciles, while a
+selected record that is missing, duplicated, or repointed refuses the batch, and a repoint includes
+a Markdown or manifest symlink retargeted since the load. The rewrite edits only the source bytes
+of the selected `seen` values, keeping comments, record order, and every other byte, and the whole
+manifest must re-parse with only those values changed before anything is staged. Where a record
+repeats a ref, only its last occurrence, the one the graph reads, is updated.
+
+Two limits differ from inline documents. A selected ref removed from its record before the fresh
+read refuses rather than being skipped. A manifest that mixes line endings allows a valid no-op but
+refuses an actual rewrite, where an inline document is normalized to LF.
+[AD-31](ARCHITECTURE.md#ad-31-the-reconcile-rewriter-supports-a-declared-frontmatter-subset) owns
+the manifest spellings the rewriter supports.
+
+Each of these refusals exits 2 before staging, with no human or JSON success output, and applies
+to `--dry-run` as well. Output names each changed node by its own Markdown path, one record per
+node and ref, and names only the nodes whose edges actually changed: a node another writer
+acknowledged before the fresh read is not reported, even when it shares its manifest and ref with
+one that is.
+
 ## Automatic recovery
 
 A real reconcile checks for recovery immediately after config and lock setup, before loading the
@@ -114,9 +133,12 @@ or the run found orphaned artifacts, reconcile reports them on stderr and exits 
 the lattice, planning, or writing, since planning against a tree that was never fully restored
 would reconcile from unrecovered bytes.
 
-The external-downstream refusal is later than this recovery and load path. A real run may restore
-an outstanding journal and persist an eligible load-cache update before destination resolution
-refuses an external edge. The refusal guarantees no fresh-read rewrite planning or staging.
+Recovery never parses a manifest. A manifest named in the journal is classified by its recorded
+fingerprints like any other destination, so a manifest edited after capture into bytes matching
+neither recorded image is preserved. Under a `prepared` journal it is reported unresolved, and
+automatic recovery stops before loading the lattice. Under a `committed` journal cleanup finishes
+and the manifest keeps its bytes, and the next lattice load refuses it with its ordinary error if
+it is malformed. Recovery does not repair a manifest corrupted after capture.
 `--dry-run` remains namespace- and cache-read-only: it performs neither recovery nor cache
 persistence.
 
