@@ -324,6 +324,26 @@ def test_render_config_quotes_a_selector_yaml_would_read_as_an_alias():
     assert _load(render_config((".",), ("**/*.md",), None)).link_sources == ["**/*.md"]
 
 
+def test_generated_check_and_lint_hooks_always_run_without_filenames():
+    # GTX-909: .doc-lattice.yml and sidecar manifests change the lattice both commands load, so
+    # a Markdown filter would skip them on exactly the commit that changed its metadata. Real
+    # pre-commit selection over this block is exercised in test_scaffold_hook_selection.py.
+    scaffold = build_scaffold(("docs",), ("docs/**/*.md",), None, "0.3.0", default_branch="main")
+    hooks = YAML(typ="safe").load(scaffold.precommit_text)[0]["hooks"]
+
+    assert hooks[:2] == [
+        {
+            "id": f"doc-lattice-{command}",
+            "name": f"doc-lattice {command}",
+            "entry": f"uvx --python 3.13 --from doc-lattice==0.3.0 doc-lattice {command}",
+            "language": "system",
+            "always_run": True,
+            "pass_filenames": False,
+        }
+        for command in ("check", "lint")
+    ]
+
+
 def test_generated_gates_run_links_as_an_always_run_hook_and_an_annotated_ci_step():
     scaffold = build_scaffold(("docs",), ("docs/**/*.md",), None, "0.3.0", default_branch="main")
     hooks = YAML(typ="safe").load(scaffold.precommit_text)[0]["hooks"]
