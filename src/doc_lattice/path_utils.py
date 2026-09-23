@@ -50,7 +50,8 @@ def format_path_for_display(path: str | Path) -> str:
     of argued. See AD-34 for the raw-path-versus-display-path boundary this sits on.
 
     Callers apply this where a path enters a human-facing message, never to the path they then
-    open, compare, or write. Machine channels keep their own encoders.
+    open, compare, or write. Machine channels keep their own encoders, except the
+    ``links --list-sources`` output recorded in AD-45.
 
     A ``str`` is accepted alongside a ``Path`` because several sinks hold a path that was
     recorded rather than resolved: a journal entry's own ``destination`` or ``before_path``

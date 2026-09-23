@@ -1314,12 +1314,14 @@ the network-sourced Linear data and `init` input it was written for, and its con
 unchanged.
 
 **Decision:** Escaping happens at message construction. `path_utils.format_path_for_display`
-returns exactly `repr(str(path))` on the active supported interpreter, and every human-facing sink
-that names a path calls it while building the message. The raw `Path` remains the value the engine
-opens, compares, and writes; the display spelling exists only for text a person reads. Machine
-channels keep their own encoders: JSON output and the GitHub annotation `file=` value are
-deliberately excluded, because substituting a display spelling into an annotation's path breaks
-the attachment semantics GitHub resolves it against.
+accepts a `Path` or a path already held as `str` and returns exactly `repr(str(path))` on the
+active supported interpreter. Every human-facing sink that names a path calls it while building
+the message. The raw input remains in its existing representation for filesystem and machine use;
+recorded text is not routed through `Path()` merely for display. Machine channels keep their own
+encoders, except the `links --list-sources` output recorded in
+[AD-45](#ad-45-the-link-gate-is-its-own-command-over-its-own-source-set-reading-the-engines-inventory).
+JSON output and the GitHub annotation `file=` value retain their own encoders; substituting a
+display spelling into an annotation path would break GitHub's attachment semantics.
 
 The spelling is pinned to a single expression rather than a project-owned codec because
 `str.__repr__` is already injective, and injectivity is what turns "no two filenames render alike"
