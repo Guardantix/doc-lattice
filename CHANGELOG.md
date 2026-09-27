@@ -6,6 +6,15 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Changed
+
+- `sidecar_coverage.select` and `sidecar_coverage.exclude` now refuse an exactly repeated selector
+  at config load with `CONFIG_ERROR`, naming the selector and both entries, even when two
+  exclusions give different reasons. A configuration that repeated one used to load. To migrate,
+  delete the later entry, and merge its reason into the kept exclusion if it carried one worth
+  keeping. Selectors that differ in spelling are unaffected even when they match the same files.
+  See [Sidecar coverage](README.md#sidecar-coverage) and [AD-51](ARCHITECTURE.md#ad-51-a-document-another-tool-owns-is-enrolled-by-a-sidecar-manifest-and-its-metadata-never-enters-the-file).
+
 ## [7.4.0] - 2026-09-23
 
 ### Changed
