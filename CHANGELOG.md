@@ -15,6 +15,13 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   keeping. Selectors that differ in spelling are unaffected even when they match the same files.
   See [Sidecar coverage](README.md#sidecar-coverage) and [AD-51](ARCHITECTURE.md#ad-51-a-document-another-tool-owns-is-enrolled-by-a-sidecar-manifest-and-its-metadata-never-enters-the-file).
 
+- A `sidecar_manifests` entry that contains a backslash, or is absolute or drive-prefixed such as
+  `/x.yml`, `C:/x.yml`, or `C:x.yml`, is now refused at config load with `CONFIG_ERROR` naming
+  the entry's index and spelling. Earlier 7.x releases accepted such an entry. To fix one, rewrite
+  it as a path relative to the project root with `/` separators: `meta/nodes.yml` rather than
+  `meta\nodes.yml` or `/abs/project/meta/nodes.yml`. A leading `./` and any file extension remain
+  accepted. See [Sidecar manifests](README.md#sidecar-manifests).
+
 ## [7.4.0] - 2026-09-23
 
 ### Changed

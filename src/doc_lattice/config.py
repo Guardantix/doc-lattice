@@ -32,7 +32,12 @@ from .link_selectors import (
     selector_prunes_path,
     validate_link_selector,
 )
-from .path_utils import format_path_for_display, safe_resolve
+from .path_utils import (
+    RelativeSpellingDefect,
+    format_path_for_display,
+    relative_spelling_defect,
+    safe_resolve,
+)
 from .text_utils import describe_first_control_char
 from .validation_render import format_validation_error
 from .yaml_boundary import YAML_LOAD_ERRORS, SafeYamlLoader
@@ -60,6 +65,10 @@ _CACHE_KEY_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
 _ROOT_LOCATION = "<config>"
 _BINDING_LAYERS_KEY = "binding_layers"
 SIDECAR_MANIFESTS_KEY = "sidecar_manifests"
+_MANIFEST_SPELLING_PROBLEMS: dict[RelativeSpellingDefect, str] = {
+    "backslash": "uses a backslash; separate segments with '/'",
+    "absolute": "is absolute; write it relative to the project root",
+}
 SIDECAR_COVERAGE_KEY = "sidecar_coverage"
 # The nested coverage keys, exported for the same reason the link keys are: the module that
 # enforces the policy names them in its diagnostics, and a key spelled twice can drift into a
@@ -433,9 +442,12 @@ class Config(BaseModel):
     def _validate_sidecar_manifests(cls, value: list[str]) -> list[str]:
         """Reject a declared-but-empty manifest list, and an entry that cannot name a file.
 
-        Entries are exact paths with no glob syntax, so nothing here expands or matches them.
-        Whether each one exists, is a regular file, and stays inside the project is a question
-        about the filesystem, which ``sidecar_manifest`` answers when it reads the manifests.
+        Entries are exact paths with no glob syntax, so nothing here expands or matches them. An
+        entry is spelled relative to the project root in POSIX form, the lexical rule a record
+        path takes, and keeps its spelling verbatim: a leading ``./`` is allowed and no file
+        suffix is required, since the manifest parser validates what the file holds. Whether each
+        one exists, is a regular file, and stays inside the project is a question about the
+        filesystem, which ``sidecar_manifest`` answers when it reads the manifests.
         """
         if not value:
             msg = (
@@ -452,6 +464,13 @@ class Config(BaseModel):
                 msg = (
                     f"{SIDECAR_MANIFESTS_KEY} entry {index} must not contain a control "
                     f"character; found {control}"
+                )
+                raise ValueError(msg)
+            spelling_defect = relative_spelling_defect(entry)
+            if spelling_defect is not None:
+                msg = (
+                    f"{SIDECAR_MANIFESTS_KEY} entry {index} {format_path_for_display(entry)} "
+                    f"{_MANIFEST_SPELLING_PROBLEMS[spelling_defect]}"
                 )
                 raise ValueError(msg)
         return value

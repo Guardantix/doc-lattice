@@ -1,5 +1,6 @@
 """Tests for the selector grammar the link source keys share."""
 
+import re
 import sys
 from fnmatch import fnmatchcase
 
@@ -35,9 +36,6 @@ def test_valid_selectors_split_into_segments(entry, segments):
     [
         ("", "is empty"),
         ("\x1bdocs/*.md", "control character"),
-        ("docs\\guide.md", "backslash"),
-        ("/etc/*.md", "is absolute"),
-        ("C:docs/*.md", "is absolute"),
         ("docs/", "ends in a separator"),
         ("docs//guide.md", "empty segment"),
         ("./guide.md", "'.' or '..' segment"),
@@ -49,6 +47,28 @@ def test_valid_selectors_split_into_segments(entry, segments):
 )
 def test_invalid_selectors_name_the_defect(entry, reason):
     with pytest.raises(ValueError, match=reason):
+        validate_link_selector(entry)
+
+
+_BACKSLASH = "contains a backslash; '/' is the only separator"
+_ABSOLUTE = "is absolute; a selector is relative to the project root"
+
+
+@pytest.mark.parametrize(
+    ("entry", "predicate"),
+    [
+        pytest.param("docs\\*.md", _BACKSLASH, id="backslash"),
+        pytest.param("/etc/*.md", _ABSOLUTE, id="posix-absolute"),
+        pytest.param("//server/share/*.md", _ABSOLUTE, id="posix-unc"),
+        pytest.param("C:/docs/*.md", _ABSOLUTE, id="drive-absolute"),
+        pytest.param("C:docs/*.md", _ABSOLUTE, id="drive-relative"),
+        pytest.param("C:\\docs\\*.md", _BACKSLASH, id="backslash-before-absolute"),
+        # The control-character check still runs first, ahead of the shared spelling check.
+        pytest.param("\x1b/etc/*.md", "contains a control character", id="control-first"),
+    ],
+)
+def test_spelling_defects_keep_their_exact_selector_predicate(entry, predicate):
+    with pytest.raises(ValueError, match=f"^{re.escape(predicate)}$"):
         validate_link_selector(entry)
 
 

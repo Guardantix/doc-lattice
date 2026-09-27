@@ -1377,6 +1377,16 @@ def test_config_reads_declared_manifests_verbatim_without_opening_them(tmp_path:
     assert loaded.config_path == tmp_path / ".doc-lattice.yml"
 
 
+@pytest.mark.parametrize("entry", ["./meta/a.yml", "meta/a.yaml", "meta/nodes.txt"])
+def test_config_accepts_a_relative_manifest_entry_with_any_suffix(tmp_path: Path, entry: str):
+    # No suffix rule: the manifest parser, not the entry grammar, decides what the file holds.
+    (tmp_path / ".doc-lattice.yml").write_text(
+        f"lattice_format: 2\nsidecar_manifests: ['{entry}']\n", encoding="utf-8"
+    )
+
+    assert load_config(None, tmp_path).config.sidecar_manifests == [entry]
+
+
 def test_sidecar_config_still_refuses_a_null_compatibility_declaration(tmp_path: Path):
     (tmp_path / ".doc-lattice.yml").write_text(
         "lattice_format: 2\nsidecar_manifests: [nodes.yml]\nlegacy_marker_sources:\n",
@@ -1405,6 +1415,34 @@ def test_config_treats_an_omitted_key_as_no_manifests(tmp_path: Path):
             '[a.yml, "b\\u0007.yml"]',
             "sidecar_manifests entry 1 must not contain a control character; found U+0007",
             id="control-character",
+        ),
+        pytest.param(
+            "[a.yml, 'meta\\a.yml']",
+            "sidecar_manifests entry 1 'meta\\\\a.yml' uses a backslash; separate segments "
+            "with '/'",
+            id="backslash",
+        ),
+        pytest.param(
+            "[/x.yml]",
+            "sidecar_manifests entry 0 '/x.yml' is absolute; write it relative to the project root",
+            id="absolute",
+        ),
+        pytest.param(
+            "['C:/x.yml']",
+            "sidecar_manifests entry 0 'C:/x.yml' is absolute; write it relative to the project "
+            "root",
+            id="drive-absolute",
+        ),
+        pytest.param(
+            "['C:x.yml']",
+            "sidecar_manifests entry 0 'C:x.yml' is absolute; write it relative to the project "
+            "root",
+            id="drive-relative",
+        ),
+        pytest.param(
+            "['C:\\x.yml']",
+            "sidecar_manifests entry 0 'C:\\\\x.yml' uses a backslash",
+            id="backslash-before-absolute",
         ),
     ],
 )

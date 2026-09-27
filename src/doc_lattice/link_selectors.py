@@ -28,9 +28,8 @@ other than what was written is how a mandatory gate ends up green over the wrong
 
 import re
 from fnmatch import fnmatchcase
-from pathlib import PureWindowsPath
 
-from .path_utils import format_path_for_display
+from .path_utils import RelativeSpellingDefect, format_path_for_display, relative_spelling_defect
 from .text_utils import strip_control_chars
 
 SELECTOR_SEPARATOR = "/"
@@ -40,6 +39,10 @@ RECURSIVE_SEGMENT = "**"
 LINK_SOURCES_KEY = "link_sources"
 LEGACY_MARKER_SOURCES_KEY = "legacy_marker_sources"
 _DOT_SEGMENTS = frozenset({".", ".."})
+_SPELLING_DEFECT_PREDICATES: dict[RelativeSpellingDefect, str] = {
+    "backslash": "contains a backslash; '/' is the only separator",
+    "absolute": "is absolute; a selector is relative to the project root",
+}
 # One pass over the text, because each replacement introduces a bracket of its own: a sequence
 # of per-character replacements is correct only while ``[`` is handled first, and that ordering
 # is an invariant nothing enforces. A single substitution never revisits what it wrote.
@@ -70,12 +73,9 @@ def validate_link_selector(entry: str) -> tuple[str, ...]:
     if strip_control_chars(entry) != entry:
         msg = "contains a control character"
         raise ValueError(msg)
-    if "\\" in entry:
-        msg = "contains a backslash; '/' is the only separator"
-        raise ValueError(msg)
-    if entry.startswith(SELECTOR_SEPARATOR) or PureWindowsPath(entry).drive:
-        msg = "is absolute; a selector is relative to the project root"
-        raise ValueError(msg)
+    spelling_defect = relative_spelling_defect(entry)
+    if spelling_defect is not None:
+        raise ValueError(_SPELLING_DEFECT_PREDICATES[spelling_defect])
     if entry.endswith(SELECTOR_SEPARATOR):
         msg = "ends in a separator; name the path itself, without a trailing separator"
         raise ValueError(msg)

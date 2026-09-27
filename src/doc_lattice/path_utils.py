@@ -1,6 +1,10 @@
 """Path handling utilities."""
 
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
+from typing import Literal
+
+# The lexical defects ``relative_spelling_defect`` reports, in the order it checks them.
+RelativeSpellingDefect = Literal["backslash", "absolute"]
 
 
 def safe_resolve(
@@ -80,3 +84,30 @@ def format_path_for_display(path: str | Path) -> str:
         than raised on, and printable non-ASCII preserved verbatim.
     """
     return repr(str(path))
+
+
+def relative_spelling_defect(path: str) -> RelativeSpellingDefect | None:
+    """Report the first lexical defect in a path declared relative to the project root.
+
+    A backslash is checked first and is refused rather than read as a separator, so a declaration
+    is accepted or rejected identically wherever it runs. A POSIX absolute spelling and a drive
+    prefix are then both reported as ``"absolute"`` on every platform: on Windows the join onto
+    the project root would read ``C:/x`` or ``C:x`` as absolute, so the same declaration would
+    otherwise be valid, with a different identity, depending on the host.
+
+    The check is pure and judges the string as written, since resolving first would normalize
+    away the spelling a caller keeps as identity. It raises nothing: each caller owns its other
+    checks, their order around this one, and the wording and error type of every refusal.
+
+    Args:
+        path: The path as the configuration or a record declared it.
+
+    Returns:
+        ``"backslash"`` or ``"absolute"`` for the first defect found, or ``None`` when the
+        spelling has neither.
+    """
+    if "\\" in path:
+        return "backslash"
+    if path.startswith("/") or PureWindowsPath(path).drive:
+        return "absolute"
+    return None
