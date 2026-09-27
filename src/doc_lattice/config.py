@@ -111,6 +111,32 @@ def _require_nonblank(kind: str, value: str, info: ValidationInfo) -> str:
     return value
 
 
+def _refuse_repeated_spellings(key: str, spellings: list[str], noun: str, kept: str) -> None:
+    """Refuse a coverage list that declares the same exact spelling twice, naming both entries.
+
+    Identity is exact equality of the decoded string: no normalization, case folding, or glob
+    expansion, so two spellings that differ but match alike are distinct declarations.
+
+    Args:
+        key: The dotted configuration key whose entries are compared.
+        spellings: Each entry's compared spelling, in declaration order.
+        noun: What the spelling is, as the message names it.
+        kept: What the remedy tells the author to keep one of.
+
+    Raises:
+        ValueError: If a spelling repeats, naming the first two positions that declare it.
+    """
+    first_indices: dict[str, int] = {}
+    for index, spelling in enumerate(spellings):
+        first_index = first_indices.setdefault(spelling, index)
+        if first_index != index:
+            msg = (
+                f"{key}.{first_index} and {key}.{index} both name {noun} "
+                f"{format_path_for_display(spelling)}; keep one {kept} for this {noun}"
+            )
+            raise ValueError(msg)
+
+
 class CoverageExemption(BaseModel):
     """One exact selected path that sidecar coverage may leave uncovered."""
 
@@ -198,20 +224,31 @@ class SidecarCoverage(BaseModel):
     @field_validator("select")
     @classmethod
     def _validate_select(cls, value: list[str]) -> list[str]:
-        """Require selectors that the shared selector grammar can read."""
+        """Require readable selectors, none repeated exactly.
+
+        The repeat is refused here rather than in the shared ``_validate_selectors``, which
+        also serves ``link_sources`` and ``legacy_marker_sources`` and keeps accepting it.
+        """
         if not value:
             msg = f"{SIDECAR_COVERAGE_SELECT_KEY} is declared but names no selector"
             raise ValueError(msg)
         _validate_selectors(SIDECAR_COVERAGE_SELECT_KEY, value)
+        _refuse_repeated_spellings(SIDECAR_COVERAGE_SELECT_KEY, value, "selector", "entry")
         return value
 
     @field_validator("exclude")
     @classmethod
     def _validate_exclude(cls, value: list[CoverageExclusion]) -> list[CoverageExclusion]:
-        """Refuse a declared exclusion list that names nothing."""
+        """Refuse an empty list or two exclusions with the same exact selector."""
         if not value:
             msg = f"{SIDECAR_COVERAGE_EXCLUDE_KEY} is declared but names no exclusion"
             raise ValueError(msg)
+        _refuse_repeated_spellings(
+            SIDECAR_COVERAGE_EXCLUDE_KEY,
+            [entry.select for entry in value],
+            "selector",
+            "exclusion",
+        )
         return value
 
     @field_validator("exempt")
@@ -221,17 +258,12 @@ class SidecarCoverage(BaseModel):
         if not value:
             msg = f"{SIDECAR_COVERAGE_EXEMPT_KEY} is declared but names no exemption"
             raise ValueError(msg)
-        first_indices: dict[str, int] = {}
-        for index, entry in enumerate(value):
-            first_index = first_indices.get(entry.path)
-            if first_index is not None:
-                msg = (
-                    f"{SIDECAR_COVERAGE_EXEMPT_KEY}.{first_index} and "
-                    f"{SIDECAR_COVERAGE_EXEMPT_KEY}.{index} both name path "
-                    f"{format_path_for_display(entry.path)}; keep one exemption for this path"
-                )
-                raise ValueError(msg)
-            first_indices[entry.path] = index
+        _refuse_repeated_spellings(
+            SIDECAR_COVERAGE_EXEMPT_KEY,
+            [entry.path for entry in value],
+            "path",
+            "exemption",
+        )
         return value
 
     @model_validator(mode="after")

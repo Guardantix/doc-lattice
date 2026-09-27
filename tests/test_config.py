@@ -1075,6 +1075,80 @@ def test_config_preserves_distinct_sidecar_exemption_spellings_and_reasons(tmp_p
     ]
 
 
+@pytest.mark.parametrize(
+    ("block", "key", "selector", "kept"),
+    [
+        pytest.param(
+            "  select: ['skills/**/*.md', 'docs/*.md', 'skills/**/*.md']\n",
+            "sidecar_coverage.select",
+            "skills/**/*.md",
+            "entry",
+            id="select",
+        ),
+        pytest.param(
+            "  select: ['skills/**/*.md']\n"
+            "  exclude:\n"
+            "    - {select: '**/node_modules', reason: first}\n"
+            "    - {select: 'vendor', reason: between}\n"
+            "    - {select: '**/node_modules', reason: first}\n",
+            "sidecar_coverage.exclude",
+            "**/node_modules",
+            "exclusion",
+            id="exclude-identical-reasons",
+        ),
+        pytest.param(
+            "  select: ['skills/**/*.md']\n"
+            "  exclude:\n"
+            "    - {select: '**/node_modules', reason: first}\n"
+            "    - {select: 'vendor', reason: between}\n"
+            "    - {select: '**/node_modules', reason: second}\n",
+            "sidecar_coverage.exclude",
+            "**/node_modules",
+            "exclusion",
+            id="exclude-different-reasons",
+        ),
+    ],
+)
+def test_config_refuses_duplicate_sidecar_coverage_selectors(
+    tmp_path: Path, block: str, key: str, selector: str, kept: str
+):
+    (tmp_path / ".doc-lattice.yml").write_text(
+        "lattice_format: 2\nsidecar_coverage:\n" + block, encoding="utf-8"
+    )
+
+    with pytest.raises(ConfigError) as info:
+        load_config(None, tmp_path)
+
+    assert info.value.code == "CONFIG_ERROR"
+    assert (
+        f"{key}.0 and {key}.2 both name selector {format_path_for_display(selector)}; "
+        f"keep one {kept} for this selector"
+    ) in str(info.value)
+
+
+def test_config_preserves_distinct_sidecar_coverage_selector_spellings(tmp_path: Path):
+    # Both spellings match docs/a.md, but duplicate identity is the declared string: matching is
+    # lexical, so no normalization folds one into the other.
+    (tmp_path / ".doc-lattice.yml").write_text(
+        "lattice_format: 2\n"
+        "sidecar_coverage:\n"
+        "  select: ['docs/a.md', 'docs/[a].md']\n"
+        "  exclude:\n"
+        "    - {select: 'docs/a.md', reason: first}\n"
+        "    - {select: 'docs/[a].md', reason: same file}\n",
+        encoding="utf-8",
+    )
+
+    coverage = load_config(None, tmp_path).config.sidecar_coverage
+
+    assert coverage is not None
+    assert coverage.select == ["docs/a.md", "docs/[a].md"]
+    assert coverage.exclude == [
+        CoverageExclusion(select="docs/a.md", reason="first"),
+        CoverageExclusion(select="docs/[a].md", reason="same file"),
+    ]
+
+
 def test_config_keeps_an_exemption_no_exclusion_prunes(tmp_path: Path):
     (tmp_path / ".doc-lattice.yml").write_text(
         "lattice_format: 2\n"

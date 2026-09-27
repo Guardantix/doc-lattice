@@ -7,7 +7,12 @@ from pathlib import Path
 
 import pytest
 
-from doc_lattice.config import CoverageExclusion, CoverageExemption, SidecarCoverage
+from doc_lattice.config import (
+    CoverageExclusion,
+    CoverageExemption,
+    SidecarCoverage,
+    load_config,
+)
 from doc_lattice.error_types import CoverageError
 from doc_lattice.sidecar_coverage import enforce_coverage
 
@@ -36,7 +41,7 @@ def _policy(select=("*.md",), exempt=(), exclude=()):
 @pytest.mark.parametrize(
     "selectors",
     [
-        ["*.md", "**/*.md", "a*.md", "*.md"],
+        ["*.md", "**/*.md", "a*.md"],
         ["a*.md", "*.md", "**/*.md"],
     ],
 )
@@ -235,6 +240,22 @@ def test_an_exclusion_removes_an_otherwise_uncovered_file(tmp_path):
         _policy(["**/*.md"], exclude=["vendor"]),
         {tmp_path / "covered.md"},
     )
+
+
+def test_a_loaded_exclusion_that_prunes_nothing_is_accepted_when_coverage_runs(tmp_path):
+    # The unmatched exclusion must survive the loaded configuration's own walk, not only parsing.
+    (tmp_path / ".doc-lattice.yml").write_text(
+        "lattice_format: 2\n"
+        "sidecar_coverage:\n"
+        "  select: ['*.md']\n"
+        "  exclude: [{select: '**/node_modules', reason: absent from a clean clone}]\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "covered.md").write_text("# Covered\n")
+    coverage = load_config(None, tmp_path).config.sidecar_coverage
+
+    assert coverage is not None
+    enforce_coverage(tmp_path, coverage, {tmp_path / "covered.md"})
 
 
 @pytest.mark.parametrize("kind", ["escape", "dangling", "directory", "fifo", "loop"])

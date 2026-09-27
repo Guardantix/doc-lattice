@@ -3140,6 +3140,16 @@ collapsing them would let one spelling hide another obligation.
   validity depend on whether a dependency tree is installed. An exemption pruned by a declared
   exclusion is refused at config load instead. Both declarations are lexical, so their conflict
   can be decided at the configuration keys, including when the exclusion prunes an ancestor.
+- An exact repeat in `select` or in `exclude` is refused at config load (GTX-865), as a repeated
+  exemption is, though not for the exemption's reason: a repeated `select` imposes the same
+  obligation twice, and a repeated exclusion prunes nothing its first copy does not, so neither
+  is a silent grant. Each is refused because it declares nothing new, leaving a possible editing
+  mistake as its only content. Refusing only `select` would have removed the one real cost, a
+  second selection walk, while keeping the mistake a repeated exclusion can hide. Identity is the
+  exact decoded string, an exclusion's `select` whatever its reason, since matching is lexical.
+  The check lives in the coverage validators; the shared selector walk still accepts a repeat for
+  `link_sources` and `legacy_marker_sources`. The acceptance of an exclusion that prunes nothing,
+  above, is unchanged.
 - The uncovered-file remedy withholds `exclude`: removing an obligation from scope does not
   repair missing enrollment. Traversal and invalid-path refusals can offer exclusion because
   pruning can prevent those refusals. An uncovered file is exit 2 rather than exit 1 (AD-1): the
