@@ -19,14 +19,19 @@ directory, so moving a manifest never re-points its records (AD-51).
 from collections.abc import Iterator, Mapping, Sequence
 from collections.abc import Set as AbstractSet
 from dataclasses import dataclass
-from pathlib import Path, PurePosixPath, PureWindowsPath
+from pathlib import Path
 from typing import Any
 
 from pydantic import ValidationError
 
 from .error_types import ManifestError, RegistrationConflictError
 from .model import ExternalIdentity, NodeMeta, format_record_location
-from .path_utils import format_path_for_display, safe_resolve
+from .path_utils import (
+    RelativeSpellingDefect,
+    format_path_for_display,
+    relative_spelling_defect,
+    safe_resolve,
+)
 from .text_utils import describe_first_control_char
 from .validation_render import format_validation_error
 from .yaml_boundary import YAML_LOAD_ERRORS, SafeYamlLoader
@@ -41,6 +46,10 @@ _LOADER = SafeYamlLoader(parser="pure")
 _NODES_KEY = "nodes"
 _RECORD_KEYS = frozenset({"path", "meta"})
 _MARKDOWN_SUFFIX = ".md"
+_SPELLING_PROBLEMS: dict[RelativeSpellingDefect, str] = {
+    "backslash": "uses a backslash; separate segments with '/'",
+    "absolute": "is absolute; write it relative to the project root",
+}
 # Rendered in place of a field path when `NodeMeta` reports no location, which a `meta` that is
 # not a mapping reaches.
 _META_ROOT_LABEL = "<meta>"
@@ -471,15 +480,11 @@ def _check_path_spelling(declared_path: str, where: str) -> None:
     """
     problem = None
     control = describe_first_control_char(declared_path)
+    spelling_defect = relative_spelling_defect(declared_path)
     if control is not None:
         problem = f"contains a control character ({control})"
-    elif "\\" in declared_path:
-        problem = "uses a backslash; separate segments with '/'"
-    elif PurePosixPath(declared_path).is_absolute() or PureWindowsPath(declared_path).drive:
-        # A drive prefix is refused on every platform, as the selector grammar refuses it: on
-        # Windows the join onto the project root would read `C:/x.md` as absolute, so the same
-        # manifest would otherwise be valid, with a different identity, depending on the host.
-        problem = "is absolute; write it relative to the project root"
+    elif spelling_defect is not None:
+        problem = _SPELLING_PROBLEMS[spelling_defect]
     elif not declared_path.endswith(_MARKDOWN_SUFFIX):
         problem = f"does not name a '{_MARKDOWN_SUFFIX}' file"
     if problem is not None:
@@ -490,8 +495,9 @@ def _check_path_spelling(declared_path: str, where: str) -> None:
 def _resolve_regular_file(declared: str, project_root: Path, *, subject: str, remedy: str) -> Path:
     """Resolve a declared path inside the project and require an existing regular file.
 
-    Manifests and record targets share this rule (AD-51). An absolute ``declared`` replaces
-    ``project_root`` in the join, so both spellings reach the same containment check.
+    Manifests and record targets share this rule (AD-51). Both callers refuse an absolute
+    spelling lexically before this runs; were one to arrive, it would replace ``project_root`` in
+    the join and still reach the same containment check.
 
     Args:
         declared: The path as the configuration or the record spelled it.

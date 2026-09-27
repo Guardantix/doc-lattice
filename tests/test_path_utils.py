@@ -4,7 +4,11 @@ from pathlib import Path
 
 import pytest
 
-from doc_lattice.path_utils import format_path_for_display, safe_resolve
+from doc_lattice.path_utils import (
+    format_path_for_display,
+    relative_spelling_defect,
+    safe_resolve,
+)
 
 
 def test_safe_resolve_within_root(tmp_path):
@@ -193,3 +197,37 @@ class TestFormatPathForDisplay:
     def test_directory_path_renders_as_one_quoted_string(self):
         rendered = format_path_for_display(Path("docs/sub dir/a\x1bb.md"))
         assert rendered == "'docs/sub dir/a\\x1bb.md'"
+
+
+@pytest.mark.parametrize(
+    "path",
+    [
+        "a.md",
+        "docs/guide.md",
+        "./meta/a.yml",
+        "meta/nodes.txt",
+        "src/../README.md",
+        "notes[1.md",
+        "docs/a:b.md",
+    ],
+)
+def test_relative_spelling_defect_accepts_clean_relative_spellings(path):
+    assert relative_spelling_defect(path) is None
+
+
+@pytest.mark.parametrize(
+    ("path", "defect"),
+    [
+        pytest.param("meta\\a.yml", "backslash", id="backslash"),
+        pytest.param("/meta/a.yml", "absolute", id="posix-absolute"),
+        pytest.param("//server/share/a.yml", "absolute", id="posix-unc"),
+        pytest.param("C:/meta/a.yml", "absolute", id="drive-absolute"),
+        pytest.param("C:meta/a.yml", "absolute", id="drive-relative"),
+        pytest.param("\\\\server\\share\\a.yml", "backslash", id="windows-unc"),
+        # Both defects: the backslash is reported first, whichever spelling reaches it.
+        pytest.param("C:\\meta\\a.yml", "backslash", id="backslash-before-drive"),
+        pytest.param("/meta\\a.yml", "backslash", id="backslash-before-absolute"),
+    ],
+)
+def test_relative_spelling_defect_reports_the_first_defect(path, defect):
+    assert relative_spelling_defect(path) == defect

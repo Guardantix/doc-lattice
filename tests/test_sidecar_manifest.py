@@ -612,10 +612,40 @@ def _record_error(tmp_path: Path, records: str) -> str:
             id="drive-prefixed",
         ),
         pytest.param(
+            "  - {path: 'C:skills/b.md', meta: {id: b}}\n",
+            "C:skills/b.md",
+            "'path' that is absolute; write it relative to the project root",
+            id="drive-relative",
+        ),
+        pytest.param(
+            "  - {path: '//server/share/b.md', meta: {id: b}}\n",
+            "//server/share/b.md",
+            "'path' that is absolute; write it relative to the project root",
+            id="unc",
+        ),
+        pytest.param(
+            "  - {path: /abs/skills/b.txt, meta: {id: b}}\n",
+            "/abs/skills/b.txt",
+            "'path' that is absolute; write it relative to the project root",
+            id="absolute-before-suffix",
+        ),
+        pytest.param(
             "  - {path: 'skills\\b.md', meta: {id: b}}\n",
             "skills\\b.md",
-            "uses a backslash",
+            "'path' that uses a backslash; separate segments with '/'",
             id="backslash",
+        ),
+        pytest.param(
+            "  - {path: 'C:\\skills\\b.md', meta: {id: b}}\n",
+            "C:\\skills\\b.md",
+            "'path' that uses a backslash; separate segments with '/'",
+            id="backslash-before-absolute",
+        ),
+        pytest.param(
+            '  - {path: "/skills/\\u001bb.md", meta: {id: b}}\n',
+            "/skills/\x1bb.md",
+            "'path' that contains a control character (U+001B at index 8)",
+            id="control-before-absolute",
         ),
         pytest.param(
             '  - {path: "skills/\\u001bb.md", meta: {id: b}}\n',
